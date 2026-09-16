@@ -494,6 +494,39 @@ pub fn wslconfig_get() -> WslConfigInfo {
     WslConfigInfo { path: Some(p.display().to_string()), content }
 }
 
+#[derive(Serialize)]
+pub struct LibraryEntry {
+    pub model_id: String,
+    pub size_mb: u64,
+    pub files: usize,
+}
+
+/// List models present in the WSL HF cache (~/.cache/huggingface/hub).
+#[tauri::command]
+pub fn library_list(state: State<'_, Arc<AppState>>) -> Vec<LibraryEntry> {
+    let st = (*state).clone();
+    let distro = st.config().distro;
+    // Hub cache dirs are `models--owner--name`; strip the prefix.
+    let out = crate::wsl::run_script(
+        &distro,
+        "for d in ~/.cache/huggingface/hub/models--*; do [ -d \"$d\" ] || continue; raw=${d##*/models--}; owner=${raw%%--*}; rest=${raw#*--}; name=\"$owner/$rest\"; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done",
+    );
+    let mut out_v = Vec::new();
+    for line in out.stdout.lines() {
+        let mut it = line.split('|');
+        let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        out_v.push(LibraryEntry {
+            model_id: model_id.to_string(),
+            size_mb: size.parse().unwrap_or(0),
+            files: files.parse().unwrap_or(0),
+        });
+    }
+    out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
+    out_v
+}
+
 // ---------------------------------------------------------------------------
 // GPU status (dashboard polling)
 // ---------------------------------------------------------------------------

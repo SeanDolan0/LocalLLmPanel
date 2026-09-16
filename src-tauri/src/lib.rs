@@ -30,6 +30,7 @@ pub fn run() {
             commands::servers_logs,
             commands::servers_metrics,
             commands::servers_chat,
+            commands::library_list,
             commands::settings_get,
             commands::settings_set,
             commands::wslconfig_get,
