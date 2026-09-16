@@ -60,6 +60,23 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
     }
 }
 
+/// Like [`run_script`] but as the distro's `root` user (no sudo password
+/// needed). Used to write sudoers rules and do other root-only setup.
+pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.env("WSL_UTF8", "1");
+    cmd.args(["-d", distro, "--user", "root", "--", "bash", "-lc", script]);
+    match cmd.output() {
+        Ok(o) => RunOutput {
+            ok: o.status.success(),
+            code: o.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        },
+        Err(e) => RunOutput { ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {e}") },
+    }
+}
+
 /// Run a script synchronously, streaming each output line to `on_line`.
 pub fn run_script_stream(
     distro: &str,

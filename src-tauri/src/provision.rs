@@ -40,7 +40,9 @@ pub fn provision_all(
     let mut phases = Vec::new();
 
     phases.push(phase_distro(distro, &mut on_log)?);
+    phases.push(phase_sudo(distro, &mut on_log)?);
     phases.push(phase_apt(distro, &mut on_log)?);
+    phases.push(phase_uv(distro, &mut on_log)?);
     phases.push(phase_venv(distro, venv_dir, &mut on_log)?);
     phases.push(phase_vllm(distro, venv_dir, &mut on_log)?);
     let report = phase_verify(distro, venv_dir, &mut on_log)?;
@@ -70,6 +72,63 @@ fn phase_distro(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Str
         bail!("wsl -d {distro} is not responsive: {}", out.combined());
     }
     Ok("distro".into())
+}
+
+/// Make `sudo` passwordless for the distro's default user. WSL distros
+/// usually require a sudo password; a non-interactive `wsl.exe` shell cannot
+/// answer the prompt, so the app writes a scoped NOPASSWD rule via
+/// `wsl --user root` (root needs no password). Idempotent: does nothing if
+/// passwordless sudo already works.
+fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
+    let probe = wsl::run_script(distro, "sudo -n true 2>/dev/null && echo ok || echo needs");
+    if probe.stdout.trim() == "ok" {
+        on_log("sudo", "passwordless sudo already configured (skipping).");
+        return Ok("sudo".into());
+    }
+    let user = wsl::run_script(distro, "id -un");
+    let user = user.stdout.trim().to_string();
+    if user.is_empty() {
+        bail!("could not determine WSL user for distro {distro}");
+    }
+    on_log("sudo", &format!("configuring passwordless sudo for user '{user}' (via wsl --user root)…"));
+    let script = format!(
+        "echo '{user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/llm-panel-{user} && chmod 440 /etc/sudoers.d/llm-panel-{user} && echo ok"
+    );
+    let out = wsl::run_script_root(distro, &script);
+    if !out.ok || !out.stdout.trim().ends_with("ok") {
+        bail!("sudo config failed: {}", out.combined());
+    }
+    let verify = wsl::run_script(distro, "sudo -n true 2>/dev/null && echo ok || echo needs");
+    if verify.stdout.trim() != "ok" {
+        bail!("passwordless sudo still not working after config: {}", verify.combined());
+    }
+    Ok("sudo".into())
+}
+
+/// Install `uv` inside the distro if missing (host uv is irrelevant — WSL is
+/// a separate Linux). uv makes the big vLLM install dramatically faster and
+/// the plan pins it as the venv/installer of choice. Idempotent.
+fn phase_uv(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
+    let has = wsl::run_script(distro, "command -v uv >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/uv\" ] && echo yes || echo no");
+    if has.stdout.trim() == "yes" {
+        on_log("uv", "uv already installed (skipping).");
+        return Ok("uv".into());
+    }
+    on_log("uv", "installing uv via official installer…");
+    let out = wsl::run_script_stream(
+        distro,
+        "curl -LsSf https://astral.sh/uv/install.sh | sh",
+        |l| on_log("uv", l),
+    );
+    if !out.ok {
+        // curl may be missing (apt phase normally runs first in fresh WSL).
+        // Fall back to apt uv if available, else fail with clear message.
+        let fallback = wsl::run_script(distro, "sudo apt-get install -y -qq uv 2>&1 | tail -1; command -v uv && echo ok");
+        if fallback.stdout.trim() != "ok" {
+            bail!("uv install failed (installer + apt): {}", out.combined());
+        }
+    }
+    Ok("uv".into())
 }
 
 fn phase_apt(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
@@ -114,7 +173,20 @@ if command -v uv >/dev/null 2>&1 || [ -x "$HOME/.local/bin/uv" ]; then
   uv venv --python 3.12 {venv} 2>/dev/null || uv venv {venv}
 else
   echo "uv not found; falling back to python3 -m venv"
-  python3 -m venv {venv}
+  python3 -m venv {venv} || {{ rm -rf {venv}; exit 1; }}
+fi
+# Ubuntu 22.04's python3-venv meta sometimes misses the version-specific
+# package, leaving a pip-less venv. Repair with ensurepip, or apt-install the
+# right python3.*-venv and recreate.
+if ! {venv}/bin/python -m pip --version >/dev/null 2>&1; then
+  echo "venv has no pip; running ensurepip…"
+  if ! {venv}/bin/python -m ensurepip --upgrade >/dev/null 2>&1; then
+    PYM=\$({venv}/bin/python --version | sed 's/Python \\([0-9]*\\.[0-9]*\\).*/python\\1-venv/')
+    echo "ensurepip failed; apt-get installing $PYM…"
+    sudo apt-get install -y -qq "$PYM" >/dev/null 2>&1
+    rm -rf {venv}
+    python3 -m venv {venv}
+  fi
 fi
 {venv}/bin/python --version
 {venv}/bin/python -m pip install --upgrade pip -q
@@ -129,8 +201,11 @@ fi
 }
 
 fn venv_ok(distro: &str, venv_dir: &str) -> bool {
-    let out = wsl::run_script(distro, &format!("{venv}/bin/python --version 2>/dev/null || true", venv = venv_dir));
-    out.stdout.contains("Python 3.")
+    let out = wsl::run_script(
+        distro,
+        &format!("{venv}/bin/python -c 'import sys; print(sys.version.split()[0])' 2>/dev/null && {venv}/bin/python -m pip --version >/dev/null 2>&1 && echo ok || echo bad", venv = venv_dir),
+    );
+    out.stdout.contains("3.") && out.stdout.ends_with("ok")
 }
 
 fn phase_vllm(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {

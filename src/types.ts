@@ -85,6 +85,7 @@ export interface ServerDef {
   max_model_len: number | null;
   quant: string;
   served_model_name: string | null;
+  enforce_eager?: boolean;
   params_b: number | null;
 }
 
@@ -150,6 +151,7 @@ export interface CreateServerInput {
   max_model_len?: number;
   quant?: string;
   served_model_name?: string;
+  enforce_eager?: boolean;
 }
 
 export interface WslConfigInfo {

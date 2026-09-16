@@ -25,8 +25,17 @@ pub struct ServerDef {
     /// "fp16" | "fp8" | "awq" | "gptq"
     pub quant: String,
     pub served_model_name: Option<String>,
+    /// Skip CUDA-graph capture (`--enforce-eager`). WSL2's full-graph
+    /// capture can hang for minutes or stall; eager mode starts reliably.
+    /// Default true; throughput is slightly lower but startup is robust.
+    #[serde(default = "default_true")]
+    pub enforce_eager: bool,
     /// Estimated params (billions) memoized at create time (for VRAM guidance).
     pub params_b: Option<f64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ServerDef {
@@ -266,6 +275,7 @@ mod tests {
             max_model_len: Some(4096),
             quant: "fp16".into(),
             served_model_name: None,
+            enforce_eager: true,
             params_b: None,
         });
         cfg.measured.insert(

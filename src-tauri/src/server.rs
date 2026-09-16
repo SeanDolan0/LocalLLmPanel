@@ -67,8 +67,8 @@ fn launch_script(venv_dir: &str, def: &ServerDef) -> String {
     args.push("--gpu-memory-utilization".into());
     args.push(format!("{:.2}", def.gpu_mem_util));
     if def.task == "embed" {
-        args.push("--task".into());
-        args.push("embed".into());
+        args.push("--runner".into());
+        args.push("pooling".into());
     }
     match def.quant.to_ascii_lowercase().as_str() {
         "fp8" => {
@@ -88,10 +88,18 @@ fn launch_script(venv_dir: &str, def: &ServerDef) -> String {
     let max_len = def.max_model_len.unwrap_or(4096);
     args.push("--max-model-len".into());
     args.push(max_len.to_string());
+    if def.enforce_eager {
+        args.push("--enforce-eager".into());
+    }
     if let Some(served) = &def.served_model_name {
         args.push("--served-model-name".into());
         args.push(shell_quote(served));
     }
+    // vLLM disables pinned-memory/UVA on WSL2 by default (see
+    // vllm/platforms/cuda.py), which crashes the V1 engine with
+    // "UVA is not available". Kernels >= 4.19.121 support it once enabled.
+    let preamble = "export VLLM_WSL2_ENABLE_PIN_MEMORY=1";
+    parts.insert(0, preamble.into());
     parts.push(format!("exec python -m vllm.entrypoints.openai.api_server {}", args.join(" ")));
     parts.join(" && ")
 }
@@ -552,6 +560,7 @@ mod tests {
             max_model_len: Some(2048),
             quant: quant.into(),
             served_model_name: served.map(|s| s.into()),
+            enforce_eager: true,
             params_b: None,
         }
     }
@@ -565,7 +574,7 @@ mod tests {
         assert!(script.contains("--gpu-memory-utilization 0.92"));
         assert!(script.contains("--max-model-len 2048"));
         assert!(script.contains("$$ > ~/llm-lp/.venv/../run/s1.pid"));
-        assert!(!script.contains("--task embed"));
+        assert!(!script.contains("--runner pooling"));
         assert!(!script.contains("--quantization"));
     }
 
@@ -575,7 +584,7 @@ mod tests {
             "~/llm-lp/.venv",
             &def("BAAI/bge-small-en-v1.5", "embed", 8020, "fp8", Some("embedder")),
         );
-        assert!(script.contains("--task embed"));
+        assert!(script.contains("--runner pooling"));
         assert!(script.contains("--quantization fp8"));
         assert!(script.contains("--served-model-name 'embedder'"));
         assert!(script.contains("--max-model-len 2048"));

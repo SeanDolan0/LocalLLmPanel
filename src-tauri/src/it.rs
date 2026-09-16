@@ -94,6 +94,7 @@ fn wsl_it() {
             max_model_len: Some(2048),
             quant: "fp16".into(),
             served_model_name: Some("qwen-0.5b".into()),
+            enforce_eager: true,
             params_b: Some(0.494),
         });
         cfg.servers.push(ServerDef {
@@ -106,6 +107,7 @@ fn wsl_it() {
             max_model_len: Some(512),
             quant: "fp16".into(),
             served_model_name: Some("embedder".into()),
+            enforce_eager: true,
             params_b: Some(0.033),
         });
         cfg.save().expect("save config");

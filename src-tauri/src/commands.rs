@@ -306,6 +306,7 @@ pub struct CreateServerInput {
     pub max_model_len: Option<usize>,
     pub quant: Option<String>,
     pub served_model_name: Option<String>,
+    pub enforce_eager: Option<bool>,
 }
 
 #[tauri::command]
@@ -372,6 +373,7 @@ pub async fn servers_create(
         max_model_len,
         quant,
         served_model_name: input.served_model_name.filter(|s| !s.trim().is_empty()),
+        enforce_eager: input.enforce_eager.unwrap_or(true),
         params_b,
     };
     let mut cfg = st.config.lock().unwrap();
