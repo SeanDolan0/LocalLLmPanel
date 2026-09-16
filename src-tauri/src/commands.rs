@@ -122,13 +122,12 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
 }
 
 #[tauri::command]
-pub async fn provision(app: AppHandle, state: State<'_, Arc<AppState>>, target: Option<String>) -> Result<ProvisionReport, String> {
+pub async fn provision(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<ProvisionReport, String> {
     let st = (*state).clone();
     let app = app.clone();
     let cfg = st.config();
     let distro = cfg.distro.clone();
     let venv = cfg.venv_dir.clone();
-    let _ = target;
     tauri::async_runtime::spawn_blocking(move || {
         let on_log = |phase: &str, line: &str| {
             let _ = app.emit("wsl-log", serde_json::json!({ "phase": phase, "line": line }));
@@ -404,8 +403,12 @@ pub async fn servers_create(
         }
     };
     let params_b = hf::enrich(&st.http, &input.model_id).await.and_then(|s| s.params_b);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let def = ServerDef {
-        id: format!("srv-{}", uuid::Uuid::new_v4().simple()),
+        id: format!("srv-{ts:x}"),
         name: input.name.trim().to_string(),
         model_id: input.model_id,
         task,

@@ -82,25 +82,11 @@ export function fmtGB(n: number | null | undefined): string {
   return `${n.toFixed(2)} GB`;
 }
 
-export function fmtBytesToMB(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—";
-  return `${(n / (1024 * 1024)).toFixed(0)} MB`;
-}
-
 export function fmtContext(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return `${n}`;
-}
-
-export function timeAgo(ms: number | null | undefined): string {
-  if (!ms) return "never";
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
 }
 
 export function statusColor(status: string): string {

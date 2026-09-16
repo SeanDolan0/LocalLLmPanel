@@ -5,13 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::wsl;
 
-/// A single provisioning log line, emitted to the `wsl-log` event.
-#[derive(Debug, Clone, Serialize)]
-pub struct ProvisionLog {
-    pub phase: String,
-    pub line: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisionReport {
     pub phases_completed: Vec<String>,
@@ -22,12 +15,6 @@ pub struct ProvisionReport {
     pub gpu_name: Option<String>,
     pub vram_mb: Option<u64>,
     pub bf16_supported: bool,
-}
-
-/// Run one provisioning phase; streams lines to `on_log`, returns report fields.
-pub enum ProvisionTarget {
-    All,
-    EnvCheck,
 }
 
 /// Full provisioning pipeline. Every phase is idempotent — re-running skips
@@ -276,39 +263,4 @@ fn phase_verify(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str
         bf16_supported,
     };
     Ok(report)
-}
-
-/// Lightweight environment status (no provisioning). Used by `env_status`.
-pub fn env_probe(distro: &str, venv_dir: &str) -> ProvisionReport {
-    let vllm_out = wsl::run_script(
-        distro,
-        &format!("{venv}/bin/python -c 'import vllm; print(vllm.__version__)' 2>/dev/null || true", venv = venv_dir),
-    );
-    let vllm_version = vllm_out.ok.then(|| vllm_out.stdout.trim().to_string());
-    let torch_out = wsl::run_script(
-        distro,
-        &format!(
-            "{venv}/bin/python -c \"import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'n/a'); print(torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)\" 2>/dev/null || true",
-            venv = venv_dir
-        ),
-    );
-    let lines: Vec<&str> = torch_out.stdout.lines().collect();
-    let cuda_available = lines.get(1).map(|s| *s == "True").unwrap_or(false);
-    let gpu_name = lines.get(2).filter(|s| !s.is_empty() && **s != "n/a").map(|s| s.to_string());
-    let bf16_supported = lines.get(3).map(|s| *s == "True").unwrap_or(false);
-    let smi = wsl::run_script(distro, "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1");
-    let mut vram_mb = None;
-    if let Some((_, mem)) = smi.stdout.split_once(',') {
-        vram_mb = mem.trim().split_whitespace().next().and_then(|s| s.parse::<u64>().ok());
-    }
-    ProvisionReport {
-        phases_completed: Vec::new(),
-        distro: distro.to_string(),
-        vllm_version,
-        torch_version: lines.first().map(|s| s.to_string()),
-        cuda_available,
-        gpu_name,
-        vram_mb,
-        bf16_supported,
-    }
 }
