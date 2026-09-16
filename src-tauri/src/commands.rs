@@ -48,36 +48,77 @@ fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
 }
 
 #[tauri::command]
-pub fn env_status(state: State<'_, Arc<AppState>>) -> EnvStatus {
+pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, String> {
     let st = (*state).clone();
-    let cfg = st.config();
-    let distro_detected = crate::wsl::detect_default_distro().unwrap_or_else(|| cfg.distro.clone());
-    let wsl_ok = crate::wsl::run_script(&distro_detected, "echo ok").ok;
-    let report = crate::wsl::run_script(&distro_detected, "cat ~/llm-lp/.provisioned 2>/dev/null || true").stdout.contains("\"provisioned\": true");
-    let gpu = gpu_snapshot(&distro_detected);
-    let (bandwidth, known) = gpu
-        .as_ref()
-        .map(|g| estimate::gpu_bandwidth(&g.name))
-        .unwrap_or((700.0, false));
-    let running = {
-        let servers = st.servers.lock().unwrap();
-        servers.values().filter(|ls| ls.status == crate::state::ServerStatus::Running).count()
-    };
-    let running_weight_gb = server::running_weight_gb(&st);
-    let env_report = provision::env_probe(&distro_detected, &cfg.venv_dir);
-    let apt_based = crate::wsl::is_apt_distro(&distro_detected);
-    EnvStatus {
-        wsl_ok,
-        distro: distro_detected,
-        apt_based,
-        provisioned: report,
-        report: Some(env_report),
-        gpu,
-        servers_running: running,
-        running_weight_gb,
-        gpu_bandwidth_gbs: bandwidth,
-        gpu_bw_known: known,
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = st.config();
+        let distro_detected = crate::wsl::detect_default_distro().unwrap_or_else(|| cfg.distro.clone());
+        let wsl_ok = crate::wsl::run_script(&distro_detected, "echo ok").ok;
+        let prov_out = crate::wsl::run_script(&distro_detected, "cat ~/llm-lp/.provisioned 2>/dev/null || true");
+        let gpu = gpu_snapshot(&distro_detected);
+        if let Some(g) = &gpu {
+            *st.gpu.lock().unwrap() = Some(g.clone());
+        }
+        let (bandwidth, known) = gpu
+            .as_ref()
+            .map(|g| estimate::gpu_bandwidth(&g.name))
+            .unwrap_or((700.0, false));
+        let running = {
+            let servers = st.servers.lock().unwrap();
+            servers.values().filter(|ls| ls.status == crate::state::ServerStatus::Running).count()
+        };
+        let running_weight_gb = server::running_weight_gb(&st);
+        let apt_based = crate::wsl::is_apt_distro(&distro_detected);
+
+        let (provisioned, env_report) = if let Ok(rep) = serde_json::from_str::<ProvisionReport>(&prov_out.stdout) {
+            (true, Some(rep))
+        } else if prov_out.stdout.contains("\"provisioned\": true") {
+            let vllm = prov_out
+                .stdout
+                .split("\"vllm\":")
+                .nth(1)
+                .and_then(|s| s.split('"').nth(1))
+                .map(|s| s.to_string());
+            (
+                true,
+                Some(ProvisionReport {
+                    phases_completed: vec![
+                        "distro".into(),
+                        "sudo".into(),
+                        "apt".into(),
+                        "uv".into(),
+                        "venv".into(),
+                        "vllm".into(),
+                        "verify".into(),
+                    ],
+                    distro: distro_detected.clone(),
+                    vllm_version: vllm,
+                    torch_version: Some("torch (CUDA)".into()),
+                    cuda_available: gpu.is_some(),
+                    gpu_name: gpu.as_ref().map(|g| g.name.clone()),
+                    vram_mb: gpu.as_ref().map(|g| g.vram_total_mb),
+                    bf16_supported: true,
+                }),
+            )
+        } else {
+            (false, None)
+        };
+
+        EnvStatus {
+            wsl_ok,
+            distro: distro_detected,
+            apt_based,
+            provisioned,
+            report: env_report,
+            gpu,
+            servers_running: running,
+            running_weight_gb,
+            gpu_bandwidth_gbs: bandwidth,
+            gpu_bw_known: known,
+        }
+    })
+    .await
+    .map_err(|e| format!("env_status error: {e}"))
 }
 
 #[tauri::command]
@@ -505,28 +546,32 @@ pub struct LibraryEntry {
 
 /// List models present in the WSL HF cache (~/.cache/huggingface/hub).
 #[tauri::command]
-pub fn library_list(state: State<'_, Arc<AppState>>) -> Vec<LibraryEntry> {
+pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<LibraryEntry>, String> {
     let st = (*state).clone();
-    let distro = st.config().distro;
-    // Hub cache dirs are `models--owner--name`; strip the prefix.
-    let out = crate::wsl::run_script(
-        &distro,
-        "for d in ~/.cache/huggingface/hub/models--*; do [ -d \"$d\" ] || continue; raw=${d##*/models--}; owner=${raw%%--*}; rest=${raw#*--}; name=\"$owner/$rest\"; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done",
-    );
-    let mut out_v = Vec::new();
-    for line in out.stdout.lines() {
-        let mut it = line.split('|');
-        let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        out_v.push(LibraryEntry {
-            model_id: model_id.to_string(),
-            size_mb: size.parse().unwrap_or(0),
-            files: files.parse().unwrap_or(0),
-        });
-    }
-    out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
-    out_v
+    tauri::async_runtime::spawn_blocking(move || {
+        let distro = st.config().distro;
+        // Hub cache dirs are `models--owner--name`; strip the prefix.
+        let out = crate::wsl::run_script(
+            &distro,
+            "for d in ~/.cache/huggingface/hub/models--*; do [ -d \"$d\" ] || continue; raw=${d##*/models--}; owner=${raw%%--*}; rest=${raw#*--}; name=\"$owner/$rest\"; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done",
+        );
+        let mut out_v = Vec::new();
+        for line in out.stdout.lines() {
+            let mut it = line.split('|');
+            let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            out_v.push(LibraryEntry {
+                model_id: model_id.to_string(),
+                size_mb: size.parse().unwrap_or(0),
+                files: files.parse().unwrap_or(0),
+            });
+        }
+        out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
+        out_v
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -534,13 +579,17 @@ pub fn library_list(state: State<'_, Arc<AppState>>) -> Vec<LibraryEntry> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn gpu_status(state: State<'_, Arc<AppState>>) -> Option<GpuSnapshot> {
+pub async fn gpu_status(state: State<'_, Arc<AppState>>) -> Result<Option<GpuSnapshot>, String> {
     let st = (*state).clone();
-    let distro = st.config().distro;
-    let snap = gpu_snapshot(&distro);
-    if let Some(s) = snap.clone() {
-        let mut gpu = st.gpu.lock().unwrap();
-        *gpu = Some(s);
-    }
-    snap
+    tauri::async_runtime::spawn_blocking(move || {
+        let distro = st.config().distro;
+        let snap = gpu_snapshot(&distro);
+        if let Some(s) = snap.clone() {
+            let mut gpu = st.gpu.lock().unwrap();
+            *gpu = Some(s);
+        }
+        snap
+    })
+    .await
+    .map_err(|e| e.to_string())
 }

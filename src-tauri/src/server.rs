@@ -352,7 +352,13 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
         let still_alive = c.try_wait().map(|r| r.is_none()).unwrap_or(false);
         if still_alive {
             // 3) Fallback: kill the wsl.exe tree from Windows.
-            let _ = std::process::Command::new("taskkill")
+            let mut cmd = std::process::Command::new("taskkill");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            let _ = cmd
                 .args(["/T", "/F", "/PID", &c.pid().to_string()])
                 .status();
         }

@@ -4,9 +4,22 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
+/// Create a `Command` for `wsl.exe` with `CREATE_NO_WINDOW` on Windows
+/// so that child console windows do not flash on screen.
+pub fn wsl_command() -> Command {
+    let mut cmd = Command::new("wsl.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Detect the default WSL distro from `wsl -l -q`.
 pub fn detect_default_distro() -> Option<String> {
-    let out = Command::new("wsl.exe")
+    let out = wsl_command()
         .env("WSL_UTF8", "1")
         .args(["-l", "-q"])
         .output()
@@ -46,7 +59,7 @@ impl RunOutput {
 
 /// Run a script synchronously in the given distro, waiting for completion.
 pub fn run_script(distro: &str, script: &str) -> RunOutput {
-    let mut cmd = Command::new("wsl.exe");
+    let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     cmd.args(["-d", distro, "--", "bash", "-lc", script]);
     match cmd.output() {
@@ -63,7 +76,7 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
 /// Like [`run_script`] but as the distro's `root` user (no sudo password
 /// needed). Used to write sudoers rules and do other root-only setup.
 pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
-    let mut cmd = Command::new("wsl.exe");
+    let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     cmd.args(["-d", distro, "--user", "root", "--", "bash", "-lc", script]);
     match cmd.output() {
@@ -83,7 +96,7 @@ pub fn run_script_stream(
     script: &str,
     mut on_line: impl FnMut(&str),
 ) -> RunOutput {
-    let mut child = match Command::new("wsl.exe")
+    let mut child = match wsl_command()
         .env("WSL_UTF8", "1")
         .args(["-d", distro, "--", "bash", "-lc", script])
         .stdout(Stdio::piped())
@@ -166,7 +179,7 @@ impl WslChild {
         script: &str,
         on_line: impl FnMut(String) + Send + 'static,
     ) -> Result<WslChild, String> {
-        let mut child = Command::new("wsl.exe")
+        let mut child = wsl_command()
             .env("WSL_UTF8", "1")
             .args(["-d", distro, "--", "bash", "-lc", script])
             .stdout(Stdio::piped())

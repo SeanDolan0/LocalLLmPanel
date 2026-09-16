@@ -1,7 +1,7 @@
 //! Idempotent WSL2 provisioning: distro check → apt → uv venv → vllm → verify.
 
 use anyhow::{bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::wsl;
 
@@ -12,7 +12,7 @@ pub struct ProvisionLog {
     pub line: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisionReport {
     pub phases_completed: Vec<String>,
     pub distro: String,
@@ -48,13 +48,16 @@ pub fn provision_all(
     let report = phase_verify(distro, venv_dir, &mut on_log)?;
 
     // Marker file so later skips are quick.
-    let marker = format!(
-        "mkdir -p ~/llm-lp && echo '{{\"provisioned\": true, \"vllm\": \"{}\"}}' > ~/llm-lp/.provisioned",
-        report.vllm_version.clone().unwrap_or_default()
-    );
-    let _ = wsl::run_script(distro, &marker);
+    let full_report = ProvisionReport { phases_completed: phases, ..report };
+    if let Ok(json) = serde_json::to_string(&full_report) {
+        let marker = format!(
+            "mkdir -p ~/llm-lp && cat << 'EOF' > ~/llm-lp/.provisioned\n{}\nEOF",
+            json
+        );
+        let _ = wsl::run_script(distro, &marker);
+    }
 
-    Ok(ProvisionReport { phases_completed: phases, ..report })
+    Ok(full_report)
 }
 
 fn phase_distro(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
