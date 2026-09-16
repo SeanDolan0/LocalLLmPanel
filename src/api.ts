@@ -116,3 +116,99 @@ export function quantLabel(q: string): string {
       return q;
   }
 }
+
+export function bytesPerParam(quant: string): number {
+  switch (quant.toLowerCase()) {
+    case "fp8":
+    case "int8":
+      return 1.0;
+    case "awq":
+    case "gptq":
+    case "int4":
+      return 1.1;
+    default:
+      return 2.0; // fp16 / bf16
+  }
+}
+
+export function estimateWeightGb(paramsB: number, quant: string): number {
+  return paramsB * bytesPerParam(quant);
+}
+
+export type FitRating = "optimal" | "tight" | "heavy" | "exceeds" | "unknown";
+
+export interface FitAssessment {
+  rating: FitRating;
+  label: string;
+  badgeColor: "emerald" | "amber" | "indigo" | "red" | "slate";
+  estWeightGb: number | null;
+  vramPct: number | null;
+  reason: string;
+}
+
+export function evaluateSystemFit(
+  paramsB: number | null | undefined,
+  quant: string,
+  totalVramMb: number | null | undefined
+): FitAssessment {
+  if (paramsB == null || paramsB <= 0) {
+    return {
+      rating: "unknown",
+      label: "Unknown Fit",
+      badgeColor: "slate",
+      estWeightGb: null,
+      vramPct: null,
+      reason: "Model parameters count is missing or unindexed",
+    };
+  }
+
+  const estWeightGb = estimateWeightGb(paramsB, quant);
+  if (!totalVramMb || totalVramMb <= 0) {
+    return {
+      rating: "unknown",
+      label: "Fits ~" + estWeightGb.toFixed(1) + " GB",
+      badgeColor: "slate",
+      estWeightGb,
+      vramPct: null,
+      reason: "GPU VRAM could not be verified",
+    };
+  }
+
+  const totalVramGb = totalVramMb / 1024;
+  // Base overhead for CUDA runtime + vLLM runtime context (~1.5GB - 2.5GB)
+  const overheadGb = 2.0;
+  const memoryNeededGb = estWeightGb + overheadGb;
+  const vramPct = Math.round((memoryNeededGb / totalVramGb) * 100);
+
+  if (memoryNeededGb > totalVramGb) {
+    return {
+      rating: "exceeds",
+      label: "Exceeds VRAM",
+      badgeColor: "red",
+      estWeightGb,
+      vramPct,
+      reason: `Requires ~${memoryNeededGb.toFixed(1)} GB (inc. runtime overhead), GPU has ${totalVramGb.toFixed(1)} GB. OOM likely.`,
+    };
+  }
+
+  if (vramPct >= 85) {
+    return {
+      rating: "tight",
+      label: "Tight Fit",
+      badgeColor: "amber",
+      estWeightGb,
+      vramPct,
+      reason: `Utilizes ~${vramPct}% VRAM. High context windows (>8k) may require reduced GPU memory util or KV quantization.`,
+    };
+  }
+
+  // Sweet spot: 40% - 85% utilization
+  return {
+    rating: "optimal",
+    label: "Recommended",
+    badgeColor: "emerald",
+    estWeightGb,
+    vramPct,
+    reason: `Optimal sweet spot (~${vramPct}% VRAM). Fits weights + ample KV cache with low latency.`,
+  };
+}
