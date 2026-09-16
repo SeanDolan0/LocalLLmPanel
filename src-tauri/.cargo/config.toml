@@ -1,0 +1,11 @@
+# Windows 11 24H2+/25H2 workaround for the getrandom/ProcessPrng break.
+#
+# getrandom 0.3.x/0.4.x link `ProcessPrng` from bcryptprimitives.dll via
+# raw-dylib. Windows 11 24H2+ / 25H2 (build 26200) removed that export, so any
+# binary (app or test) that pulls getrandom >= 0.3 fails to load with
+# STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139). Forcing the `windows_legacy`
+# backend makes getrandom use RtlGenRandom (SystemFunction036), which exists
+# on every supported Windows release and is equivalent for entropy purposes.
+# Tauri itself pulls getrandom 0.3.4, so this applies to the whole build.
+[build]
+rustflags = ["--cfg", "getrandom_backend=\"windows_legacy\""]

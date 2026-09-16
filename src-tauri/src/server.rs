@@ -113,13 +113,15 @@ struct ServerLogEvent {
     line: String,
 }
 
-fn emit_status(app: &tauri::AppHandle, id: &str, status: ServerStatus, error: Option<String>) {
+fn emit_status(app: Option<&tauri::AppHandle>, id: &str, status: ServerStatus, error: Option<String>) {
     let payload = ServerStatusEvent {
         id: id.to_string(),
         status: status.label().to_string(),
         error,
     };
-    let _ = app.emit("server-status", payload);
+    if let Some(app) = app {
+        let _ = app.emit("server-status", payload);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +133,7 @@ fn emit_status(app: &tauri::AppHandle, id: &str, status: ServerStatus, error: Op
 /// it beyond the command call.
 pub fn start_server(
     state: &Arc<AppState>,
-    app: &tauri::AppHandle,
+    app: Option<&tauri::AppHandle>,
     id: &str,
 ) -> Result<()> {
     let cfg = state.config();
@@ -151,12 +153,14 @@ pub fn start_server(
     let script = launch_script(&cfg.venv_dir, &def);
     let id_log = id.to_string();
     let state_log = Arc::clone(state);
-    let app_ev = (*app).clone();
+    let app_ev = app.map(|a| (*a).clone());
     let log_cb = move |line: String| {
         if let Some(ls) = state_log.servers.lock().unwrap().get_mut(&id_log) {
             ls.log_ring.lock().unwrap().push(line.clone());
         }
-        let _ = app_ev.emit("server-log", ServerLogEvent { id: id_log.clone(), line });
+        if let Some(app) = &app_ev {
+            let _ = app.emit("server-log", ServerLogEvent { id: id_log.clone(), line });
+        }
     };
     let child = wsl::WslChild::spawn(&cfg.distro, &script, log_cb)
         .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
@@ -181,7 +185,7 @@ pub fn start_server(
     emit_status(app, id, ServerStatus::Starting, None);
 
     // Async monitor: health → running, then metrics + liveness loop.
-    let app = (*app).clone();
+    let app = app.map(|a| (*a).clone());
     let http = state.http.clone();
     let state_task = Arc::clone(state);
     let id_task = id.to_string();
@@ -200,11 +204,11 @@ pub fn start_server(
             tokio::time::sleep(HEALTH_POLL).await;
         }
         if !ok {
-            emit_status(&app, &id_task, ServerStatus::Error, Some("health check timed out".into()));
+            emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some("health check timed out".into()));
             update_status(&state_task, &id_task, ServerStatus::Error);
             return;
         }
-        emit_status(&app, &id_task, ServerStatus::Running, None);
+        emit_status(app.as_ref(), &id_task, ServerStatus::Running, None);
         update_status(&state_task, &id_task, ServerStatus::Running);
 
         // Metrics + liveness loop
@@ -228,7 +232,7 @@ pub fn start_server(
             if let Some(exit) = exited {
                 if !stopping {
                     emit_status(
-                        &app,
+                        app.as_ref(),
                         &id_task,
                         ServerStatus::Error,
                         Some(format!("vLLM process exited ({exit})")),
@@ -273,7 +277,9 @@ pub fn start_server(
                             if let Some(ls) = servers.get_mut(&id_task) {
                                 ls.last_metrics = Some(snapshot.clone());
                             }
-                            let _ = app.emit("server-metrics", snapshot);
+                            if let Some(app) = &app {
+                                let _ = app.emit("server-metrics", snapshot);
+                            }
                         }
                         if let Some(ms) = measured {
                             let mut cfg = state_task.config.lock().unwrap();
@@ -301,7 +307,7 @@ fn update_status(state: &Arc<AppState>, id: &str, status: ServerStatus) {
 
 /// Stop a server: SIGTERM to the WSL-side PID via pidfile, then wait; on
 /// timeout kill the wsl.exe process tree. Idempotent.
-pub fn stop_server(state: &Arc<AppState>, app: &tauri::AppHandle, id: &str) -> Result<()> {
+pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
     let mut child = {
         let mut servers = state.servers.lock().unwrap();
@@ -365,7 +371,7 @@ pub fn stop_server(state: &Arc<AppState>, app: &tauri::AppHandle, id: &str) -> R
 }
 
 /// Restart = tolerant stop then start.
-pub fn restart_server(state: &Arc<AppState>, app: &tauri::AppHandle, id: &str) -> Result<()> {
+pub fn restart_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let _ = stop_server(state, app, id);
     start_server(state, app, id)
 }

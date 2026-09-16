@@ -383,7 +383,7 @@ pub async fn servers_create(
 #[tauri::command]
 pub fn servers_delete(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
     let st = (*state).clone();
-    server::stop_server(&st, &app, &id).ok();
+    server::stop_server(&st, Some(&app), &id).ok();
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.retain(|s| s.id != id);
     cfg.save().map_err(|e| e.to_string())?;
@@ -393,19 +393,19 @@ pub fn servers_delete(state: State<'_, Arc<AppState>>, app: AppHandle, id: Strin
 #[tauri::command]
 pub fn servers_start(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
     let st = (*state).clone();
-    server::start_server(&st, &app, &id).map_err(|e| e.to_string())
+    server::start_server(&st, Some(&app), &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn servers_stop(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
     let st = (*state).clone();
-    server::stop_server(&st, &app, &id).map_err(|e| e.to_string())
+    server::stop_server(&st, Some(&app), &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn servers_restart(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
     let st = (*state).clone();
-    server::restart_server(&st, &app, &id).map_err(|e| e.to_string())
+    server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
