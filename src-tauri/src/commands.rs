@@ -6,10 +6,12 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::estimate;
-use crate::hf;
+use crate::fit::{self, FitResult, HardwareProfile, ModelArchInfo, VariantInput};
+use crate::hf::{self, HfModel, QuantFormat, QuantVariant};
 use crate::provision::{self, ProvisionReport};
 use crate::server;
-use crate::state::{AppState, MeasuredStats, PersistedConfig, ServerDef, GpuSnapshot};
+use crate::state::{AppState, GpuSnapshot, MeasuredStats, PersistedConfig, ServerDef};
+use tokio::sync::Semaphore;
 
 // ---------------------------------------------------------------------------
 // Env
@@ -211,6 +213,310 @@ pub async fn search_models(
         });
     }
     Ok(enriched)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantVariantWithFit {
+    pub variant: QuantVariant,
+    pub fit: FitResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelWithFit {
+    pub id: String,
+    pub downloads: i64,
+    pub likes: i64,
+    pub trending_score: f64,
+    pub pipeline_tag: Option<String>,
+    pub params_b: Option<f64>,
+    pub context: Option<usize>,
+    pub context_source: Option<&'static str>,
+    pub context_estimated: bool,
+    pub head_dim: Option<usize>,
+    pub n_layers: Option<usize>,
+    pub n_kv_heads: Option<usize>,
+    pub variants: Vec<QuantVariantWithFit>,
+    pub best_variant_idx: usize,
+}
+
+fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
+    let gpu = state.gpu.lock().unwrap().clone()?;
+    let (bw, known) = estimate::gpu_bandwidth(&gpu.name);
+    let vram = if gpu.vram_total_mb > 0 { gpu.vram_total_mb } else { 16384 };
+    Some(HardwareProfile {
+        gpu_name: gpu.name,
+        vram_total_mb: vram,
+        bandwidth_gbs: bw,
+        bandwidth_known: known,
+    })
+}
+
+fn fallback_hardware_profile() -> HardwareProfile {
+    HardwareProfile {
+        gpu_name: "Generic GPU".to_string(),
+        vram_total_mb: 16384,
+        bandwidth_gbs: 700.0,
+        bandwidth_known: false,
+    }
+}
+
+struct SimpleJoinAll<'a, T> {
+    tasks: Vec<Option<std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>>>,
+    results: Vec<Option<T>>,
+}
+
+impl<'a, T: Unpin> std::future::Future for SimpleJoinAll<'a, T> {
+    type Output = Vec<T>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut all_done = true;
+        let len = this.tasks.len();
+        for i in 0..len {
+            if let Some(mut fut) = this.tasks[i].take() {
+                match fut.as_mut().poll(cx) {
+                    std::task::Poll::Ready(val) => {
+                        this.results[i] = Some(val);
+                    }
+                    std::task::Poll::Pending => {
+                        this.tasks[i] = Some(fut);
+                        all_done = false;
+                    }
+                }
+            }
+        }
+        if all_done {
+            let res = this.results.iter_mut().map(|opt| opt.take().unwrap()).collect();
+            std::task::Poll::Ready(res)
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+fn join_all<'a, T: 'a>(
+    futs: impl IntoIterator<Item = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>>,
+) -> SimpleJoinAll<'a, T> {
+    let tasks: Vec<_> = futs.into_iter().map(Some).collect();
+    let len = tasks.len();
+    SimpleJoinAll {
+        tasks,
+        results: (0..len).map(|_| None).collect(),
+    }
+}
+
+async fn process_models_with_fit(
+    st: &AppState,
+    models: Vec<HfModel>,
+) -> Vec<ModelWithFit> {
+    let enrich_sem = Arc::new(Semaphore::new(10));
+    let disc_sem = Arc::new(Semaphore::new(6));
+    let hw = hardware_profile(st).unwrap_or_else(fallback_hardware_profile);
+    let preferred = st.config().default_quant;
+
+    let futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>>> = models
+        .into_iter()
+        .map(|m| {
+            let enrich_sem = Arc::clone(&enrich_sem);
+            let disc_sem = Arc::clone(&disc_sem);
+            let hw = hw.clone();
+            let preferred = preferred.clone();
+            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>> = Box::pin(async move {
+                let stats = {
+                    let _permit = enrich_sem.acquire().await.ok();
+                    hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache)).await
+                };
+
+                let variants = hf::discover_quant_variants(&st.http, &m.id, &disc_sem).await;
+
+                let (params_b, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads) = match &stats {
+                    Some(s) => (
+                        s.params_b,
+                        Some(s.context),
+                        Some(s.context_source),
+                        s.context_estimated,
+                        s.head_dim,
+                        s.n_layers,
+                        s.n_kv_heads,
+                    ),
+                    None => (None, None, None, false, None, None, None),
+                };
+
+                let arch = ModelArchInfo {
+                    params_b,
+                    context: context.unwrap_or(4096),
+                    n_layers,
+                    n_kv_heads,
+                    head_dim,
+                };
+
+                let mut items: Vec<(QuantVariant, (VariantInput, FitResult))> = variants
+                    .into_iter()
+                    .map(|v| {
+                        let quant_str = match v.format {
+                            QuantFormat::FP16 => "fp16".to_string(),
+                            QuantFormat::FP8 => "fp8".to_string(),
+                            QuantFormat::AWQ => "awq".to_string(),
+                            QuantFormat::GPTQ => "gptq".to_string(),
+                            QuantFormat::BNB => "bnb".to_string(),
+                            QuantFormat::GGUF => "gguf".to_string(),
+                        };
+                        let is_gguf = v.format == QuantFormat::GGUF;
+                        let vi = VariantInput {
+                            quant_str,
+                            weight_bytes: v.weight_bytes,
+                            params_b: v.params_b,
+                            is_gguf,
+                        };
+                        let fit = fit::score_variant(&hw, &vi, &arch, None);
+                        (v, (vi, fit))
+                    })
+                    .collect();
+
+                items.sort_by(|a, b| {
+                    b.1.1.score.cmp(&a.1.1.score).then_with(|| {
+                        let a_native = !a.1.0.is_gguf;
+                        let b_native = !b.1.0.is_gguf;
+                        b_native.cmp(&a_native)
+                    })
+                });
+
+                let mut scored: Vec<(VariantInput, FitResult)> = items.iter().map(|(_, p)| p.clone()).collect();
+                fit::rank_variants(&mut scored);
+                let best_variant_idx = fit::best_variant(&scored, Some(&preferred));
+
+                let final_variants: Vec<QuantVariantWithFit> = items
+                    .into_iter()
+                    .map(|(variant, (_, fit))| QuantVariantWithFit { variant, fit })
+                    .collect();
+
+                ModelWithFit {
+                    id: m.id,
+                    downloads: m.downloads,
+                    likes: m.likes,
+                    trending_score: m.trending_score,
+                    pipeline_tag: m.pipeline_tag,
+                    params_b,
+                    context,
+                    context_source,
+                    context_estimated,
+                    head_dim,
+                    n_layers,
+                    n_kv_heads,
+                    variants: final_variants,
+                    best_variant_idx,
+                }
+            });
+            fut
+        })
+        .collect();
+
+    let mut out = join_all(futures).await;
+
+    out.sort_by(|a, b| {
+        let score_a = a.variants.get(a.best_variant_idx).map(|v| v.fit.score).unwrap_or(0);
+        let score_b = b.variants.get(b.best_variant_idx).map(|v| v.fit.score).unwrap_or(0);
+        score_b.cmp(&score_a).then_with(|| b.downloads.cmp(&a.downloads))
+    });
+
+    out
+}
+
+#[tauri::command]
+pub async fn search_models_with_fit(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> Result<Vec<ModelWithFit>, String> {
+    let st = (*state).clone();
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let results = hf::search(&st.http, q, 12)
+        .await
+        .map_err(|e| e.to_string())?;
+    let out = process_models_with_fit(&st, results).await;
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn recommended_models(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ModelWithFit>, String> {
+    let st = (*state).clone();
+
+    // 1. Check cache (10 min TTL)
+    {
+        let cache = st.rec_cache.lock().unwrap();
+        if let Some((ref cached_models, cached_at)) = *cache {
+            if cached_at.elapsed() < std::time::Duration::from_secs(600) {
+                return Ok(cached_models.clone());
+            }
+        }
+    }
+
+    // 2. Query HF API for trending text-generation models (limit=30)
+    let url = reqwest::Url::parse_with_params(
+        hf::HF_API,
+        &[("sort", "trending"), ("pipeline_tag", "text-generation"), ("limit", "30")],
+    )
+    .map_err(|e| format!("build recommendations url: {e}"))?;
+
+    let resp = st
+        .http
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("HF recommendations request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HF recommendations returned {}", resp.status()));
+    }
+
+    let arr: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("HF recommendations JSON parse: {e}"))?;
+
+    let mut models = Vec::with_capacity(arr.len());
+    for m in arr {
+        let id = m
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let downloads = m.get("downloads").and_then(|v| v.as_i64()).unwrap_or(0);
+        let likes = m.get("likes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let trending = m.get("trendingScore").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let private = m.get("private").and_then(|v| v.as_bool()).unwrap_or(false);
+        let pipeline = m
+            .get("pipeline_tag")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        models.push(HfModel {
+            id,
+            downloads,
+            likes,
+            trending_score: trending,
+            private,
+            pipeline_tag: pipeline,
+            stats: None,
+        });
+    }
+
+    // 3. Process models with fit
+    let out = process_models_with_fit(&st, models).await;
+
+    // 4. Store in cache
+    {
+        let mut cache = st.rec_cache.lock().unwrap();
+        *cache = Some((out.clone(), std::time::Instant::now()));
+    }
+
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -608,4 +914,159 @@ pub async fn gpu_status(state: State<'_, Arc<AppState>>) -> Result<Option<GpuSna
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hardware_profile_detected() {
+        let st = AppState::new();
+        *st.gpu.lock().unwrap() = Some(GpuSnapshot {
+            name: "NVIDIA GeForce RTX 4090".to_string(),
+            vram_total_mb: 24576,
+            vram_free_mb: 22000,
+            util_percent: 5,
+        });
+        let hw = hardware_profile(&st).expect("should have hardware profile");
+        assert_eq!(hw.gpu_name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(hw.vram_total_mb, 24576);
+        assert!(hw.bandwidth_known);
+        assert_eq!(hw.bandwidth_gbs, 1008.0);
+    }
+
+    #[test]
+    fn test_hardware_profile_none_and_fallback() {
+        let st = AppState::new();
+        assert!(st.gpu.lock().unwrap().is_none());
+        assert!(hardware_profile(&st).is_none());
+
+        let fb = fallback_hardware_profile();
+        assert_eq!(fb.gpu_name, "Generic GPU");
+        assert_eq!(fb.vram_total_mb, 16384);
+        assert_eq!(fb.bandwidth_gbs, 700.0);
+        assert!(!fb.bandwidth_known);
+    }
+
+    #[test]
+    fn test_recommendation_cache_ttl() {
+        let st = AppState::new();
+        // Initially empty
+        assert!(st.rec_cache.lock().unwrap().is_none());
+
+        // Cache a dummy list
+        let dummy = vec![ModelWithFit {
+            id: "test/model".into(),
+            downloads: 100,
+            likes: 10,
+            trending_score: 5.0,
+            pipeline_tag: Some("text-generation".into()),
+            params_b: Some(7.0),
+            context: Some(4096),
+            context_source: Some("config.json"),
+            context_estimated: false,
+            head_dim: Some(128),
+            n_layers: Some(32),
+            n_kv_heads: Some(8),
+            variants: vec![],
+            best_variant_idx: 0,
+        }];
+
+        *st.rec_cache.lock().unwrap() = Some((dummy.clone(), std::time::Instant::now()));
+        {
+            let cache = st.rec_cache.lock().unwrap();
+            let (cached, time) = cache.as_ref().unwrap();
+            assert_eq!(cached.len(), 1);
+            assert_eq!(cached[0].id, "test/model");
+            assert!(time.elapsed() < std::time::Duration::from_secs(600));
+        }
+
+        // Expired entry
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(601))
+            .unwrap();
+        *st.rec_cache.lock().unwrap() = Some((dummy, past));
+        {
+            let cache = st.rec_cache.lock().unwrap();
+            let (_, time) = cache.as_ref().unwrap();
+            assert!(time.elapsed() >= std::time::Duration::from_secs(600));
+        }
+    }
+
+    #[test]
+    fn test_model_with_fit_serialization() {
+        let m = ModelWithFit {
+            id: "Qwen/Qwen2.5-7B".into(),
+            downloads: 50000,
+            likes: 1200,
+            trending_score: 89.5,
+            pipeline_tag: Some("text-generation".into()),
+            params_b: Some(7.6),
+            context: Some(32768),
+            context_source: Some("config.json"),
+            context_estimated: false,
+            head_dim: Some(128),
+            n_layers: Some(32),
+            n_kv_heads: Some(8),
+            variants: vec![
+                QuantVariantWithFit {
+                    variant: QuantVariant {
+                        repo_id: "Qwen/Qwen2.5-7B".into(),
+                        format: QuantFormat::FP16,
+                        label: "FP16".into(),
+                        weight_bytes: None,
+                        params_b: None,
+                        gguf_file: None,
+                        vllm_native: true,
+                    },
+                    fit: FitResult {
+                        verdict: fit::FitVerdict::Constrained,
+                        score: 75,
+                        weight_gb: 15.2,
+                        usable_context: 8192,
+                        native_context: 32768,
+                        est_tok_s: Some(45.0),
+                        measured_tok_s: None,
+                        vram_pct: 85,
+                        format_support: fit::FormatSupport::Native,
+                        reason: "Constrained fit".into(),
+                    },
+                },
+            ],
+            best_variant_idx: 0,
+        };
+
+        let json = serde_json::to_string(&m).expect("serialize");
+        assert!(json.contains("\"id\":\"Qwen/Qwen2.5-7B\""));
+        assert!(json.contains("\"best_variant_idx\":0"));
+        assert!(json.contains("\"score\":75"));
+        assert!(json.contains("\"verdict\":\"Constrained\""));
+        assert!(json.contains("\"format_support\":\"Native\""));
+    }
+
+    #[tokio::test]
+    async fn test_simple_join_all_preserves_order() {
+        let futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>>> = (0..10)
+            .map(|i| {
+                let fut: std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>> = Box::pin(async move {
+                    if i % 2 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    i * 10
+                });
+                fut
+            })
+            .collect();
+
+        let results = join_all(futs).await;
+        assert_eq!(results, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+    }
+
+    #[tokio::test]
+    async fn test_process_models_with_fit_empty() {
+        let st = AppState::new();
+        let out = process_models_with_fit(&st, vec![]).await;
+        assert!(out.is_empty());
+    }
 }

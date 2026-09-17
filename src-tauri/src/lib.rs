@@ -22,6 +22,8 @@ pub fn run() {
             commands::env_status,
             commands::provision,
             commands::search_models,
+            commands::search_models_with_fit,
+            commands::recommended_models,
             commands::model_stats,
             commands::pull_model,
             commands::pull_status,

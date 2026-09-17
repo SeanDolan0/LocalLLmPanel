@@ -226,6 +226,7 @@ pub struct AppState {
     /// Latest GPU snapshot (polled by the monitor task, read by dashboard).
     pub gpu: Mutex<Option<GpuSnapshot>>,
     pub enrichment_cache: Mutex<HashMap<String, CachedEnrichment>>,
+    pub rec_cache: Mutex<Option<(Vec<crate::commands::ModelWithFit>, Instant)>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -250,6 +251,7 @@ impl AppState {
             pulling: Arc::new(Mutex::new(HashMap::new())),
             gpu: Mutex::new(None),
             enrichment_cache: Mutex::new(HashMap::new()),
+            rec_cache: Mutex::new(None),
         }
     }
 
