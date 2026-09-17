@@ -118,6 +118,8 @@ pub fn score_variant(
         None
     };
 
+    let speed_tok_s = measured_tok_s.or(est_tok_s);
+
     // Composite score: fit (40%), speed (30%), context utilization (30%)
     let fit_pillar = match verdict {
         FitVerdict::Comfortable => 90.0 + 10.0 * (1.0 - vram_ratio / COMFORTABLE_MAX_RATIO),
@@ -128,7 +130,7 @@ pub fn score_variant(
         }
         FitVerdict::DoesNotFit => 0.0,
     };
-    let speed_pillar = est_tok_s
+    let speed_pillar = speed_tok_s
         .map(|t| (t / 80.0 * 100.0).min(100.0).max(0.0))
         .unwrap_or(0.0);
     let ctx_pillar = if arch.context > 0 && usable_context > 0 {
@@ -277,9 +279,28 @@ mod tests {
 
     #[test]
     fn test_measured_stats_preferred() {
-        let r = score_variant(&hw_12gb(), &variant("fp16", false), &arch_0_5b(), Some(250.0));
-        assert_eq!(r.measured_tok_s, Some(250.0));
-        assert!(r.est_tok_s.is_some());
+        let hw = hw_12gb();
+        let v = variant("awq", false);
+        let arch = arch_7b();
+
+        let r_est = score_variant(&hw, &v, &arch, None);
+        let r_faster = score_variant(&hw, &v, &arch, Some(80.0));
+        let r_slower = score_variant(&hw, &v, &arch, Some(10.0));
+
+        assert_eq!(r_faster.measured_tok_s, Some(80.0));
+        assert!(r_faster.est_tok_s.is_some());
+        assert!(
+            r_faster.score > r_est.score,
+            "higher measured tok/s should yield a higher score ({} > {})",
+            r_faster.score,
+            r_est.score
+        );
+        assert!(
+            r_est.score > r_slower.score,
+            "lower measured tok/s should yield a lower score ({} > {})",
+            r_est.score,
+            r_slower.score
+        );
     }
 
     #[test]
