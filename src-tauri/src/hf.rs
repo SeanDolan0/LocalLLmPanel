@@ -334,18 +334,63 @@ static GGUF_SHARD_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLo
 
 static GGUF_QUANT_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
     regex_lite::Regex::new(
-        r"[-_]((?:UD-)?(?:I?Q\d+(?:_(?:K(?:_[SMLX]{1,2})?|0|1|XXS|XS|S|M|NL))?))$",
+        r"[-_]((?:UD-)?(?:I?Q\d+(?:_(?:K(?:_[SMLX]{1,2})?|0|1|XXS|XS|S|M|NL))?|BF16|F16|FP16))$",
     )
     .expect("valid GGUF quant regex")
 });
 
-/// Parse GGUF quant label from filename. Returns None for non-GGUF files.
+/// Returns true if a file is an auxiliary / helper file (e.g. MTP helper, mmproj, imatrix, vocab)
+/// that cannot run as a standalone language model.
+pub fn is_auxiliary_gguf_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let fname = path.split('/').last().unwrap_or(path).to_ascii_lowercase();
+
+    // Multi-Token Prediction (MTP) helper files
+    if lower.starts_with("mtp/")
+        || lower.contains("/mtp/")
+        || lower.contains("/mtp-")
+        || fname.starts_with("mtp-")
+        || fname.starts_with("mtp_")
+        || fname.contains("-mtp-")
+        || fname.contains("_mtp_")
+        || fname.contains("-mtp.")
+        || fname.contains("_mtp.")
+    {
+        return true;
+    }
+
+    // Multimodal vision projection helpers
+    if fname.starts_with("mmproj") || lower.contains("/mmproj") {
+        return true;
+    }
+
+    // Importance matrix calibration files
+    if fname.starts_with("imatrix") || lower.contains("/imatrix") {
+        return true;
+    }
+
+    // Vocabulary or tokenizer auxiliary files
+    if fname.starts_with("vocab") || fname.starts_with("tokenizer") {
+        return true;
+    }
+
+    // Draft / speculative helper files
+    if fname.starts_with("draft") || fname.starts_with("speculative") {
+        return true;
+    }
+
+    false
+}
+
+/// Parse GGUF quant label from filename. Returns None for non-GGUF or auxiliary helper files.
 pub fn parse_gguf_quant_label(filename: &str) -> Option<String> {
-    if !filename.ends_with(".gguf") { return None; }
+    if !filename.ends_with(".gguf") || is_auxiliary_gguf_file(filename) {
+        return None;
+    }
     let stem = filename.strip_suffix(".gguf").unwrap();
     // Strip shard suffix like -00001-of-00003
     let stem = GGUF_SHARD_RE.replace(stem, "");
-    // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*
+    // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*, BF16, F16, FP16
     GGUF_QUANT_RE
         .captures(&stem)
         .and_then(|c| c.get(1))
@@ -833,11 +878,23 @@ mod tests {
         assert_eq!(parse_gguf_quant_label("model-IQ4_NL.gguf"), Some("IQ4_NL".to_string()));
         assert_eq!(parse_gguf_quant_label("model-UD-Q4_K_XL.gguf"), Some("UD-Q4_K_XL".to_string()));
         assert_eq!(parse_gguf_quant_label("model-Q3_K_S-00001-of-00003.gguf"), Some("Q3_K_S".to_string()));
+        assert_eq!(parse_gguf_quant_label("BF16/Qwen3.8-Flash-Next-BF16-00001-of-00008.gguf"), Some("BF16".to_string()));
         assert_eq!(parse_gguf_quant_label("model.safetensors"), None);
         assert_eq!(parse_gguf_quant_label("README.md"), None);
         assert_eq!(parse_gguf_quant_label("model.gguf"), None);
         assert_eq!(parse_gguf_quant_label("model-Q5_K_M.gguf"), Some("Q5_K_M".to_string()));
         assert_eq!(parse_gguf_quant_label("model-IQ2_XXS.gguf"), Some("IQ2_XXS".to_string()));
+
+        // MTP helper files should be excluded
+        assert_eq!(parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf"), None);
+        assert_eq!(parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-BF16.gguf"), None);
+        assert_eq!(parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"), None);
+        assert_eq!(parse_gguf_quant_label("mtp-Qwen3.8-27B-Q4_0.gguf"), None);
+
+        // Vision projectors and imatrix should be excluded
+        assert_eq!(parse_gguf_quant_label("mmproj-BF16.gguf"), None);
+        assert_eq!(parse_gguf_quant_label("mmproj-F16.gguf"), None);
+        assert_eq!(parse_gguf_quant_label("imatrix_unsloth.gguf"), None);
     }
 
     #[test]
