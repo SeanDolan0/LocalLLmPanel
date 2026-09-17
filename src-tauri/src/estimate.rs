@@ -9,10 +9,25 @@ use serde::Serialize;
 /// fp16/bf16 = 2, fp8 = 1, int4 (AWQ/GPTQ) ≈ 1.1 (weights + scale overhead).
 pub fn bytes_per_param(quant: &str) -> f64 {
     let q = quant.to_ascii_lowercase();
-    match q.as_str() {
-        "fp8" | "int8" => 1.0,
-        "awq" | "gptq" | "int4" => 1.1,
-        _ => 2.0, // fp16 / bf16 / unset
+    let q_str = q.as_str();
+    if q_str.starts_with("q4") || q_str.contains("q4_") || q_str.contains("iq4") || q_str == "awq" || q_str == "gptq" || q_str == "int4" {
+        1.1
+    } else if q_str.starts_with("q8") || q_str.contains("q8_") {
+        1.25
+    } else if q_str.starts_with("q5") || q_str.contains("q5_") {
+        0.85
+    } else if q_str.starts_with("q6") || q_str.contains("q6_") {
+        0.95
+    } else if q_str.starts_with("q3") || q_str.contains("q3_") || q_str.contains("iq3") {
+        0.55
+    } else if q_str.starts_with("q2") || q_str.contains("q2_") || q_str.contains("iq2") {
+        0.45
+    } else if q_str == "fp8" || q_str == "int8" {
+        1.0
+    } else if q_str == "gguf" {
+        1.1 // default GGUF assumption is ~4-bit
+    } else {
+        2.0 // fp16 / bf16 / unset
     }
 }
 
@@ -20,6 +35,22 @@ pub fn bytes_per_param(quant: &str) -> f64 {
 /// `2 (K+V) × n_layers × n_kv_heads × head_dim × 2 bytes`.
 pub fn kv_bytes_per_token(n_layers: usize, n_kv_heads: usize, head_dim: usize) -> f64 {
     2.0 * n_layers as f64 * n_kv_heads as f64 * head_dim as f64 * 2.0
+}
+
+/// Fallback estimate of KV-cache bytes per token when specific layer dims are missing.
+pub fn estimate_kv_bytes_per_token(params_b: f64) -> f64 {
+    if params_b <= 0.0 {
+        return 0.0;
+    }
+    if params_b <= 3.5 {
+        32_768.0
+    } else if params_b <= 10.0 {
+        131_072.0
+    } else if params_b <= 40.0 {
+        262_144.0
+    } else {
+        327_680.0
+    }
 }
 
 /// Weight footprint in GB (params_b is in billions).
@@ -262,13 +293,19 @@ fn derive_head_dim(cfg: &serde_json::Value) -> Option<usize> {
 /// Standard transformer arithmetic: ~12·L·h²  +  L·h·inter  +  vocab·h.
 /// Labels as an estimate; used when `safetensors.index.json` is unavailable.
 pub fn estimate_params_from_config(cfg: &serde_json::Value) -> Option<f64> {
-    let layers = cfg.get("num_hidden_layers").and_then(as_usize)?;
-    let hidden = cfg.get("hidden_size").and_then(as_usize)?;
-    let vocab = cfg.get("vocab_size").and_then(as_usize)?;
-    let inter = cfg
-        .get("intermediate_size")
-        .and_then(as_usize)
-        .unwrap_or(hidden * 4);
+    let sub = cfg
+        .get("text_config")
+        .or_else(|| cfg.get("model_config"))
+        .or_else(|| cfg.get("config"));
+    let resolve = |key: &str| {
+        sub.and_then(|s| s.get(key))
+            .or_else(|| cfg.get(key))
+            .and_then(as_usize)
+    };
+    let layers = resolve("num_hidden_layers")?;
+    let hidden = resolve("hidden_size")?;
+    let vocab = resolve("vocab_size")?;
+    let inter = resolve("intermediate_size").unwrap_or(hidden * 4);
     if layers == 0 || hidden == 0 {
         return None;
     }
@@ -276,6 +313,16 @@ pub fn estimate_params_from_config(cfg: &serde_json::Value) -> Option<f64> {
     let mlp = layers as f64 * hidden as f64 * inter as f64;
     let emb = vocab as f64 * hidden as f64;
     Some((attn + mlp + emb) / 1e9)
+}
+
+static PARAMS_NAME_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+    regex_lite::Regex::new(r"(?i)(?:^|[-_ /])(\d+(?:\.\d+)?)[bB](?:[-_ /.]|$)").expect("valid params regex")
+});
+
+/// Try to parse parameter count in billions from a model ID / repo name (e.g. "Qwen3.8-27B-GGUF" -> 27.0).
+pub fn parse_params_from_name(name: &str) -> Option<f64> {
+    let base = name.split('/').last().unwrap_or(name);
+    PARAMS_NAME_RE.captures(base).and_then(|c| c.get(1)).and_then(|m| m.as_str().parse::<f64>().ok())
 }
 
 /// Parse param count from the HF API `?expand[]=safetensors` response.
@@ -507,5 +554,41 @@ mod tests {
         });
         let p = parse_params_from_safetensors_api(&api_resp);
         assert!((p.unwrap() - 7.616).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_params_from_name() {
+        assert_eq!(parse_params_from_name("unsloth/Qwen3.8-27B-GGUF"), Some(27.0));
+        assert_eq!(parse_params_from_name("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"), Some(8.0));
+        assert_eq!(parse_params_from_name("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"), Some(1.5));
+        assert_eq!(parse_params_from_name("Qwen/Qwen2.5-0.5B-Instruct"), Some(0.5));
+        assert_eq!(parse_params_from_name("TheBloke/Llama-2-70B-Chat-GGUF"), Some(70.0));
+        assert_eq!(parse_params_from_name("google/gemma-2-27b-it"), Some(27.0));
+        assert_eq!(parse_params_from_name("google/gemma-2-9b"), Some(9.0));
+        assert_eq!(parse_params_from_name("microsoft/phi-4"), None);
+    }
+
+    #[test]
+    fn test_estimate_params_nested_text_config() {
+        // Qwen3.8-27B config snippet
+        let cfg = json!({
+            "model_type": "qwen3_5",
+            "text_config": {
+                "hidden_size": 5120,
+                "intermediate_size": 17408,
+                "num_hidden_layers": 64,
+                "vocab_size": 248320
+            }
+        });
+        let p = estimate_params_from_config(&cfg).unwrap();
+        assert!((p - 27.1).abs() < 0.5, "params = {p}");
+    }
+
+    #[test]
+    fn test_gguf_bytes_per_param() {
+        assert_eq!(bytes_per_param("q4_k_m"), 1.1);
+        assert_eq!(bytes_per_param("Q4_0"), 1.1);
+        assert_eq!(bytes_per_param("Q8_0"), 1.25);
+        assert_eq!(bytes_per_param("gguf"), 1.1);
     }
 }

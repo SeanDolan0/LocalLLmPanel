@@ -721,6 +721,11 @@ function ModelCard({
             <div className="font-medium text-slate-300">
               {fit ? fmtContext(fit.usable_context) : fmtContext(model.context)}
             </div>
+            {fit && model.context && fit.usable_context < model.context && (
+              <div className="text-[9px] text-amber-400/80 truncate">
+                max {fmtContext(model.context)}
+              </div>
+            )}
           </div>
           <div>
             <div className="text-[10px] text-slate-500 uppercase">

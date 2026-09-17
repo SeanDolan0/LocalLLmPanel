@@ -46,14 +46,73 @@ pub fn apply_auth(mut req: reqwest::RequestBuilder, token: Option<&str>) -> reqw
     req
 }
 
+pub fn clean_model_query(input: &str) -> String {
+    let mut s = input.trim();
+    if let Some(rest) = s.strip_prefix("https://") {
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        s = rest;
+    }
+    if let Some(rest) = s.strip_prefix("huggingface.co/") {
+        s = rest;
+    }
+    if let Some(idx) = s.find('?') {
+        s = &s[..idx];
+    }
+    if let Some(idx) = s.find('#') {
+        s = &s[..idx];
+    }
+    if let Some(idx) = s.find("/tree/") {
+        s = &s[..idx];
+    }
+    if let Some(idx) = s.find("/blob/") {
+        s = &s[..idx];
+    }
+    s.trim_end_matches('/').to_string()
+}
+
 /// Search HF for models matching `query`.
 pub async fn search(
     client: &reqwest::Client,
-    query: &str,
+    raw_query: &str,
     limit: usize,
     token: Option<&str>,
 ) -> Result<Vec<HfModel>> {
-    let url = reqwest::Url::parse_with_params(HF_API, &[("search", query), ("limit", &limit.to_string())])
+    let query = clean_model_query(raw_query);
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+
+    // If query looks like an exact repo (e.g. "org/model"), try fetching it directly first
+    if query.contains('/') && !query.contains(' ') {
+        let exact_url = format!("{HF_API}/{query}");
+        if let Ok(resp) = apply_auth(client.get(&exact_url), token).send().await {
+            if resp.status().is_success() {
+                if let Ok(m) = resp.json::<Value>().await {
+                    if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                        let downloads = m.get("downloads").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let likes = m.get("likes").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let trending = m.get("trendingScore").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let private = m.get("private").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let pipeline = m.get("pipeline_tag").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        out.push(HfModel {
+                            id: id.to_string(),
+                            downloads,
+                            likes,
+                            trending_score: trending,
+                            private,
+                            pipeline_tag: pipeline,
+                            stats: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let url = reqwest::Url::parse_with_params(HF_API, &[("search", query.as_str()), ("limit", &limit.to_string())])
         .map_err(|e| anyhow!("build url: {e}"))?;
     let resp = apply_auth(client.get(url), token)
         .send()
@@ -68,14 +127,13 @@ pub async fn search(
         bail!("HF search returned {status}: {body}");
     }
     let arr: Vec<Value> = resp.json().await.context("HF search JSON parse")?;
-    let mut out = Vec::with_capacity(arr.len());
     for m in arr {
         let id = m
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        if id.is_empty() {
+        if id.is_empty() || out.iter().any(|existing: &HfModel| existing.id == id) {
             continue;
         }
         let downloads = m.get("downloads").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -135,60 +193,99 @@ pub async fn enrich(
         }
     }
 
-    // 2. Fetch config.json as existing
-    let cfg = fetch_raw(client, model_id, "config.json", token).await?;
-    let (context_config, src) = estimate::parse_context(&cfg);
-    let (context, context_source, context_estimated) = if context_config > 0 {
-        (context_config, "config.json", false)
-    } else if let Some(fam) = estimate::family_fallback(model_id) {
-        (fam, "family default", true)
-    } else {
-        (estimate::DEFAULT_CONTEXT, "generic default", true)
-    };
-
-    let head_dim = estimate::head_dim_from_config(&cfg);
-    let n_layers = cfg
-        .get("num_hidden_layers")
-        .and_then(usize_of)
-        .or_else(|| cfg.get("text_config").and_then(|t| t.get("num_hidden_layers")).and_then(usize_of));
-    let n_kv_heads = cfg
-        .get("num_key_value_heads")
-        .and_then(usize_of)
-        .or_else(|| cfg.get("num_attention_heads").and_then(usize_of))
-        .or_else(|| cfg.get("text_config").and_then(|t| t.get("num_kv_heads")).and_then(usize_of));
-    let torch_dtype = cfg
-        .get("torch_dtype")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    // 3. Try ?expand[]=safetensors API for params before falling back to index files
-    let mut params_b = None;
-    let expand_url = format!("{HF_API}/{model_id}?expand[]=safetensors");
-    if let Ok(resp) = apply_auth(client.get(&expand_url), token).send().await {
-        if resp.status().is_success() {
-            if let Ok(info) = resp.json::<Value>().await {
-                // 4. If safetensors expand succeeds, set params_b
-                params_b = estimate::parse_params_from_safetensors_api(&info);
-            }
-        }
-    }
-
-    // 5. If still None, fall back to index files logic
-    if params_b.is_none() {
-        for index_file in ["safetensors.index.json", "pytorch_model.bin.index.json"] {
-            if let Some(idx) = fetch_raw(client, model_id, index_file, token).await {
-                if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref()) {
-                    params_b = Some(p);
+    // 2. Fetch config.json from model or base model
+    let mut cfg = fetch_raw(client, model_id, "config.json", token).await;
+    if cfg.is_none() {
+        let base_name = extract_base_name(model_id);
+        let clean_base = base_name.trim_end_matches("-GGUF").trim_end_matches("-gguf");
+        let org = model_id.split('/').next().unwrap_or("");
+        let candidates = [
+            format!("{org}/{clean_base}"),
+            clean_base.to_string(),
+        ];
+        for cand in candidates {
+            if cand != model_id {
+                if let Some(c) = fetch_raw(client, &cand, "config.json", token).await {
+                    cfg = Some(c);
                     break;
                 }
             }
         }
     }
-    if params_b.is_none() {
-        params_b = estimate::estimate_params_from_config(&cfg);
-    }
 
-    let _ = src; // context_source already encodes the outcome
+    let (params_b, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads, torch_dtype) = if let Some(cfg) = &cfg {
+        let (context_config, _src) = estimate::parse_context(cfg);
+        let (context, context_source, context_estimated) = if context_config > 0 {
+            (context_config, "config.json", false)
+        } else if let Some(fam) = estimate::family_fallback(model_id) {
+            (fam, "family default", true)
+        } else {
+            (estimate::DEFAULT_CONTEXT, "generic default", true)
+        };
+
+        let head_dim = estimate::head_dim_from_config(cfg);
+        let n_layers = cfg
+            .get("num_hidden_layers")
+            .or_else(|| cfg.get("text_config").and_then(|t| t.get("num_hidden_layers")))
+            .and_then(usize_of);
+        let n_kv_heads = cfg
+            .get("num_key_value_heads")
+            .or_else(|| cfg.get("num_attention_heads"))
+            .or_else(|| cfg.get("text_config").and_then(|t| {
+                t.get("num_key_value_heads")
+                    .or_else(|| t.get("num_attention_heads"))
+                    .or_else(|| t.get("num_kv_heads"))
+            }))
+            .and_then(usize_of);
+        let torch_dtype = cfg
+            .get("torch_dtype")
+            .or_else(|| cfg.get("text_config").and_then(|t| t.get("torch_dtype")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Try ?expand[]=safetensors API for params before falling back to index files
+        let mut pb = None;
+        let expand_url = format!("{HF_API}/{model_id}?expand[]=safetensors");
+        if let Ok(resp) = apply_auth(client.get(&expand_url), token).send().await {
+            if resp.status().is_success() {
+                if let Ok(info) = resp.json::<Value>().await {
+                    pb = estimate::parse_params_from_safetensors_api(&info);
+                }
+            }
+        }
+
+        // Index files
+        if pb.is_none() {
+            for index_file in ["safetensors.index.json", "pytorch_model.bin.index.json"] {
+                if let Some(idx) = fetch_raw(client, model_id, index_file, token).await {
+                    if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref()) {
+                        pb = Some(p);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Estimate from config
+        if pb.is_none() {
+            pb = estimate::estimate_params_from_config(cfg);
+        }
+
+        // Name-based fallback
+        if pb.is_none() {
+            pb = estimate::parse_params_from_name(model_id);
+        }
+
+        (pb, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads, torch_dtype)
+    } else {
+        let (context, context_source, context_estimated) = if let Some(fam) = estimate::family_fallback(model_id) {
+            (fam, "family default", true)
+        } else {
+            (estimate::DEFAULT_CONTEXT, "generic default", true)
+        };
+        let pb = estimate::parse_params_from_name(model_id);
+        (pb, context, context_source, context_estimated, None, None, None, None)
+    };
 
     let stats = EnrichedStats {
         params_b,
@@ -201,7 +298,7 @@ pub async fn enrich(
         torch_dtype,
     };
 
-    // 6. Store in cache if cache is Some
+    // Store in cache if cache is Some
     if let Some(c) = cache {
         if let Ok(mut guard) = c.lock() {
             guard.insert(
@@ -323,8 +420,7 @@ pub async fn discover_quant_variants(
 
     // 3. If it is a GGUF repo, inspect it directly without searching other publishers
     if base_model_id.to_lowercase().ends_with("-gguf") || base_model_id.to_lowercase().contains(".gguf") {
-        let clean_base = base_name.trim_end_matches("-GGUF").trim_end_matches("-gguf");
-        let res = check_gguf(client, org, clean_base, sem, token).await;
+        let res = check_gguf_repo(client, base_model_id, sem, token).await;
         if let Some(c) = cache {
             if let Ok(mut guard) = c.lock() {
                 guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
@@ -454,6 +550,57 @@ async fn check_publisher(
     }
 }
 
+pub async fn check_gguf_repo(
+    client: &reqwest::Client,
+    repo_id: &str,
+    sem: &tokio::sync::Semaphore,
+    token: Option<&str>,
+) -> Vec<QuantVariant> {
+    let mut out = Vec::new();
+    let _permit = match sem.acquire().await {
+        Ok(p) => p,
+        Err(_) => return out,
+    };
+    let url = format!("https://huggingface.co/api/models/{repo_id}?blobs=true");
+    let req = apply_auth(client.get(&url), token);
+    if let Ok(resp) = req.send().await {
+        if resp.status().is_success() {
+            if let Ok(info) = resp.json::<Value>().await {
+                if let Some(siblings) = info.get("siblings").and_then(|v| v.as_array()) {
+                    let mut variant_map: std::collections::BTreeMap<String, QuantVariant> = std::collections::BTreeMap::new();
+                    for sib in siblings {
+                        let fname = sib.get("rfilename").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(quant_label) = parse_gguf_quant_label(fname) {
+                            let size = sib.get("size").and_then(|v| v.as_u64());
+                            match variant_map.entry(quant_label.clone()) {
+                                std::collections::btree_map::Entry::Vacant(e) => {
+                                    e.insert(QuantVariant {
+                                        repo_id: repo_id.to_string(),
+                                        format: QuantFormat::GGUF,
+                                        label: quant_label,
+                                        weight_bytes: size,
+                                        params_b: None,
+                                        gguf_file: Some(fname.to_string()),
+                                        vllm_native: false,
+                                    });
+                                }
+                                std::collections::btree_map::Entry::Occupied(mut e) => {
+                                    let v = e.get_mut();
+                                    if let (Some(existing), Some(addition)) = (v.weight_bytes, size) {
+                                        v.weight_bytes = Some(existing + addition);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    out.extend(variant_map.into_values());
+                }
+            }
+        }
+    }
+    out
+}
+
 async fn check_gguf(
     client: &reqwest::Client,
     pub_org: &str,
@@ -461,7 +608,6 @@ async fn check_gguf(
     sem: &tokio::sync::Semaphore,
     token: Option<&str>,
 ) -> Vec<QuantVariant> {
-    let mut out = Vec::new();
     let repo_id = if pub_org.is_empty() {
         base_name.to_string()
     } else if base_name.to_lowercase().ends_with("-gguf") {
@@ -469,36 +615,7 @@ async fn check_gguf(
     } else {
         format!("{pub_org}/{base_name}-GGUF")
     };
-    let _permit = match sem.acquire().await {
-        Ok(p) => p,
-        Err(_) => return out,
-    };
-    let url = format!("https://huggingface.co/api/models/{repo_id}");
-    let req = apply_auth(client.get(&url), token);
-    if let Ok(resp) = req.send().await {
-        if resp.status().is_success() {
-            if let Ok(info) = resp.json::<Value>().await {
-                if let Some(siblings) = info.get("siblings").and_then(|v| v.as_array()) {
-                    for sib in siblings {
-                        let fname = sib.get("rfilename").and_then(|v| v.as_str()).unwrap_or("");
-                        if let Some(quant_label) = parse_gguf_quant_label(fname) {
-                            let size = sib.get("size").and_then(|v| v.as_u64());
-                            out.push(QuantVariant {
-                                repo_id: repo_id.clone(),
-                                format: QuantFormat::GGUF,
-                                label: quant_label,
-                                weight_bytes: size,
-                                params_b: None,
-                                gguf_file: Some(fname.to_string()),
-                                vllm_native: false,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
+    check_gguf_repo(client, &repo_id, sem, token).await
 }
 
 
@@ -741,5 +858,26 @@ mod tests {
         assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-bnb-4bit"), Some(QuantFormat::BNB));
         assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-GGUF"), None); // GGUF handled separately via file siblings
         assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct"), None);
+    }
+
+    #[test]
+    fn test_clean_model_query() {
+        assert_eq!(
+            clean_model_query("https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"),
+            "unsloth/Qwen3.8-27B-GGUF"
+        );
+        assert_eq!(
+            clean_model_query("https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/tree/main"),
+            "unsloth/Qwen3.8-27B-GGUF"
+        );
+        assert_eq!(
+            clean_model_query("huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/"),
+            "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+        );
+        assert_eq!(
+            clean_model_query("  unsloth/Qwen3.8-27B-GGUF?not-real=1  "),
+            "unsloth/Qwen3.8-27B-GGUF"
+        );
+        assert_eq!(clean_model_query("Qwen2.5"), "Qwen2.5");
     }
 }

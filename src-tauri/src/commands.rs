@@ -356,14 +356,23 @@ async fn process_models_with_fit(
 
                 let mut items: Vec<(QuantVariant, (VariantInput, FitResult))> = variants
                     .into_iter()
-                    .map(|v| {
+                    .map(|mut v| {
+                        if v.params_b.is_none() {
+                            v.params_b = params_b;
+                        }
                         let quant_str = match v.format {
                             QuantFormat::FP16 => "fp16".to_string(),
                             QuantFormat::FP8 => "fp8".to_string(),
                             QuantFormat::AWQ => "awq".to_string(),
                             QuantFormat::GPTQ => "gptq".to_string(),
                             QuantFormat::BNB => "bnb".to_string(),
-                            QuantFormat::GGUF => "gguf".to_string(),
+                            QuantFormat::GGUF => {
+                                if v.label.is_empty() {
+                                    "gguf".to_string()
+                                } else {
+                                    v.label.to_lowercase()
+                                }
+                            }
                         };
                         let is_gguf = v.format == QuantFormat::GGUF;
                         let vi = VariantInput {

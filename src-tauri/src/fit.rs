@@ -95,7 +95,7 @@ pub fn score_variant(
     // Usable context
     let kv_bpt = match (arch.n_layers, arch.n_kv_heads, arch.head_dim) {
         (Some(l), Some(k), Some(h)) => estimate::kv_bytes_per_token(l, k, h),
-        _ => 0.0,
+        _ => estimate::estimate_kv_bytes_per_token(params_b),
     };
     let usable_context = if kv_bpt > 0.0 && (params_b > 0.0 || variant.weight_bytes.is_some()) {
         let ctx = estimate::context_fit_with_weight(
@@ -111,8 +111,14 @@ pub fn score_variant(
     };
 
     // Tok/s estimate
-    let est_tok_s = if params_b > 0.0 && hw.bandwidth_gbs > 0.0 {
-        Some(estimate::tokens_per_sec(hw.bandwidth_gbs, params_b, &variant.quant_str))
+    let est_tok_s = if hw.bandwidth_gbs > 0.0 {
+        if weight_gb > 0.0 {
+            Some(hw.bandwidth_gbs * 0.5 / weight_gb)
+        } else if params_b > 0.0 {
+            Some(estimate::tokens_per_sec(hw.bandwidth_gbs, params_b, &variant.quant_str))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -395,5 +401,33 @@ mod tests {
         assert!(idx < results.len());
         let idx_pref = best_variant(&results, Some("fp8"));
         assert_eq!(results[idx_pref].0.quant_str, "fp8");
+    }
+
+    #[test]
+    fn test_gguf_usable_context_with_missing_dims() {
+        let hw = HardwareProfile {
+            gpu_name: "RTX 4090".into(),
+            vram_total_mb: 24576,
+            bandwidth_gbs: 1008.0,
+            bandwidth_known: true,
+        };
+        // Arch with missing layer dims but known params
+        let arch = ModelArchInfo {
+            params_b: Some(27.0),
+            context: 131072,
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
+        };
+        let v_gguf = VariantInput {
+            quant_str: "q4_k_m".into(),
+            weight_bytes: Some(16_000_000_000), // ~14.9 GB
+            params_b: Some(27.0),
+            is_gguf: true,
+        };
+        let res = score_variant(&hw, &v_gguf, &arch, None);
+        assert!(res.usable_context > 0, "usable context should not be 0");
+        assert!(res.est_tok_s.is_some(), "est speed should be present");
+        assert!(res.est_tok_s.unwrap() > 10.0, "est speed should be reasonable");
     }
 }
