@@ -575,6 +575,8 @@ mod tests {
             served_model_name: served.map(|s| s.into()),
             enforce_eager: true,
             params_b: None,
+            swap_space_gb: None,
+            cpu_offload_gb: None,
         }
     }
 

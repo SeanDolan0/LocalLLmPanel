@@ -45,6 +45,10 @@ pub struct ServerDef {
     pub enforce_eager: bool,
     /// Estimated params (billions) memoized at create time (for VRAM guidance).
     pub params_b: Option<f64>,
+    #[serde(default)]
+    pub swap_space_gb: Option<usize>,
+    #[serde(default)]
+    pub cpu_offload_gb: Option<usize>,
 }
 
 fn default_true() -> bool {
@@ -70,6 +74,54 @@ pub struct MeasuredStats {
 }
 
 // ---------------------------------------------------------------------------
+// Memory settings (persisted)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemorySettings {
+    #[serde(default = "default_gpu_mem_util")]
+    pub default_gpu_mem_util: f64,
+    #[serde(default = "default_vram_overhead")]
+    pub vram_overhead_mb: f64,
+    #[serde(default = "default_true")]
+    pub enable_ram_overflow: bool,
+    #[serde(default)]
+    pub manual_ram_limit_mb: Option<u64>,
+    #[serde(default = "default_safety_reserve")]
+    pub safety_reserve_mb: u64,
+    #[serde(default = "default_true")]
+    pub offload_weights_allowed: bool,
+    #[serde(default)]
+    pub max_context_cap: Option<usize>,
+}
+
+fn default_gpu_mem_util() -> f64 {
+    0.92
+}
+
+fn default_vram_overhead() -> f64 {
+    2500.0
+}
+
+fn default_safety_reserve() -> u64 {
+    4096
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            default_gpu_mem_util: 0.92,
+            vram_overhead_mb: 2500.0,
+            enable_ram_overflow: true,
+            manual_ram_limit_mb: None,
+            safety_reserve_mb: 4096,
+            offload_weights_allowed: true,
+            max_context_cap: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Persisted config
 // ---------------------------------------------------------------------------
 
@@ -83,7 +135,11 @@ pub struct PersistedConfig {
     pub default_quant: String,
     pub servers: Vec<ServerDef>,
     pub measured: HashMap<String, MeasuredStats>,
+    #[serde(default)]
+    pub memory_settings: MemorySettings,
 }
+
+pub type AppConfig = PersistedConfig;
 
 impl Default for PersistedConfig {
     fn default() -> Self {
@@ -95,6 +151,7 @@ impl Default for PersistedConfig {
             default_quant: "fp16".to_string(),
             servers: Vec::new(),
             measured: HashMap::new(),
+            memory_settings: MemorySettings::default(),
         }
     }
 }
@@ -306,6 +363,8 @@ mod tests {
             served_model_name: None,
             enforce_eager: true,
             params_b: None,
+            swap_space_gb: None,
+            cpu_offload_gb: None,
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -333,5 +392,68 @@ mod tests {
         let since = log.since_line(2050 - 3);
         assert!(since.contains("line 2047"));
         assert!(since.contains("line 2049"));
+    }
+
+    #[test]
+    fn test_memory_settings_default_and_roundtrip() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.memory_settings.default_gpu_mem_util, 0.92);
+        assert_eq!(cfg.memory_settings.vram_overhead_mb, 2500.0);
+        assert!(cfg.memory_settings.enable_ram_overflow);
+        assert_eq!(cfg.memory_settings.safety_reserve_mb, 4096);
+        assert!(cfg.memory_settings.offload_weights_allowed);
+        assert_eq!(cfg.memory_settings.manual_ram_limit_mb, None);
+        assert_eq!(cfg.memory_settings.max_context_cap, None);
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.memory_settings.default_gpu_mem_util, 0.92);
+        assert_eq!(parsed.memory_settings, cfg.memory_settings);
+
+        // Verify partial/missing JSON defaults
+        let empty_ms: MemorySettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty_ms, MemorySettings::default());
+
+        let legacy_config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy_config.memory_settings, MemorySettings::default());
+    }
+
+    #[test]
+    fn test_serverdef_swap_offload_roundtrip() {
+        let json = r#"{
+            "id": "s1",
+            "name": "test",
+            "model_id": "test/model",
+            "task": "instruct",
+            "port": 8000,
+            "gpu_mem_util": 0.9,
+            "max_model_len": 2048,
+            "quant": "fp16",
+            "served_model_name": null,
+            "enforce_eager": true,
+            "params_b": 1.0,
+            "swap_space_gb": 16,
+            "cpu_offload_gb": 8
+        }"#;
+        let s: ServerDef = serde_json::from_str(json).unwrap();
+        assert_eq!(s.swap_space_gb, Some(16));
+        assert_eq!(s.cpu_offload_gb, Some(8));
+
+        let legacy_json = r#"{
+            "id": "s1",
+            "name": "test",
+            "model_id": "test/model",
+            "task": "instruct",
+            "port": 8000,
+            "gpu_mem_util": 0.9,
+            "max_model_len": 2048,
+            "quant": "fp16",
+            "served_model_name": null,
+            "enforce_eager": true,
+            "params_b": 1.0
+        }"#;
+        let s_legacy: ServerDef = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(s_legacy.swap_space_gb, None);
+        assert_eq!(s_legacy.cpu_offload_gb, None);
     }
 }

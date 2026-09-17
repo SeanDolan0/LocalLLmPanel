@@ -682,6 +682,8 @@ pub struct CreateServerInput {
     pub quant: Option<String>,
     pub served_model_name: Option<String>,
     pub enforce_eager: Option<bool>,
+    pub swap_space_gb: Option<usize>,
+    pub cpu_offload_gb: Option<usize>,
 }
 
 #[tauri::command]
@@ -755,6 +757,8 @@ pub async fn servers_create(
         served_model_name: input.served_model_name.filter(|s| !s.trim().is_empty()),
         enforce_eager: input.enforce_eager.unwrap_or(true),
         params_b,
+        swap_space_gb: input.swap_space_gb,
+        cpu_offload_gb: input.cpu_offload_gb,
     };
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.push(def.clone());

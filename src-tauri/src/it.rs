@@ -96,6 +96,8 @@ fn wsl_it() {
             served_model_name: Some("qwen-0.5b".into()),
             enforce_eager: true,
             params_b: Some(0.494),
+            swap_space_gb: None,
+            cpu_offload_gb: None,
         });
         cfg.servers.push(ServerDef {
             id: "it-bge".into(),
@@ -109,6 +111,8 @@ fn wsl_it() {
             served_model_name: Some("embedder".into()),
             enforce_eager: true,
             params_b: Some(0.033),
+            swap_space_gb: None,
+            cpu_offload_gb: None,
         });
         cfg.save().expect("save config");
     }
