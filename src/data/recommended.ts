@@ -7,6 +7,7 @@ export interface RecommendedModel {
   context: number;
   description: string;
   pipeline_tag: string;
+  quality_prior?: number; // 0-100 baseline prior for benchmark standing
 }
 
 export const RECOMMENDED_MODELS: RecommendedModel[] = [
@@ -19,6 +20,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "Extremely fast, tiny footprint. Perfect for testing and fast local tasks.",
     pipeline_tag: "text-generation",
+    quality_prior: 62,
   },
   {
     id: "Qwen/Qwen2.5-1.5B-Instruct",
@@ -29,6 +31,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "Great balance of compact size, long context support, and chat quality.",
     pipeline_tag: "text-generation",
+    quality_prior: 72,
   },
   {
     id: "meta-llama/Llama-3.2-3B-Instruct",
@@ -39,6 +42,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 131072,
     description: "Meta state-of-the-art lightweight model with 128k context support.",
     pipeline_tag: "text-generation",
+    quality_prior: 80,
   },
   {
     id: "Qwen/Qwen2.5-Coder-1.5B-Instruct",
@@ -49,6 +53,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "Very fast code completion and script generation on modest hardware.",
     pipeline_tag: "text-generation",
+    quality_prior: 75,
   },
   {
     id: "Qwen/Qwen2.5-Coder-7B-Instruct",
@@ -59,6 +64,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "Top-tier open code model beating many larger models in code synthesis.",
     pipeline_tag: "text-generation",
+    quality_prior: 92,
   },
   {
     id: "Qwen/Qwen2.5-7B-Instruct",
@@ -69,6 +75,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "Superb all-around instruction following, multilingual and reasoning.",
     pipeline_tag: "text-generation",
+    quality_prior: 88,
   },
   {
     id: "meta-llama/Meta-Llama-3.1-8B-Instruct",
@@ -79,6 +86,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 131072,
     description: "Industry-standard open foundation model with massive ecosystem support.",
     pipeline_tag: "text-generation",
+    quality_prior: 89,
   },
   {
     id: "mistralai/Mistral-7B-Instruct-v0.3",
@@ -89,6 +97,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "Proven high-speed instruction model with native tool-calling support.",
     pipeline_tag: "text-generation",
+    quality_prior: 84,
   },
   {
     id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
@@ -99,6 +108,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "DeepSeek distilled chain-of-thought model with impressive logic.",
     pipeline_tag: "text-generation",
+    quality_prior: 94,
   },
   {
     id: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
@@ -109,6 +119,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 131072,
     description: "Distilled reasoning model trained on Llama 3.1 8B base.",
     pipeline_tag: "text-generation",
+    quality_prior: 93,
   },
   {
     id: "Qwen/Qwen2.5-14B-Instruct",
@@ -119,6 +130,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 32768,
     description: "High capacity model. Runs in FP8/AWQ on 12-16GB VRAM, or FP16 on 24GB.",
     pipeline_tag: "text-generation",
+    quality_prior: 95,
   },
   {
     id: "BAAI/bge-small-en-v1.5",
@@ -129,6 +141,7 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 512,
     description: "Ultra-fast text embeddings for RAG and semantic vector search.",
     pipeline_tag: "feature-extraction",
+    quality_prior: 85,
   },
   {
     id: "BAAI/bge-large-en-v1.5",
@@ -139,5 +152,6 @@ export const RECOMMENDED_MODELS: RecommendedModel[] = [
     context: 512,
     description: "High-accuracy sentence transformer embeddings for dense retrieval.",
     pipeline_tag: "feature-extraction",
+    quality_prior: 92,
   },
 ];

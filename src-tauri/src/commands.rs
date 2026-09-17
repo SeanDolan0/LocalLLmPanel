@@ -126,7 +126,13 @@ pub async fn provision(app: AppHandle, state: State<'_, Arc<AppState>>) -> Resul
     let st = (*state).clone();
     let app = app.clone();
     let cfg = st.config();
-    let distro = cfg.distro.clone();
+    let detected = crate::wsl::detect_default_distro();
+    let distro = match detected {
+        Some(ref d) if !crate::wsl::run_script(&cfg.distro, "echo ok").ok && crate::wsl::run_script(d, "echo ok").ok => {
+            d.clone()
+        }
+        _ => cfg.distro.clone(),
+    };
     let venv = cfg.venv_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let on_log = |phase: &str, line: &str| {
@@ -552,11 +558,18 @@ pub struct LibraryEntry {
 pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<LibraryEntry>, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let distro = st.config().distro;
-        // Hub cache dirs are `models--owner--name`; strip the prefix.
+        let detected = crate::wsl::detect_default_distro();
+        let cfg_distro = st.config().distro;
+        let distro = match detected {
+            Some(ref d) if !crate::wsl::run_script(&cfg_distro, "echo ok").ok && crate::wsl::run_script(d, "echo ok").ok => {
+                d.clone()
+            }
+            _ => cfg_distro,
+        };
+        // Hub cache dirs are `models--owner--name` or `models--name`; replace the first `--` with `/`.
         let out = crate::wsl::run_script(
             &distro,
-            "for d in ~/.cache/huggingface/hub/models--*; do [ -d \"$d\" ] || continue; raw=${d##*/models--}; owner=${raw%%--*}; rest=${raw#*--}; name=\"$owner/$rest\"; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done",
+            "for d in ~/.cache/huggingface/hub/models--*; do [ -d \"$d\" ] || continue; raw=${d##*/models--}; if [[ \"$raw\" == *--* ]]; then name=\"${raw/--//}\"; else name=\"$raw\"; fi; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done",
         );
         let mut out_v = Vec::new();
         for line in out.stdout.lines() {

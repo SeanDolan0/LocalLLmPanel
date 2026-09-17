@@ -51,7 +51,7 @@ fn shell_quote(s: &str) -> String {
 /// Build the `bash -lc` launcher. The script activates the venv, records the
 /// process PID (bash exec → vLLM keeps the same PID), then `exec`s vLLM so it
 /// runs in the foreground of the wsl.exe console (logs stream to the panel).
-fn launch_script(venv_dir: &str, def: &ServerDef) -> String {
+fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
     let mut parts: Vec<String> = vec![
         format!("cd {}/..", venv_dir),
         format!(". {}/bin/activate", venv_dir),
@@ -100,6 +100,13 @@ fn launch_script(venv_dir: &str, def: &ServerDef) -> String {
     // "UVA is not available". Kernels >= 4.19.121 support it once enabled.
     let preamble = "export VLLM_WSL2_ENABLE_PIN_MEMORY=1";
     parts.insert(0, preamble.into());
+    let token_ok = !hf_token.is_empty()
+        && hf_token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || (c.is_ascii_punctuation() && c != '\''));
+    if token_ok {
+        parts.insert(0, format!("export HF_TOKEN='{}'", hf_token));
+    }
     parts.push(format!("exec python -m vllm.entrypoints.openai.api_server {}", args.join(" ")));
     parts.join(" && ")
 }
@@ -158,7 +165,7 @@ pub fn start_server(
         }
     }
 
-    let script = launch_script(&cfg.venv_dir, &def);
+    let script = launch_script(&cfg.venv_dir, &def, &cfg.hf_token);
     let id_log = id.to_string();
     let state_log = Arc::clone(state);
     let app_ev = app.map(|a| (*a).clone());
@@ -573,7 +580,7 @@ mod tests {
 
     #[test]
     fn launch_script_instruct() {
-        let script = launch_script("~/llm-lp/.venv", &def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None));
+        let script = launch_script("~/llm-lp/.venv", &def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None), "");
         assert!(script.contains("exec python -m vllm.entrypoints.openai.api_server"));
         assert!(script.contains("--model 'Qwen/Qwen2.5-0.5B-Instruct'"));
         assert!(script.contains("--port 8010"));
@@ -582,6 +589,7 @@ mod tests {
         assert!(script.contains("$$ > ~/llm-lp/.venv/../run/s1.pid"));
         assert!(!script.contains("--runner pooling"));
         assert!(!script.contains("--quantization"));
+        assert!(!script.contains("export HF_TOKEN="));
     }
 
     #[test]
@@ -589,11 +597,13 @@ mod tests {
         let script = launch_script(
             "~/llm-lp/.venv",
             &def("BAAI/bge-small-en-v1.5", "embed", 8020, "fp8", Some("embedder")),
+            "hf_secret_123",
         );
         assert!(script.contains("--runner pooling"));
         assert!(script.contains("--quantization fp8"));
         assert!(script.contains("--served-model-name 'embedder'"));
         assert!(script.contains("--max-model-len 2048"));
+        assert!(script.contains("export HF_TOKEN='hf_secret_123'"));
     }
 
     #[test]

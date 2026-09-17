@@ -135,29 +135,170 @@ export function estimateWeightGb(paramsB: number, quant: string): number {
   return paramsB * bytesPerParam(quant);
 }
 
+export type UseCase = "general" | "chat" | "coding" | "reasoning" | "embedding";
+
+export interface ScoreComponents {
+  quality: number; // 0-100
+  speed: number;   // 0-100
+  fit: number;     // 0-100
+  context: number; // 0-100
+}
+
+export type FitLevel = "perfect" | "good" | "marginal" | "too_tight" | "unknown";
 export type FitRating = "optimal" | "tight" | "heavy" | "exceeds" | "unknown";
 
 export interface FitAssessment {
-  rating: FitRating;
+  score: number; // 0-100 llmfit composite score
+  fitLevel: FitLevel;
+  components: ScoreComponents;
+  rating: FitRating; // backwards compatible
   label: string;
-  badgeColor: "emerald" | "amber" | "indigo" | "red" | "slate";
+  badgeColor: "emerald" | "cyan" | "amber" | "red" | "slate";
   estWeightGb: number | null;
   vramPct: number | null;
+  estTokS: number | null;
   reason: string;
+}
+
+// Weights per use-case matching AlexsJones/llmfit
+const USE_CASE_WEIGHTS: Record<UseCase, [number, number, number, number]> = {
+  // [Quality, Speed, Fit, Context]
+  chat: [0.40, 0.35, 0.15, 0.10],
+  coding: [0.50, 0.20, 0.15, 0.15],
+  reasoning: [0.55, 0.15, 0.15, 0.15],
+  embedding: [0.30, 0.40, 0.20, 0.10],
+  general: [0.45, 0.30, 0.15, 0.10],
+};
+
+// Quantization quality penalties matching llmfit
+function quantizationPenalty(quant: string): number {
+  switch (quant.toLowerCase()) {
+    case "fp16":
+    case "bf16":
+      return 1.0;
+    case "fp8":
+    case "int8":
+      return 0.95;
+    case "awq":
+    case "gptq":
+      return 0.88;
+    case "int4":
+      return 0.85;
+    default:
+      return 0.92;
+  }
+}
+
+/**
+ * Calculates a 0-100 multi-dimensional fit score inspired by AlexsJones/llmfit.
+ */
+export function computeLlmfitScore(
+  paramsB: number,
+  quant: string,
+  totalVramMb: number,
+  bandwidthGbs: number,
+  contextTokens: number,
+  useCase: UseCase = "general",
+  taskQualityPrior?: number
+): { score: number; components: ScoreComponents; fitLevel: FitLevel; estTokS: number; memoryNeededGb: number; vramRatio: number } {
+  const estWeightGb = estimateWeightGb(paramsB, quant);
+  const overheadGb = 2.0; // CUDA + vLLM context buffer
+  const memoryNeededGb = estWeightGb + overheadGb;
+  const totalVramGb = totalVramMb / 1024;
+  const vramRatio = memoryNeededGb / totalVramGb;
+
+  // 1. Fit Level categorization (matching llmfit FIT_*_MAX_RATIO)
+  let fitLevel: FitLevel;
+  if (vramRatio <= 0.60) {
+    fitLevel = "perfect";
+  } else if (vramRatio <= 0.85) {
+    fitLevel = "good";
+  } else if (vramRatio <= 0.98) {
+    fitLevel = "marginal";
+  } else {
+    fitLevel = "too_tight";
+  }
+
+  // 2. Pillar: Quality (0 - 100)
+  // Scaled by log10(params) mapped against modern standard frontier (1B -> ~50, 7B -> ~75, 70B -> ~95)
+  // Adjusted by quantization retention and use-case task rating
+  const baseParamQuality = Math.min(100, Math.max(25, 45 + 30 * Math.log10(Math.max(paramsB, 0.5))));
+  const quantMult = quantizationPenalty(quant);
+  const taskPrior = taskQualityPrior ? taskQualityPrior / 100 : 1.0;
+  const quality = Math.min(100, Math.max(0, Math.round(baseParamQuality * quantMult * taskPrior)));
+
+  // 3. Pillar: Speed (0 - 100)
+  // Bandwidth Roofline model: tok/s = (bandwidth_GB_s / est_model_size_GB) * efficiency (0.55)
+  const eff = 0.55;
+  const estTokS = estWeightGb > 0 ? (bandwidthGbs / estWeightGb) * eff : 0;
+  // Speed score: 80 tok/s maps to 100 pts, 30 tok/s maps to ~65 pts
+  const speed = Math.min(100, Math.max(0, Math.round((estTokS / 80.0) * 100)));
+
+  // 4. Pillar: Fit (0 - 100)
+  // llmfit rewards 40-75% sweet spot. Under 30% has slight underutilization penalty. Over 85% drops sharply.
+  let fitScore = 0;
+  if (vramRatio <= 0.60) {
+    // 0.40 -> 100, 0.10 -> 80
+    fitScore = Math.round(75 + 25 * (vramRatio / 0.60));
+  } else if (vramRatio <= 0.85) {
+    // 60-85% is prime for large context without OOM
+    fitScore = Math.round(100 - ((vramRatio - 0.60) / 0.25) * 15);
+  } else if (vramRatio <= 0.98) {
+    // Marginal: 85 - 40
+    fitScore = Math.round(85 - ((vramRatio - 0.85) / 0.13) * 45);
+  } else {
+    // Too tight / OOM danger
+    fitScore = Math.max(0, Math.round(30 - (vramRatio - 0.98) * 100));
+  }
+
+  // 5. Pillar: Context (0 - 100)
+  // Normalized against 32k benchmark target
+  const context = Math.min(100, Math.max(15, Math.round((contextTokens / 32768) * 85)));
+
+  // Weighted composite score
+  const [wQ, wS, wF, wC] = USE_CASE_WEIGHTS[useCase] || USE_CASE_WEIGHTS.general;
+  let composite = Math.round(quality * wQ + speed * wS + fitScore * wF + context * wC);
+
+  // Severe penalty if it exceeds VRAM (llmfit: TooTight models have crushed scores)
+  if (fitLevel === "too_tight") {
+    composite = Math.min(composite, 25);
+  }
+
+  return {
+    score: composite,
+    components: {
+      quality,
+      speed,
+      fit: fitScore,
+      context,
+    },
+    fitLevel,
+    estTokS: Math.round(estTokS * 10) / 10,
+    memoryNeededGb: Math.round(memoryNeededGb * 10) / 10,
+    vramRatio,
+  };
 }
 
 export function evaluateSystemFit(
   paramsB: number | null | undefined,
   quant: string,
-  totalVramMb: number | null | undefined
+  totalVramMb: number | null | undefined,
+  bandwidthGbs: number = 300,
+  contextTokens: number = 32768,
+  useCase: UseCase = "general",
+  taskQualityPrior?: number
 ): FitAssessment {
   if (paramsB == null || paramsB <= 0) {
     return {
+      score: 0,
+      fitLevel: "unknown",
+      components: { quality: 0, speed: 0, fit: 0, context: 0 },
       rating: "unknown",
       label: "Unknown Fit",
       badgeColor: "slate",
       estWeightGb: null,
       vramPct: null,
+      estTokS: null,
       reason: "Model parameters count is missing or unindexed",
     };
   }
@@ -165,50 +306,84 @@ export function evaluateSystemFit(
   const estWeightGb = estimateWeightGb(paramsB, quant);
   if (!totalVramMb || totalVramMb <= 0) {
     return {
+      score: 50,
+      fitLevel: "unknown",
+      components: { quality: 50, speed: 50, fit: 50, context: 50 },
       rating: "unknown",
       label: "Fits ~" + estWeightGb.toFixed(1) + " GB",
       badgeColor: "slate",
       estWeightGb,
       vramPct: null,
+      estTokS: null,
       reason: "GPU VRAM could not be verified",
     };
   }
 
-  const totalVramGb = totalVramMb / 1024;
-  // Base overhead for CUDA runtime + vLLM runtime context (~1.5GB - 2.5GB)
-  const overheadGb = 2.0;
-  const memoryNeededGb = estWeightGb + overheadGb;
-  const vramPct = Math.round((memoryNeededGb / totalVramGb) * 100);
+  const llmfit = computeLlmfitScore(
+    paramsB,
+    quant,
+    totalVramMb,
+    bandwidthGbs,
+    contextTokens,
+    useCase,
+    taskQualityPrior
+  );
 
-  if (memoryNeededGb > totalVramGb) {
-    return {
-      rating: "exceeds",
-      label: "Exceeds VRAM",
-      badgeColor: "red",
-      estWeightGb,
-      vramPct,
-      reason: `Requires ~${memoryNeededGb.toFixed(1)} GB (inc. runtime overhead), GPU has ${totalVramGb.toFixed(1)} GB. OOM likely.`,
-    };
+  const vramPct = Math.round(llmfit.vramRatio * 100);
+
+  switch (llmfit.fitLevel) {
+    case "perfect":
+      return {
+        score: llmfit.score,
+        fitLevel: "perfect",
+        components: llmfit.components,
+        rating: "optimal",
+        label: `${llmfit.score}/100 · Perfect`,
+        badgeColor: "emerald",
+        estWeightGb,
+        vramPct,
+        estTokS: llmfit.estTokS,
+        reason: `Perfect fit (${vramPct}% VRAM). Generous room for 32k+ KV cache and peak generation throughput.`,
+      };
+    case "good":
+      return {
+        score: llmfit.score,
+        fitLevel: "good",
+        components: llmfit.components,
+        rating: "optimal",
+        label: `${llmfit.score}/100 · Good`,
+        badgeColor: "cyan",
+        estWeightGb,
+        vramPct,
+        estTokS: llmfit.estTokS,
+        reason: `Good fit (${vramPct}% VRAM). Balanced parameter density with reliable runtime memory headroom.`,
+      };
+    case "marginal":
+      return {
+        score: llmfit.score,
+        fitLevel: "marginal",
+        components: llmfit.components,
+        rating: "tight",
+        label: `${llmfit.score}/100 · Marginal`,
+        badgeColor: "amber",
+        estWeightGb,
+        vramPct,
+        estTokS: llmfit.estTokS,
+        reason: `Marginal fit (${vramPct}% VRAM). Tight KV cache space; large prompts or high batch concurrency may OOM.`,
+      };
+    case "too_tight":
+    default:
+      return {
+        score: llmfit.score,
+        fitLevel: "too_tight",
+        components: llmfit.components,
+        rating: "exceeds",
+        label: `${llmfit.score}/100 · Too Tight`,
+        badgeColor: "red",
+        estWeightGb,
+        vramPct,
+        estTokS: llmfit.estTokS,
+        reason: `Exceeds safe VRAM limit (~${llmfit.memoryNeededGb} GB required vs ${(totalVramMb / 1024).toFixed(1)} GB GPU). OOM likely.`,
+      };
   }
-
-  if (vramPct >= 85) {
-    return {
-      rating: "tight",
-      label: "Tight Fit",
-      badgeColor: "amber",
-      estWeightGb,
-      vramPct,
-      reason: `Utilizes ~${vramPct}% VRAM. High context windows (>8k) may require reduced GPU memory util or KV quantization.`,
-    };
-  }
-
-  // Sweet spot: 40% - 85% utilization
-  return {
-    rating: "optimal",
-    label: "Recommended",
-    badgeColor: "emerald",
-    estWeightGb,
-    vramPct,
-    reason: `Optimal sweet spot (~${vramPct}% VRAM). Fits weights + ample KV cache with low latency.`,
-  };
 }

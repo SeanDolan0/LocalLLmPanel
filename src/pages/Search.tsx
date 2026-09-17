@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   api,
   evaluateSystemFit,
@@ -7,12 +8,14 @@ import {
   fmtNum,
   fmtTokPerSec,
   quantLabel,
+  type UseCase,
 } from "../api";
 import { Badge, Button, inputCls, Spinner } from "../ui";
 import type { EnvStatus, ModelWithStats, PullStatus } from "../types";
 import { RECOMMENDED_MODELS, type RecommendedModel } from "../data/recommended";
 
 export default function Search() {
+  const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [quant, setQuant] = useState("fp16");
   const [results, setResults] = useState<ModelWithStats[] | null>(null);
@@ -65,6 +68,14 @@ export default function Search() {
     api.pullModel(modelId).catch((e) => setErr(String(e)));
   };
 
+  const selectCategory = (key: string) => {
+    setActiveCategory(key);
+    if (results !== null || query) {
+      setQuery("");
+      setResults(null);
+    }
+  };
+
   // Filter curated models according to active category
   const filteredRecommendations = useMemo(() => {
     return RECOMMENDED_MODELS.filter((m) => {
@@ -75,31 +86,46 @@ export default function Search() {
 
   // Compute stats and fit for recommendations
   const recommendationRows = useMemo(() => {
-    return filteredRecommendations.map((m) => {
-      const fit = evaluateSystemFit(m.params_b, quant, totalVramMb);
-      // Rough tokens/sec calculation for recommendations: bw * 1e9 * 0.5 / (params * 1e9 * bpp)
-      const bpp = quant === "fp8" || quant === "int8" ? 1.0 : quant === "awq" || quant === "gptq" ? 1.1 : 2.0;
-      const estTokS = m.params_b > 0 ? (bandwidth * 1e9 * 0.5) / (m.params_b * 1e9 * bpp) : null;
+    const list = filteredRecommendations.map((m) => {
+      const fit = evaluateSystemFit(
+        m.params_b,
+        quant,
+        totalVramMb,
+        bandwidth,
+        m.context,
+        m.category,
+        m.quality_prior
+      );
       return {
         ...m,
         fit,
-        estTokS,
+        estTokS: fit.estTokS,
       };
     });
+    // Sort recommendations by llmfit score descending
+    return list.sort((a, b) => b.fit.score - a.fit.score);
   }, [filteredRecommendations, quant, totalVramMb, bandwidth]);
 
-  // Process search results with fit evaluation
+  // Process search results with fit evaluation and dynamic precision speed
   const evaluatedResults = useMemo(() => {
     if (!results) return null;
     const list = results.map((m) => {
-      const fit = evaluateSystemFit(m.params_b, quant, totalVramMb);
-      return { ...m, fit };
+      const useCase = (m.pipeline_tag === "feature-extraction" ? "embedding" : "general") as UseCase;
+      const fit = evaluateSystemFit(
+        m.params_b,
+        quant,
+        totalVramMb,
+        bandwidth,
+        m.context ?? 32768,
+        useCase
+      );
+      return { ...m, fit, dynamicTokS: fit.estTokS ?? m.max_tok_s };
     });
     if (onlyRecommended) {
-      return list.filter((m) => m.fit.rating === "optimal" || m.fit.rating === "tight");
+      return list.filter((m) => m.fit.fitLevel === "perfect" || m.fit.fitLevel === "good");
     }
     return list;
-  }, [results, quant, totalVramMb, onlyRecommended]);
+  }, [results, quant, totalVramMb, bandwidth, onlyRecommended]);
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
@@ -107,7 +133,7 @@ export default function Search() {
         <div>
           <h1 className="text-xl font-bold text-slate-100">Model Search & Discovery</h1>
           <p className="text-xs text-slate-400 mt-0.5">
-            Discover and pull AI models hardware-tailored for vLLM & your GPU.
+            Discover and score models against your hardware using llmfit multi-dimensional rating.
           </p>
         </div>
         {env?.gpu && (
@@ -184,7 +210,7 @@ export default function Search() {
           ).map(([key, label]) => (
             <button
               key={key}
-              onClick={() => setActiveCategory(key)}
+              onClick={() => selectCategory(key)}
               className={`rounded-full px-2.5 py-1 transition-colors ${
                 activeCategory === key
                   ? "bg-indigo-600 text-white font-medium"
@@ -204,7 +230,7 @@ export default function Search() {
               onChange={(e) => setOnlyRecommended(e.target.checked)}
               className="rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0"
             />
-            <span>Show only hardware-compatible models</span>
+            <span>Show only llmfit compatible (Perfect / Good)</span>
           </label>
         )}
       </div>
@@ -222,7 +248,7 @@ export default function Search() {
             <div>
               <h2 className="text-base font-semibold text-slate-200">Recommended for Your System</h2>
               <p className="text-xs text-slate-500">
-                Models curated for vLLM compatibility, scored against your GPU's VRAM ({totalVramMb ? `${(totalVramMb / 1024).toFixed(1)} GB` : "detected"}) and bandwidth at {quantLabel(quant)}.
+                Ranked using <strong>llmfit</strong> multi-pillar scoring (Quality, Speed, Memory Fit, Context) against your GPU ({totalVramMb ? `${(totalVramMb / 1024).toFixed(1)} GB VRAM` : "detected"}) at {quantLabel(quant)}.
               </p>
             </div>
             <span className="text-xs text-slate-500">
@@ -233,6 +259,7 @@ export default function Search() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {recommendationRows.map((m) => {
               const pullState = pulls[m.id];
+              const { components } = m.fit;
               return (
                 <div
                   key={m.id}
@@ -241,7 +268,12 @@ export default function Search() {
                   <div className="space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <div className="font-semibold text-slate-200 text-sm">{m.name}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-200 text-sm">{m.name}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-3 text-slate-400">
+                            {m.tag}
+                          </span>
+                        </div>
                         <div className="text-[11px] font-mono text-slate-500 truncate max-w-[210px]" title={m.id}>
                           {m.id}
                         </div>
@@ -253,7 +285,33 @@ export default function Search() {
                       {m.description}
                     </p>
 
-                    <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface-3/50 p-2 text-center text-xs">
+                    {/* llmfit 4-pillar mini-meters */}
+                    <div className="rounded-lg bg-surface-3/50 p-2.5 space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-slate-400 font-medium">llmfit Pillars</span>
+                        <span className="text-indigo-300 font-mono font-semibold">{m.fit.score}/100</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5 text-[10px]">
+                        <div className="rounded bg-surface-2/80 p-1 text-center">
+                          <div className="text-slate-500">Quality</div>
+                          <div className="font-medium text-slate-300">{components.quality}</div>
+                        </div>
+                        <div className="rounded bg-surface-2/80 p-1 text-center">
+                          <div className="text-slate-500">Speed</div>
+                          <div className="font-medium text-cyan-300">{components.speed}</div>
+                        </div>
+                        <div className="rounded bg-surface-2/80 p-1 text-center">
+                          <div className="text-slate-500">Fit</div>
+                          <div className="font-medium text-emerald-300">{components.fit}</div>
+                        </div>
+                        <div className="rounded bg-surface-2/80 p-1 text-center">
+                          <div className="text-slate-500">Context</div>
+                          <div className="font-medium text-slate-300">{components.context}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface-3/30 p-2 text-center text-xs">
                       <div>
                         <div className="text-[10px] text-slate-500 uppercase">Params</div>
                         <div className="font-medium text-slate-300">{m.params_b}B</div>
@@ -282,15 +340,24 @@ export default function Search() {
                     >
                       Inspect HF Details
                     </button>
-                    {pullState ? (
-                      <Badge color={pullState.state === "complete" ? "emerald" : pullState.state === "failed" ? "red" : "indigo"}>
-                        {pullState.state}
-                      </Badge>
-                    ) : (
-                      <Button variant="ghost" onClick={() => pull(m.id)}>
-                        Pull Model
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="primary"
+                        className="text-xs px-2.5 py-1"
+                        onClick={() => navigate("/servers", { state: { prefillModel: m.id } })}
+                      >
+                        Deploy
                       </Button>
-                    )}
+                      {pullState ? (
+                        <Badge color={pullState.state === "complete" ? "emerald" : pullState.state === "failed" ? "red" : "indigo"}>
+                          {pullState.state}
+                        </Badge>
+                      ) : (
+                        <Button variant="ghost" className="text-xs px-2.5 py-1" onClick={() => pull(m.id)}>
+                          Pull
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
               );
@@ -379,31 +446,40 @@ export default function Search() {
                           )}
                         </td>
                         <td className="px-3 py-2.5 text-right">
-                          {m.max_tok_s != null ? (
-                            <span className="font-mono text-cyan-300">{fmtTokPerSec(m.max_tok_s)}</span>
+                          {m.dynamicTokS != null ? (
+                            <span className="font-mono text-cyan-300">{fmtTokPerSec(m.dynamicTokS)}</span>
                           ) : (
                             <span className="text-slate-600">—</span>
                           )}
                         </td>
                         <td className="px-3 py-2.5 text-right text-slate-400">{fmtNum(m.downloads)}</td>
                         <td className="px-3 py-2.5 text-right">
-                          {pullState ? (
-                            <Badge
-                              color={
-                                pullState.state === "complete"
-                                  ? "emerald"
-                                  : pullState.state === "failed"
-                                  ? "red"
-                                  : "indigo"
-                              }
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Button
+                              variant="primary"
+                              className="text-xs px-2.5 py-1"
+                              onClick={() => navigate("/servers", { state: { prefillModel: m.id } })}
                             >
-                              {pullState.state}
-                            </Badge>
-                          ) : (
-                            <Button variant="ghost" onClick={() => pull(m.id)}>
-                              Pull
+                              Deploy
                             </Button>
-                          )}
+                            {pullState ? (
+                              <Badge
+                                color={
+                                  pullState.state === "complete"
+                                    ? "emerald"
+                                    : pullState.state === "failed"
+                                    ? "red"
+                                    : "indigo"
+                                }
+                              >
+                                {pullState.state}
+                              </Badge>
+                            ) : (
+                              <Button variant="ghost" className="text-xs px-2.5 py-1" onClick={() => pull(m.id)}>
+                                Pull
+                              </Button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );

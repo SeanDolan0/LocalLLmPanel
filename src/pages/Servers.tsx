@@ -1,18 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { effectiveModelName } from "../types";
 import type { CreateServerInput, ServerListRow } from "../types";
 
 export default function Servers() {
+  const location = useLocation();
   const [rows, setRows] = useState<ServerListRow[]>([]);
   const [showNew, setShowNew] = useState(false);
+  const [prefillModel, setPrefillModel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
-  // log buffers per server (event-driven)
+  // log buffers per server (event-driven + hydrated)
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const logEndRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // Check navigation state for prefill model (e.g. from Search or Library Deploy)
+  useEffect(() => {
+    const state = location.state as { prefillModel?: string } | null;
+    if (state?.prefillModel) {
+      setPrefillModel(state.prefillModel);
+      setShowNew(true);
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state]);
 
   const refresh = useCallback(() => {
     api.serversList().then(setRows).catch(() => {});
@@ -42,6 +55,23 @@ export default function Servers() {
       unsubs.forEach((u) => u.then((f) => f()));
     };
   }, [refresh]);
+
+  // Hydrate logs when selecting a server
+  useEffect(() => {
+    if (selected) {
+      api
+        .serversLogs(selected, 0)
+        .then((historical) => {
+          if (historical) {
+            setLogs((prev) => ({
+              ...prev,
+              [selected]: historical,
+            }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [selected]);
 
   // Auto-scroll selected log
   useEffect(() => {
@@ -76,7 +106,22 @@ export default function Servers() {
 
       {err && <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{err}</div>}
 
-      {showNew && <NewServerForm onDone={(s) => { setShowNew(false); setSelected(s.id); refresh(); }} onErr={setErr} />}
+      {showNew && (
+        <NewServerForm
+          initialModelId={prefillModel ?? ""}
+          onDone={(s) => {
+            setShowNew(false);
+            setPrefillModel(null);
+            setSelected(s.id);
+            refresh();
+          }}
+          onCancel={() => {
+            setShowNew(false);
+            setPrefillModel(null);
+          }}
+          onErr={setErr}
+        />
+      )}
 
       {rows.length === 0 && !showNew ? (
         <Card>
@@ -120,7 +165,7 @@ export default function Servers() {
                       Start
                     </Button>
                   )}
-                  {r.status === "running" && (
+                  {(r.status === "running" || r.status === "starting") && (
                     <Button variant="danger" disabled={busy === r.def.id} onClick={() => act(r.def.id, () => api.serversStop(r.def.id))}>
                       Stop
                     </Button>
@@ -155,7 +200,7 @@ export default function Servers() {
             <CardTitle
               right={
                 <div className="flex gap-2">
-                  <a className={`${statusColor(selectedRow.status)} text-sm font-medium`}>{selectedRow.status}</a>
+                  <span className={`${statusColor(selectedRow.status)} text-sm font-medium`}>{selectedRow.status}</span>
                   {selectedRow.status === "running" && selectedRow.def.task === "instruct" && (
                     <ChatButton serverId={selectedRow.def.id} port={selectedRow.def.port} model={effectiveModelName(selectedRow.def)} />
                   )}
@@ -207,15 +252,32 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 // ---------------------------------------------------------------------------
 
-function NewServerForm({ onDone, onErr }: { onDone: (s: { id: string }) => void; onErr: (e: string) => void }) {
-  const [modelId, setModelId] = useState("");
-  const [name, setName] = useState("");
+function NewServerForm({
+  initialModelId = "",
+  onDone,
+  onCancel,
+  onErr,
+}: {
+  initialModelId?: string;
+  onDone: (s: { id: string }) => void;
+  onCancel: () => void;
+  onErr: (e: string) => void;
+}) {
+  const [modelId, setModelId] = useState(initialModelId);
+  const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
   const [task, setTask] = useState<"instruct" | "embed">("instruct");
   const [quant, setQuant] = useState("fp16");
   const [gpuUtil, setGpuUtil] = useState("0.92");
   const [maxLen, setMaxLen] = useState("");
   const [served, setServed] = useState("");
   const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    if (initialModelId) {
+      setModelId(initialModelId);
+      setName(initialModelId.split("/").pop() || "");
+    }
+  }, [initialModelId]);
 
   const submit = async () => {
     if (!modelId.trim()) return;
@@ -274,7 +336,7 @@ function NewServerForm({ onDone, onErr }: { onDone: (s: { id: string }) => void;
         </Field>
       </div>
       <div className="mt-4 flex justify-end gap-2">
-        <Button variant="ghost" onClick={() => onDone({ id: "" })}>Cancel</Button>
+        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
         <Button onClick={submit} disabled={creating || !modelId.trim()}>
           {creating ? <Spinner label="creating…" /> : "Create"}
         </Button>
@@ -328,7 +390,16 @@ function ChatButton({ serverId, port, model }: { serverId: string; port: number;
               <div className="text-sm font-medium text-slate-200">
                 Playground · {model} <span className="text-slate-500">(port {port})</span>
               </div>
-              <button className="text-slate-500 hover:text-slate-300" onClick={() => setOpen(false)}>✕</button>
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded border border-edge bg-surface-3 px-2 py-0.5 text-xs text-slate-400 hover:text-slate-200"
+                  onClick={() => setMsgs([{ role: "system", content: "You are a helpful assistant." }])}
+                  title="Reset conversation"
+                >
+                  Clear chat
+                </button>
+                <button className="text-slate-500 hover:text-slate-300" onClick={() => setOpen(false)}>✕</button>
+              </div>
             </div>
             <div className="flex-1 space-y-3 overflow-y-auto p-4">
               {msgs.map((m, i) => (

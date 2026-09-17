@@ -80,9 +80,13 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
     if user.is_empty() {
         bail!("could not determine WSL user for distro {distro}");
     }
+    let safe_user: String = user
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
     on_log("sudo", &format!("configuring passwordless sudo for user '{user}' (via wsl --user root)…"));
     let script = format!(
-        "echo '{user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/llm-panel-{user} && chmod 440 /etc/sudoers.d/llm-panel-{user} && echo ok"
+        "echo '{user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/llm-panel-{safe_user} && chmod 440 /etc/sudoers.d/llm-panel-{safe_user} && echo ok"
     );
     let out = wsl::run_script_root(distro, &script);
     if !out.ok || !out.stdout.trim().ends_with("ok") {
@@ -113,7 +117,7 @@ fn phase_uv(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String>
     if !out.ok {
         // curl may be missing (apt phase normally runs first in fresh WSL).
         // Fall back to apt uv if available, else fail with clear message.
-        let fallback = wsl::run_script(distro, "sudo apt-get install -y -qq uv 2>&1 | tail -1; command -v uv && echo ok");
+        let fallback = wsl::run_script(distro, "DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq uv 2>&1 | tail -1; command -v uv && echo ok");
         if fallback.stdout.trim() != "ok" {
             bail!("uv install failed (installer + apt): {}", out.combined());
         }
@@ -126,7 +130,7 @@ fn phase_apt(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String
         on_log("apt", "running apt-get update…");
         let out = wsl::run_script_stream(
             distro,
-            "sudo apt-get update -y -qq && sudo apt-get install -y -qq python3-venv python3-pip curl",
+            "DEBIAN_FRONTEND=noninteractive sudo apt-get update -y -qq && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq python3-venv python3-pip curl",
             |l| on_log("apt", l),
         );
         if !out.ok {
@@ -173,7 +177,7 @@ if ! {venv}/bin/python -m pip --version >/dev/null 2>&1; then
   if ! {venv}/bin/python -m ensurepip --upgrade >/dev/null 2>&1; then
     PYM=\$({venv}/bin/python --version | sed 's/Python \\([0-9]*\\.[0-9]*\\).*/python\\1-venv/')
     echo "ensurepip failed; apt-get installing $PYM…"
-    sudo apt-get install -y -qq "$PYM" >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq "$PYM" >/dev/null 2>&1
     rm -rf {venv}
     python3 -m venv {venv}
   fi

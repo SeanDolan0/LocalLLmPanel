@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, events, fmtGB, fmtNum } from "../api";
 import { Button, Card, CardTitle, Gauge, Spinner } from "../ui";
 import type { EnvStatus, ProvisionReport, WslLogEvent } from "../types";
@@ -9,6 +9,13 @@ export default function Dashboard() {
   const [provisioning, setProvisioning] = useState(false);
   const [provisionErr, setProvisionErr] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (provisioning && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [logs, provisioning]);
 
   const refresh = useCallback(() => {
     api
@@ -180,6 +187,7 @@ export default function Dashboard() {
                 </div>
               ))
             )}
+            <div ref={logEndRef} />
           </div>
         </Card>
       </div>
