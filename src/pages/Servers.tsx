@@ -11,6 +11,10 @@ export default function Servers() {
   const [showNew, setShowNew] = useState(false);
   const [prefillModel, setPrefillModel] = useState<string | null>(null);
   const [prefillQuant, setPrefillQuant] = useState<string | null>(null);
+  const [prefillSwapSpace, setPrefillSwapSpace] = useState<number | undefined>(undefined);
+  const [prefillCpuOffload, setPrefillCpuOffload] = useState<number | undefined>(undefined);
+  const [prefillMaxLen, setPrefillMaxLen] = useState<number | undefined>(undefined);
+  const [prefillVramContext, setPrefillVramContext] = useState<number | undefined>(undefined);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
   // log buffers per server (event-driven + hydrated)
@@ -18,13 +22,41 @@ export default function Servers() {
   const [selected, setSelected] = useState<string | null>(null);
   const logEndRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // Check navigation state for prefill model and quant (e.g. from Search or Library Deploy)
+  const clearPrefills = () => {
+    setPrefillModel(null);
+    setPrefillQuant(null);
+    setPrefillSwapSpace(undefined);
+    setPrefillCpuOffload(undefined);
+    setPrefillMaxLen(undefined);
+    setPrefillVramContext(undefined);
+  };
+
+  // Check navigation state for prefill model, quant, swap, offload, and context (e.g. from Search or Library Deploy)
   useEffect(() => {
-    const state = location.state as { prefillModel?: string; prefillQuant?: string } | null;
+    const state = location.state as {
+      prefillModel?: string;
+      prefillQuant?: string;
+      prefillSwapSpace?: number;
+      prefillCpuOffload?: number;
+      prefillMaxLen?: number;
+      prefillVramContext?: number;
+    } | null;
     if (state?.prefillModel) {
       setPrefillModel(state.prefillModel);
       if (state.prefillQuant) {
         setPrefillQuant(state.prefillQuant);
+      }
+      if (state.prefillSwapSpace !== undefined) {
+        setPrefillSwapSpace(state.prefillSwapSpace);
+      }
+      if (state.prefillCpuOffload !== undefined) {
+        setPrefillCpuOffload(state.prefillCpuOffload);
+      }
+      if (state.prefillMaxLen !== undefined) {
+        setPrefillMaxLen(state.prefillMaxLen);
+      }
+      if (state.prefillVramContext !== undefined) {
+        setPrefillVramContext(state.prefillVramContext);
       }
       setShowNew(true);
       window.history.replaceState({}, document.title);
@@ -114,17 +146,19 @@ export default function Servers() {
         <NewServerForm
           initialModelId={prefillModel ?? ""}
           initialQuant={prefillQuant ?? undefined}
+          initialSwapSpace={prefillSwapSpace}
+          initialCpuOffload={prefillCpuOffload}
+          initialMaxLen={prefillMaxLen}
+          initialVramContext={prefillVramContext}
           onDone={(s) => {
             setShowNew(false);
-            setPrefillModel(null);
-            setPrefillQuant(null);
+            clearPrefills();
             setSelected(s.id);
             refresh();
           }}
           onCancel={() => {
             setShowNew(false);
-            setPrefillModel(null);
-            setPrefillQuant(null);
+            clearPrefills();
           }}
           onErr={setErr}
         />
@@ -155,10 +189,26 @@ export default function Servers() {
                       {r.status}
                     </Badge>
                   </div>
-                  <div className="mt-1 truncate text-xs text-slate-500 group-hover:text-slate-400">
-                    {r.def.model_id} · port {r.def.port} · {r.def.task} · {quantLabel(r.def.quant)}
-                    {r.def.max_model_len ? ` · ctx ${fmtNum(r.def.max_model_len)}` : ""}
-                    {r.def.params_b ? ` · ~${r.def.params_b.toFixed(2)}B` : ""}
+                  <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-slate-500 group-hover:text-slate-400">
+                    <span>{r.def.model_id}</span>
+                    <span>·</span>
+                    <span>port {r.def.port}</span>
+                    <span>·</span>
+                    <span>{r.def.task}</span>
+                    <span>·</span>
+                    <span>{quantLabel(r.def.quant)}</span>
+                    {r.def.max_model_len ? <span>· ctx {fmtNum(r.def.max_model_len)}</span> : null}
+                    {r.def.params_b ? <span>· ~{r.def.params_b.toFixed(2)}B</span> : null}
+                    {r.def.swap_space_gb != null && r.def.swap_space_gb > 0 && (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-950/80 text-cyan-300 border border-cyan-800">
+                        swap {r.def.swap_space_gb}GB
+                      </span>
+                    )}
+                    {r.def.cpu_offload_gb != null && r.def.cpu_offload_gb > 0 && (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950/80 text-amber-300 border border-amber-800">
+                        offload {r.def.cpu_offload_gb}GB
+                      </span>
+                    )}
                   </div>
                 </button>
                 <div className="flex items-center gap-2">
@@ -262,12 +312,20 @@ function Stat({ label, value }: { label: string; value: string }) {
 function NewServerForm({
   initialModelId = "",
   initialQuant,
+  initialSwapSpace,
+  initialCpuOffload,
+  initialMaxLen,
+  initialVramContext,
   onDone,
   onCancel,
   onErr,
 }: {
   initialModelId?: string;
   initialQuant?: string;
+  initialSwapSpace?: number;
+  initialCpuOffload?: number;
+  initialMaxLen?: number;
+  initialVramContext?: number;
   onDone: (s: { id: string }) => void;
   onCancel: () => void;
   onErr: (e: string) => void;
@@ -277,7 +335,14 @@ function NewServerForm({
   const [task, setTask] = useState<"instruct" | "embed">("instruct");
   const [quant, setQuant] = useState(initialQuant || "fp16");
   const [gpuUtil, setGpuUtil] = useState("0.92");
-  const [maxLen, setMaxLen] = useState("");
+  const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
+  const [swapSpaceGb, setSwapSpaceGb] = useState<string>(
+    initialSwapSpace !== undefined ? String(initialSwapSpace) : ""
+  );
+  const [cpuOffloadGb, setCpuOffloadGb] = useState<string>(
+    initialCpuOffload !== undefined ? String(initialCpuOffload) : ""
+  );
+  const [vramContextLimit, setVramContextLimit] = useState<number | undefined>(initialVramContext);
   const [served, setServed] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -289,12 +354,26 @@ function NewServerForm({
     if (initialQuant) {
       setQuant(initialQuant);
     }
-  }, [initialModelId, initialQuant]);
+    if (initialSwapSpace !== undefined) {
+      setSwapSpaceGb(String(initialSwapSpace));
+    }
+    if (initialCpuOffload !== undefined) {
+      setCpuOffloadGb(String(initialCpuOffload));
+    }
+    if (initialMaxLen !== undefined) {
+      setMaxLen(String(initialMaxLen));
+    }
+    if (initialVramContext !== undefined) {
+      setVramContextLimit(initialVramContext);
+    }
+  }, [initialModelId, initialQuant, initialSwapSpace, initialCpuOffload, initialMaxLen, initialVramContext]);
 
   const submit = async () => {
     if (!modelId.trim()) return;
     setCreating(true);
     try {
+      const parsedSwap = swapSpaceGb !== "" ? parseFloat(swapSpaceGb) : null;
+      const parsedOffload = cpuOffloadGb !== "" ? parseFloat(cpuOffloadGb) : null;
       const input: CreateServerInput = {
         name: name.trim() || modelId.split("/").pop() || "server",
         model_id: modelId.trim(),
@@ -302,6 +381,8 @@ function NewServerForm({
         quant,
         gpu_mem_util: parseFloat(gpuUtil) || 0.92,
         max_model_len: maxLen ? parseInt(maxLen) || undefined : undefined,
+        swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
+        cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
         served_model_name: served.trim() || undefined,
       };
       const def = await api.serversCreate(input);
@@ -340,8 +421,70 @@ function NewServerForm({
         <Field label="GPU memory utilization (0–1)">
           <input className={inputCls} value={gpuUtil} onChange={(e) => setGpuUtil(e.target.value)} />
         </Field>
-        <Field label="Max model len (blank = auto)">
-          <input className={inputCls} placeholder="auto (context ∩ VRAM fit)" value={maxLen} onChange={(e) => setMaxLen(e.target.value)} />
+        <Field
+          label="Max model len (blank = auto)"
+          hint={
+            vramContextLimit && vramContextLimit > 0
+              ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit)} tokens | RAM Swap: > ${fmtNum(vramContextLimit)} tokens`
+              : "Context ceiling in tokens. If exceeding VRAM, RAM swap space will be used."
+          }
+        >
+          <input
+            className={inputCls}
+            placeholder={
+              vramContextLimit
+                ? `auto (~${fmtNum(vramContextLimit)} VRAM)`
+                : "auto (context ∩ VRAM fit)"
+            }
+            value={maxLen}
+            onChange={(e) => setMaxLen(e.target.value)}
+          />
+          {vramContextLimit && vramContextLimit > 0 && (
+            <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+              <span className="inline-flex items-center gap-1 text-emerald-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                VRAM: ≤{fmtNum(vramContextLimit)}
+              </span>
+              <span className="text-slate-600">➔</span>
+              <span className="inline-flex items-center gap-1 text-cyan-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                RAM Swap: &gt;{fmtNum(vramContextLimit)}
+              </span>
+              {maxLen && parseInt(maxLen) > vramContextLimit && (
+                <span className="text-[11px] font-semibold text-cyan-300 ml-auto">
+                  (Uses RAM swap)
+                </span>
+              )}
+            </div>
+          )}
+        </Field>
+        <Field
+          label="RAM Swap Space (GB)"
+          hint="vLLM --swap-space. Allocates system RAM for spilled KV cache blocks."
+        >
+          <input
+            type="number"
+            step="1"
+            min="0"
+            className={inputCls}
+            placeholder="0 (e.g. 16, 32)"
+            value={swapSpaceGb}
+            onChange={(e) => setSwapSpaceGb(e.target.value)}
+          />
+        </Field>
+        <Field
+          label="CPU Weight Offload (GB)"
+          hint="vLLM --cpu-offload-gb. Offloads model parameter weights to CPU RAM."
+        >
+          <input
+            type="number"
+            step="1"
+            min="0"
+            className={inputCls}
+            placeholder="0 (e.g. 8)"
+            value={cpuOffloadGb}
+            onChange={(e) => setCpuOffloadGb(e.target.value)}
+          />
         </Field>
         <Field label="Served model name (optional)">
           <input className={inputCls} placeholder="blank = model id" value={served} onChange={(e) => setServed(e.target.value)} />

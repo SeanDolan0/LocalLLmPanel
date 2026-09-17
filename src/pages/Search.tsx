@@ -10,10 +10,12 @@ import {
 import { Badge, Button, inputCls, Spinner } from "../ui";
 import type {
   EnvStatus,
+  FitResultBackend,
   FitVerdict,
   ModelWithFit,
   PullStatus,
   QuantVariantWithFit,
+  RunMode,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,57 @@ export function FitVerdictBadge({ verdict, score }: { verdict: FitVerdict; score
   return (
     <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${cls}`}>
       {score !== undefined ? `${score}/100 · ${label}` : label}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RunMode Badge Component
+// ---------------------------------------------------------------------------
+export function RunModeBadge({ mode }: { mode: RunMode }) {
+  let cls = "";
+  let label = "";
+  switch (mode) {
+    case "Gpu":
+      cls = "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+      label = "GPU";
+      break;
+    case "GpuRamSwap":
+      cls = "border-cyan-500/30 bg-cyan-500/10 text-cyan-300";
+      label = "GPU + RAM Swap";
+      break;
+    case "CpuOffload":
+      cls = "border-amber-500/30 bg-amber-500/10 text-amber-300";
+      label = "CPU Offload";
+      break;
+    case "DoesNotFit":
+      cls = "border-rose-500/30 bg-rose-500/10 text-rose-300";
+      label = "Does Not Fit";
+      break;
+  }
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dual Context Badge Component
+// ---------------------------------------------------------------------------
+export function ContextBadge({ fit }: { fit: FitResultBackend }) {
+  if (fit.run_mode === "GpuRamSwap") {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-cyan-950/80 text-cyan-300 border border-cyan-800">
+        <span className="font-semibold">{Math.round(fit.vram_context / 1000)}k VRAM</span>
+        <span>➔</span>
+        <span className="font-bold text-cyan-200">{Math.round(fit.extended_context / 1000)}k RAM</span>
+      </span>
+    );
+  }
+  return (
+    <span className="text-xs text-neutral-300">
+      {Math.round((fit.vram_context || fit.extended_context) / 1000)}k {fit.run_mode === "CpuOffload" ? "RAM" : "VRAM"}
     </span>
   );
 }
@@ -212,8 +265,17 @@ export default function Search() {
     api.pullModel(repoId).catch((e) => setSearchErr(String(e)));
   };
 
-  const deploy = (repoId: string, quant: string) => {
-    navigate("/servers", { state: { prefillModel: repoId, prefillQuant: quant } });
+  const deploy = (repoId: string, quant: string, fit?: FitResultBackend) => {
+    navigate("/servers", {
+      state: {
+        prefillModel: repoId,
+        prefillQuant: quant,
+        prefillSwapSpace: fit?.swap_space_gb,
+        prefillCpuOffload: fit?.cpu_offload_gb,
+        prefillMaxLen: fit?.extended_context,
+        prefillVramContext: fit?.vram_context,
+      },
+    });
   };
 
   const selectCategory = (key: string) => {
@@ -518,8 +580,11 @@ export default function Search() {
                         </td>
                         <td className="px-3 py-2.5 text-center">
                           {fit ? (
-                            <div className="inline-flex flex-col items-center gap-0.5">
-                              <FitVerdictBadge verdict={fit.verdict} score={fit.score} />
+                            <div className="inline-flex flex-col items-center gap-1">
+                              <div className="flex items-center gap-1 flex-wrap justify-center">
+                                <FitVerdictBadge verdict={fit.verdict} score={fit.score} />
+                                <RunModeBadge mode={fit.run_mode} />
+                              </div>
                               <div className="flex items-center gap-1">
                                 <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
                                   Rec: {variant?.label || variant?.format || "FP16"}
@@ -532,6 +597,8 @@ export default function Search() {
                               </div>
                               <span className="text-[10px] text-slate-500">
                                 ~{fit.vram_pct}% VRAM
+                                {fit.swap_space_gb > 0 ? ` · ${fit.swap_space_gb}GB swap` : ""}
+                                {fit.cpu_offload_gb > 0 ? ` · ${fit.cpu_offload_gb}GB offload` : ""}
                               </span>
                             </div>
                           ) : (
@@ -547,13 +614,17 @@ export default function Search() {
                           )}
                         </td>
                         <td className="px-3 py-2.5 text-right">
-                          <span className="text-slate-300">
-                            {fit ? fmtContext(fit.usable_context) : fmtContext(m.context)}
-                          </span>
-                          {fit && m.context && fit.usable_context < m.context && (
-                            <div className="text-[10px] text-amber-400/80">
-                              max {fmtContext(m.context)}
+                          {fit ? (
+                            <div className="flex flex-col items-end gap-0.5">
+                              <ContextBadge fit={fit} />
+                              {m.context && fit.extended_context < m.context && (
+                                <div className="text-[10px] text-amber-400/80">
+                                  max {fmtContext(m.context)}
+                                </div>
+                              )}
                             </div>
+                          ) : (
+                            <span className="text-slate-300">{fmtContext(m.context)}</span>
                           )}
                         </td>
                         <td className="px-3 py-2.5 text-right">
@@ -581,7 +652,7 @@ export default function Search() {
                             <Button
                               variant="primary"
                               className="text-xs px-2.5 py-1"
-                              onClick={() => deploy(variant?.repo_id || m.id, (variant?.format || "fp16").toLowerCase())}
+                              onClick={() => deploy(variant?.repo_id || m.id, (variant?.format || "fp16").toLowerCase(), fit)}
                             >
                               Deploy
                             </Button>
@@ -658,7 +729,7 @@ function ModelCard({
 }: {
   model: ModelWithFit;
   onSelect: () => void;
-  onDeploy: (repoId: string, quant: string) => void;
+  onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
   onPull: (repoId: string) => void;
   pullState?: PullStatus;
 }) {
@@ -691,7 +762,12 @@ function ModelCard({
             </div>
           </div>
           <div className="flex flex-col items-end gap-1 shrink-0">
-            {fit && <FitVerdictBadge verdict={fit.verdict} score={fit.score} />}
+            {fit && (
+              <div className="flex items-center gap-1 flex-wrap justify-end">
+                <FitVerdictBadge verdict={fit.verdict} score={fit.score} />
+                <RunModeBadge mode={fit.run_mode} />
+              </div>
+            )}
             <div className="flex items-center gap-1">
               <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
                 Rec: {variant?.label || variant?.format || "FP16"}
@@ -716,12 +792,12 @@ function ModelCard({
               {model.params_b != null ? `${model.params_b.toFixed(1)}B` : "—"}
             </div>
           </div>
-          <div>
+          <div className="flex flex-col items-center justify-center">
             <div className="text-[10px] text-slate-500 uppercase">Usable Ctx</div>
-            <div className="font-medium text-slate-300">
-              {fit ? fmtContext(fit.usable_context) : fmtContext(model.context)}
+            <div className="font-medium text-slate-300 mt-0.5">
+              {fit ? <ContextBadge fit={fit} /> : fmtContext(model.context)}
             </div>
-            {fit && model.context && fit.usable_context < model.context && (
+            {fit && model.context && fit.extended_context < model.context && (
               <div className="text-[9px] text-amber-400/80 truncate">
                 max {fmtContext(model.context)}
               </div>
@@ -746,6 +822,22 @@ function ModelCard({
                 ~{fit.vram_pct}% ({fit.weight_gb.toFixed(1)} GB)
               </span>
             </div>
+            {fit.swap_space_gb > 0 && (
+              <div className="flex items-center justify-between text-slate-500 text-[10px]">
+                <span>RAM Swap:</span>
+                <span className="text-cyan-300 font-medium">
+                  {fit.swap_space_gb} GB
+                </span>
+              </div>
+            )}
+            {fit.cpu_offload_gb > 0 && (
+              <div className="flex items-center justify-between text-slate-500 text-[10px]">
+                <span>CPU Offload:</span>
+                <span className="text-amber-300 font-medium">
+                  {fit.cpu_offload_gb} GB
+                </span>
+              </div>
+            )}
             {fit.reason && (
               <div className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
                 {fit.reason}
@@ -777,7 +869,7 @@ function ModelCard({
           <Button
             variant="primary"
             className="text-xs px-2.5 py-1"
-            onClick={() => onDeploy(variant?.repo_id || model.id, (variant?.format || "fp16").toLowerCase())}
+            onClick={() => onDeploy(variant?.repo_id || model.id, (variant?.format || "fp16").toLowerCase(), fit)}
           >
             Deploy
           </Button>
@@ -823,7 +915,7 @@ function ModelDetailModal({
   onClose: () => void;
   pulls: Record<string, PullStatus>;
   onPull: (repoId: string) => void;
-  onDeploy: (repoId: string, quant: string) => void;
+  onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
   totalVramMb: number | null;
 }) {
   const sortedVariants = useMemo(() => {
@@ -1012,13 +1104,19 @@ function ModelDetailModal({
                                 ({fit.vram_pct}%)
                               </span>
                             </div>
+                            {(fit.swap_space_gb > 0 || fit.cpu_offload_gb > 0) && (
+                              <div className="text-[10px] text-cyan-300 mt-0.5">
+                                {fit.swap_space_gb > 0 && `Swap: ${fit.swap_space_gb}GB `}
+                                {fit.cpu_offload_gb > 0 && `Offload: ${fit.cpu_offload_gb}GB`}
+                              </div>
+                            )}
                           </div>
 
                           <div className="rounded bg-surface-2/60 p-2">
                             <div className="text-[10px] text-slate-500">Usable Context</div>
-                            <div className="font-semibold text-slate-200">
-                              {fmtContext(fit.usable_context)}
-                              {fit.usable_context < fit.native_context && (
+                            <div className="font-semibold text-slate-200 mt-0.5">
+                              <ContextBadge fit={fit} />
+                              {fit.extended_context < fit.native_context && (
                                 <span className="text-[10px] text-amber-400/90 ml-1">
                                   / {fmtContext(fit.native_context)}
                                 </span>
@@ -1056,7 +1154,10 @@ function ModelDetailModal({
 
                       {/* Right: Badge and Action Buttons */}
                       <div className="flex flex-col items-end justify-between gap-3 shrink-0 sm:min-w-[140px]">
-                        <FitVerdictBadge verdict={fit.verdict} score={fit.score} />
+                        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                          <FitVerdictBadge verdict={fit.verdict} score={fit.score} />
+                          <RunModeBadge mode={fit.run_mode} />
+                        </div>
 
                         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
                           {pullState ? (
@@ -1084,7 +1185,7 @@ function ModelDetailModal({
                           <Button
                             variant="primary"
                             className="text-xs px-3 py-1"
-                            onClick={() => onDeploy(variant.repo_id, variant.format.toLowerCase())}
+                            onClick={() => onDeploy(variant.repo_id, variant.format.toLowerCase(), fit)}
                             title={`Deploy server with ${variant.label}`}
                           >
                             Deploy →
