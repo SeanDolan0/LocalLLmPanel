@@ -128,19 +128,44 @@ pub fn parse_context(config: &serde_json::Value) -> (usize, ContextSource) {
     for key in keys {
         if let Some(v) = config.get(key) {
             if let Some(n) = as_usize(v) {
-                return (n, ContextSource::Config);
+                // Apply RoPE scaling if present
+                let scaled = apply_rope_scaling(config, n);
+                return (scaled, ContextSource::Config);
             }
         }
     }
-    if let Some(sub) = config.get("text_config").or_else(|| config.get("config")) {
-        if !sub.is_null() {
-            let (n, src) = parse_context(sub);
-            if src != ContextSource::Default && n > 0 {
-                return (n, src);
+    // Check nested configs: text_config, config, model_config
+    for sub_key in ["text_config", "config", "model_config"] {
+        if let Some(sub) = config.get(sub_key) {
+            if !sub.is_null() {
+                let (n, src) = parse_context(sub);
+                if src != ContextSource::Default && n > 0 {
+                    return (n, src);
+                }
             }
         }
     }
     (0, ContextSource::Default)
+}
+
+fn apply_rope_scaling(config: &serde_json::Value, base_ctx: usize) -> usize {
+    if let Some(rope) = config.get("rope_scaling") {
+        let rope_type = rope.get("type")
+            .or_else(|| rope.get("rope_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match rope_type {
+            "yarn" | "linear" | "dynamic" => {
+                if let Some(factor) = rope.get("factor").and_then(|v| v.as_f64()) {
+                    if factor > 1.0 {
+                        return (base_ctx as f64 * factor) as usize;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    base_ctx
 }
 
 fn as_usize(v: &serde_json::Value) -> Option<usize> {
@@ -191,16 +216,31 @@ pub const DEFAULT_CONTEXT: usize = 4096;
 /// Try to parse head dimension as reported by the config (some archs declare
 /// `head_dim` explicitly, e.g. Qwen3, Llama 3.x).
 pub fn head_dim_from_config(cfg: &serde_json::Value) -> Option<usize> {
+    // Direct check
     if let Some(hd) = cfg.get("head_dim").and_then(as_usize) {
         return Some(hd);
     }
+    if let Some(hd) = derive_head_dim(cfg) {
+        return Some(hd);
+    }
+    // Nested fallback
+    for sub_key in ["text_config", "config", "model_config"] {
+        if let Some(sub) = cfg.get(sub_key) {
+            if let Some(hd) = sub.get("head_dim").and_then(as_usize) {
+                return Some(hd);
+            }
+            if let Some(hd) = derive_head_dim(sub) {
+                return Some(hd);
+            }
+        }
+    }
+    None
+}
+
+fn derive_head_dim(cfg: &serde_json::Value) -> Option<usize> {
     let hidden = cfg.get("hidden_size").and_then(as_usize)?;
     let heads = cfg.get("num_attention_heads").and_then(as_usize)?;
-    if heads > 0 {
-        Some(hidden / heads)
-    } else {
-        None
-    }
+    if heads > 0 { Some(hidden / heads) } else { None }
 }
 
 /// Estimate parameter count (`params_b` = billions) from HF config dims.
@@ -221,6 +261,16 @@ pub fn estimate_params_from_config(cfg: &serde_json::Value) -> Option<f64> {
     let mlp = layers as f64 * hidden as f64 * inter as f64;
     let emb = vocab as f64 * hidden as f64;
     Some((attn + mlp + emb) / 1e9)
+}
+
+/// Parse param count from the HF API `?expand[]=safetensors` response.
+/// The `safetensors.parameters` object has per-dtype counts; sum them.
+pub fn parse_params_from_safetensors_api(model_info: &serde_json::Value) -> Option<f64> {
+    let params = model_info.get("safetensors")?.get("parameters")?;
+    let obj = params.as_object()?;
+    let total: u64 = obj.values().filter_map(|v| v.as_u64()).sum();
+    if total == 0 { return None; }
+    Some(total as f64 / 1e9)
 }
 
 /// Parse params from a safetensors index `metadata.total_size` (bytes),
@@ -358,5 +408,73 @@ mod tests {
             Some(64)
         );
         assert_eq!(head_dim_from_config(&json!({ "hidden_size": 896 })), None);
+    }
+
+    #[test]
+    fn test_rope_scaling_yarn() {
+        let cfg = json!({
+            "max_position_embeddings": 4096,
+            "rope_scaling": { "type": "yarn", "factor": 4.0 }
+        });
+        let (ctx, src) = parse_context(&cfg);
+        assert_eq!(ctx, 16384); // 4096 * 4
+        assert_eq!(src, ContextSource::Config);
+    }
+
+    #[test]
+    fn test_rope_scaling_linear() {
+        let cfg = json!({
+            "max_position_embeddings": 8192,
+            "rope_scaling": { "type": "linear", "factor": 8.0 }
+        });
+        let (ctx, _) = parse_context(&cfg);
+        assert_eq!(ctx, 65536);
+    }
+
+    #[test]
+    fn test_rope_scaling_no_factor_ignored() {
+        let cfg = json!({
+            "max_position_embeddings": 4096,
+            "rope_scaling": { "type": "dynamic" }
+        });
+        let (ctx, _) = parse_context(&cfg);
+        assert_eq!(ctx, 4096); // No factor → no scaling
+    }
+
+    #[test]
+    fn test_nested_model_config() {
+        let cfg = json!({
+            "model_config": { "max_position_embeddings": 65536 }
+        });
+        let (ctx, src) = parse_context(&cfg);
+        assert_eq!(ctx, 65536);
+        assert_eq!(src, ContextSource::Config);
+    }
+
+    #[test]
+    fn test_nested_dims_text_config() {
+        let cfg = json!({
+            "text_config": {
+                "num_hidden_layers": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128
+            }
+        });
+        let hd = head_dim_from_config(&cfg);
+        assert_eq!(hd, Some(128));
+    }
+
+    #[test]
+    fn test_parse_params_safetensors_api() {
+        let api_resp = json!({
+            "safetensors": {
+                "parameters": {
+                    "BF16": 7615616000_u64
+                },
+                "total": 15231232000_u64
+            }
+        });
+        let p = parse_params_from_safetensors_api(&api_resp);
+        assert!((p.unwrap() - 7.616).abs() < 0.01);
     }
 }

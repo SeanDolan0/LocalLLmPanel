@@ -4,9 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
+
+#[derive(Debug, Clone)]
+pub struct CachedEnrichment {
+    pub stats: crate::hf::EnrichedStats,
+    pub fetched_at: Instant,
+}
 
 // ---------------------------------------------------------------------------
 // Server definitions & measured stats (persisted)
@@ -218,6 +225,7 @@ pub struct AppState {
     pub pulling: Arc<Mutex<HashMap<String, bool>>>,
     /// Latest GPU snapshot (polled by the monitor task, read by dashboard).
     pub gpu: Mutex<Option<GpuSnapshot>>,
+    pub enrichment_cache: Mutex<HashMap<String, CachedEnrichment>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -241,6 +249,7 @@ impl AppState {
             http,
             pulling: Arc::new(Mutex::new(HashMap::new())),
             gpu: Mutex::new(None),
+            enrichment_cache: Mutex::new(HashMap::new()),
         }
     }
 

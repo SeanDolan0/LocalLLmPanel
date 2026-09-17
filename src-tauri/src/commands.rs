@@ -179,7 +179,7 @@ pub async fn search_models(
     // Parallel enrichment, bounded at 12.
     let mut enriched: Vec<ModelWithStats> = Vec::with_capacity(results.len());
     for m in results {
-        let stats = hf::enrich(&st.http, &m.id).await;
+        let stats = hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache)).await;
         let (params_b, context, context_source, context_estimated, head_dim) = match &stats {
             Some(s) => (s.params_b, Some(s.context), Some(s.context_source), s.context_estimated, s.head_dim),
             None => (None, None, None, false, None),
@@ -242,7 +242,7 @@ pub async fn model_stats(
 ) -> Result<ModelStats, String> {
     let st = (*state).clone();
     let quant = quant.unwrap_or_else(|| st.config().default_quant);
-    let stats = hf::enrich(&st.http, &model_id)
+    let stats = hf::enrich(&st.http, &model_id, Some(&st.enrichment_cache))
         .await
         .ok_or_else(|| format!("could not enrich {model_id}"))?;
     let (gpu_name, vram_mb) = {
@@ -382,7 +382,7 @@ pub async fn servers_create(
     let max_model_len = match input.max_model_len {
         Some(l) => Some(l),
         None => {
-            let stats = hf::enrich(&st.http, &input.model_id).await;
+            let stats = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache)).await;
             let gpu = st.gpu.lock().unwrap().clone();
             let fit = match (&stats, gpu.as_ref()) {
                 (Some(s), Some(g))
@@ -408,7 +408,7 @@ pub async fn servers_create(
             Some(fit.map(|f| f.min(max_ctx)).unwrap_or(max_ctx))
         }
     };
-    let params_b = hf::enrich(&st.http, &input.model_id).await.and_then(|s| s.params_b);
+    let params_b = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache)).await.and_then(|s| s.params_b);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())

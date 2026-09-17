@@ -97,7 +97,23 @@ async fn fetch_raw(client: &reqwest::Client, model_id: &str, file: &str) -> Opti
 }
 
 /// Enrich one model: config.json → context/dims; index.json → params.
-pub async fn enrich(client: &reqwest::Client, model_id: &str) -> Option<EnrichedStats> {
+pub async fn enrich(
+    client: &reqwest::Client,
+    model_id: &str,
+    cache: Option<&std::sync::Mutex<std::collections::HashMap<String, crate::state::CachedEnrichment>>>,
+) -> Option<EnrichedStats> {
+    // 1. Check cache first (return if TTL < 1 hour / 3600 seconds)
+    if let Some(c) = cache {
+        if let Ok(guard) = c.lock() {
+            if let Some(entry) = guard.get(model_id) {
+                if entry.fetched_at.elapsed() < std::time::Duration::from_secs(3600) {
+                    return Some(entry.stats.clone());
+                }
+            }
+        }
+    }
+
+    // 2. Fetch config.json as existing
     let cfg = fetch_raw(client, model_id, "config.json").await?;
     let (context_config, src) = estimate::parse_context(&cfg);
     let (context, context_source, context_estimated) = if context_config > 0 {
@@ -123,13 +139,26 @@ pub async fn enrich(client: &reqwest::Client, model_id: &str) -> Option<Enriched
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Params: safetensors (or pytorch bin) index bytes ÷ dtype width.
+    // 3. Try ?expand[]=safetensors API for params before falling back to index files
     let mut params_b = None;
-    for index_file in ["safetensors.index.json", "pytorch_model.bin.index.json"] {
-        if let Some(idx) = fetch_raw(client, model_id, index_file).await {
-            if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref()) {
-                params_b = Some(p);
-                break;
+    let expand_url = format!("{HF_API}/{model_id}?expand[]=safetensors");
+    if let Ok(resp) = client.get(&expand_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(info) = resp.json::<Value>().await {
+                // 4. If safetensors expand succeeds, set params_b
+                params_b = estimate::parse_params_from_safetensors_api(&info);
+            }
+        }
+    }
+
+    // 5. If still None, fall back to index files logic
+    if params_b.is_none() {
+        for index_file in ["safetensors.index.json", "pytorch_model.bin.index.json"] {
+            if let Some(idx) = fetch_raw(client, model_id, index_file).await {
+                if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref()) {
+                    params_b = Some(p);
+                    break;
+                }
             }
         }
     }
@@ -139,8 +168,7 @@ pub async fn enrich(client: &reqwest::Client, model_id: &str) -> Option<Enriched
 
     let _ = src; // context_source already encodes the outcome
 
-
-    Some(EnrichedStats {
+    let stats = EnrichedStats {
         params_b,
         context,
         context_source,
@@ -149,7 +177,22 @@ pub async fn enrich(client: &reqwest::Client, model_id: &str) -> Option<Enriched
         n_layers,
         n_kv_heads,
         torch_dtype,
-    })
+    };
+
+    // 6. Store in cache if cache is Some
+    if let Some(c) = cache {
+        if let Ok(mut guard) = c.lock() {
+            guard.insert(
+                model_id.to_string(),
+                crate::state::CachedEnrichment {
+                    stats: stats.clone(),
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+        }
+    }
+
+    Some(stats)
 }
 
 fn usize_of(v: &Value) -> Option<usize> {
@@ -244,4 +287,69 @@ pub fn pull_model(
         pulling.remove(&model_id);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::CachedEnrichment;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn test_enrich_cache_hit_returns_cached_without_network() {
+        let client = reqwest::Client::new();
+        let cache = Mutex::new(HashMap::new());
+        let dummy_stats = EnrichedStats {
+            params_b: Some(3.5),
+            context: 8192,
+            context_source: "config.json",
+            context_estimated: false,
+            head_dim: Some(64),
+            n_layers: Some(32),
+            n_kv_heads: Some(8),
+            torch_dtype: Some("bfloat16".into()),
+        };
+        cache.lock().unwrap().insert(
+            "dummy/model".to_string(),
+            CachedEnrichment {
+                stats: dummy_stats.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let res = enrich(&client, "dummy/model", Some(&cache)).await;
+        assert!(res.is_some());
+        let s = res.unwrap();
+        assert_eq!(s.context, 8192);
+        assert_eq!(s.params_b, Some(3.5));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_cache_miss_expired_ttl() {
+        let client = reqwest::Client::new();
+        let cache = Mutex::new(HashMap::new());
+        let dummy_stats = EnrichedStats {
+            params_b: Some(3.5),
+            context: 8192,
+            context_source: "config.json",
+            context_estimated: false,
+            head_dim: Some(64),
+            n_layers: Some(32),
+            n_kv_heads: Some(8),
+            torch_dtype: Some("bfloat16".into()),
+        };
+        let past = Instant::now().checked_sub(Duration::from_secs(3605)).unwrap();
+        cache.lock().unwrap().insert(
+            "nonexistent/model-expired-xyz".to_string(),
+            CachedEnrichment {
+                stats: dummy_stats,
+                fetched_at: past,
+            },
+        );
+
+        let res = enrich(&client, "nonexistent/model-expired-xyz", Some(&cache)).await;
+        assert!(res.is_none());
+    }
 }
