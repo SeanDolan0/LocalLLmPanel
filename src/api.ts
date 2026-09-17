@@ -387,3 +387,77 @@ export function evaluateSystemFit(
       };
   }
 }
+
+export const SUPPORTED_QUANTS = ["fp16", "fp8", "awq", "gptq"] as const;
+export type SupportedQuant = (typeof SUPPORTED_QUANTS)[number];
+
+export interface QuantFitSummary {
+  quant: SupportedQuant;
+  label: string;
+  fit: FitAssessment;
+}
+
+export interface RecommendedQuantResult {
+  bestQuant: SupportedQuant;
+  fit: FitAssessment;
+  allQuants: QuantFitSummary[];
+}
+
+export function recommendBestQuant(
+  paramsB: number | null | undefined,
+  totalVramMb: number | null | undefined,
+  bandwidthGbs: number = 300,
+  contextTokens: number = 32768,
+  useCase: UseCase = "general",
+  taskQualityPrior?: number
+): RecommendedQuantResult {
+  const quants: SupportedQuant[] = ["fp16", "fp8", "awq", "gptq"];
+  const allQuants: QuantFitSummary[] = quants.map((q) => ({
+    quant: q,
+    label: quantLabel(q),
+    fit: evaluateSystemFit(
+      paramsB,
+      q,
+      totalVramMb,
+      bandwidthGbs,
+      contextTokens,
+      useCase,
+      taskQualityPrior
+    ),
+  }));
+
+  if (paramsB == null || paramsB <= 0 || !totalVramMb || totalVramMb <= 0) {
+    return {
+      bestQuant: "fp16",
+      fit: allQuants[0].fit,
+      allQuants,
+    };
+  }
+
+  // Preference hierarchy:
+  // 1. If FP16 fits with "perfect", recommend FP16 (maximum quality retention)
+  // 2. If FP8 fits with "perfect", recommend FP8
+  // 3. If AWQ fits with "perfect", recommend AWQ
+  // 4. Same check for "good" (FP16 -> FP8 -> AWQ)
+  // 5. Otherwise, pick the quant with the highest composite score
+  for (const q of ["fp16", "fp8", "awq"] as const) {
+    const found = allQuants.find((item) => item.quant === q && item.fit.fitLevel === "perfect");
+    if (found) {
+      return { bestQuant: found.quant, fit: found.fit, allQuants };
+    }
+  }
+
+  for (const q of ["fp16", "fp8", "awq"] as const) {
+    const found = allQuants.find((item) => item.quant === q && item.fit.fitLevel === "good");
+    if (found) {
+      return { bestQuant: found.quant, fit: found.fit, allQuants };
+    }
+  }
+
+  const sorted = [...allQuants].sort((a, b) => b.fit.score - a.fit.score);
+  return {
+    bestQuant: sorted[0].quant,
+    fit: sorted[0].fit,
+    allQuants,
+  };
+}

@@ -10,6 +10,7 @@ export default function Servers() {
   const [rows, setRows] = useState<ServerListRow[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [prefillModel, setPrefillModel] = useState<string | null>(null);
+  const [prefillQuant, setPrefillQuant] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
   // log buffers per server (event-driven + hydrated)
@@ -17,11 +18,14 @@ export default function Servers() {
   const [selected, setSelected] = useState<string | null>(null);
   const logEndRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // Check navigation state for prefill model (e.g. from Search or Library Deploy)
+  // Check navigation state for prefill model and quant (e.g. from Search or Library Deploy)
   useEffect(() => {
-    const state = location.state as { prefillModel?: string } | null;
+    const state = location.state as { prefillModel?: string; prefillQuant?: string } | null;
     if (state?.prefillModel) {
       setPrefillModel(state.prefillModel);
+      if (state.prefillQuant) {
+        setPrefillQuant(state.prefillQuant);
+      }
       setShowNew(true);
       window.history.replaceState({}, document.title);
     }
@@ -109,15 +113,18 @@ export default function Servers() {
       {showNew && (
         <NewServerForm
           initialModelId={prefillModel ?? ""}
+          initialQuant={prefillQuant ?? undefined}
           onDone={(s) => {
             setShowNew(false);
             setPrefillModel(null);
+            setPrefillQuant(null);
             setSelected(s.id);
             refresh();
           }}
           onCancel={() => {
             setShowNew(false);
             setPrefillModel(null);
+            setPrefillQuant(null);
           }}
           onErr={setErr}
         />
@@ -254,11 +261,13 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function NewServerForm({
   initialModelId = "",
+  initialQuant,
   onDone,
   onCancel,
   onErr,
 }: {
   initialModelId?: string;
+  initialQuant?: string;
   onDone: (s: { id: string }) => void;
   onCancel: () => void;
   onErr: (e: string) => void;
@@ -266,7 +275,7 @@ function NewServerForm({
   const [modelId, setModelId] = useState(initialModelId);
   const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
   const [task, setTask] = useState<"instruct" | "embed">("instruct");
-  const [quant, setQuant] = useState("fp16");
+  const [quant, setQuant] = useState(initialQuant || "fp16");
   const [gpuUtil, setGpuUtil] = useState("0.92");
   const [maxLen, setMaxLen] = useState("");
   const [served, setServed] = useState("");
@@ -277,7 +286,10 @@ function NewServerForm({
       setModelId(initialModelId);
       setName(initialModelId.split("/").pop() || "");
     }
-  }, [initialModelId]);
+    if (initialQuant) {
+      setQuant(initialQuant);
+    }
+  }, [initialModelId, initialQuant]);
 
   const submit = async () => {
     if (!modelId.trim()) return;
