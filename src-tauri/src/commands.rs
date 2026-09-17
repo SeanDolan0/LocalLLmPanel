@@ -373,16 +373,9 @@ async fn process_models_with_fit(
                     })
                     .collect();
 
-                items.sort_by(|a, b| {
-                    b.1.1.score.cmp(&a.1.1.score).then_with(|| {
-                        let a_native = !a.1.0.is_gguf;
-                        let b_native = !b.1.0.is_gguf;
-                        b_native.cmp(&a_native)
-                    })
-                });
+                items.sort_by(|a, b| fit::compare_variant_fit((&a.1.0, &a.1.1), (&b.1.0, &b.1.1)));
 
-                let mut scored: Vec<(VariantInput, FitResult)> = items.iter().map(|(_, p)| p.clone()).collect();
-                fit::rank_variants(&mut scored);
+                let scored: Vec<(VariantInput, FitResult)> = items.iter().map(|(_, p)| p.clone()).collect();
                 let best_variant_idx = fit::best_variant(&scored, Some(&preferred));
 
                 let final_variants: Vec<QuantVariantWithFit> = items
@@ -511,7 +504,7 @@ pub async fn recommended_models(
     let out = process_models_with_fit(&st, models).await;
 
     // 4. Store in cache
-    {
+    if !out.is_empty() {
         let mut cache = st.rec_cache.lock().unwrap();
         *cache = Some((out.clone(), std::time::Instant::now()));
     }

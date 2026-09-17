@@ -174,15 +174,16 @@ pub fn score_variant(
     }
 }
 
+pub fn compare_variant_fit(a: (&VariantInput, &FitResult), b: (&VariantInput, &FitResult)) -> std::cmp::Ordering {
+    b.1.score.cmp(&a.1.score).then_with(|| {
+        let a_native = !a.0.is_gguf;
+        let b_native = !b.0.is_gguf;
+        b_native.cmp(&a_native)
+    })
+}
+
 pub fn rank_variants(results: &mut Vec<(VariantInput, FitResult)>) {
-    results.sort_by(|a, b| {
-        b.1.score.cmp(&a.1.score).then_with(|| {
-            // Native before GGUF at equal score
-            let a_native = !a.0.is_gguf;
-            let b_native = !b.0.is_gguf;
-            b_native.cmp(&a_native)
-        })
-    });
+    results.sort_by(|a, b| compare_variant_fit((&a.0, &a.1), (&b.0, &b.1)));
 }
 
 pub fn best_variant(
@@ -314,6 +315,33 @@ mod tests {
         let mut results = vec![(v_gguf, r_gguf), (v_fp16, r_fp16)];
         rank_variants(&mut results);
         assert!(!results[0].0.is_gguf, "Native should rank first");
+    }
+
+    #[test]
+    fn test_compare_variant_fit() {
+        let v_native = variant("fp16", false);
+        let v_gguf = variant("gguf", true);
+        let mut r1 = score_variant(&hw_12gb(), &v_native, &arch_0_5b(), None);
+        let mut r2 = score_variant(&hw_12gb(), &v_gguf, &arch_0_5b(), None);
+
+        // Higher score comes first
+        r1.score = 90;
+        r2.score = 80;
+        assert_eq!(
+            compare_variant_fit((&v_native, &r1), (&v_gguf, &r2)),
+            std::cmp::Ordering::Less
+        );
+
+        // Equal score: native before gguf
+        r2.score = 90;
+        assert_eq!(
+            compare_variant_fit((&v_native, &r1), (&v_gguf, &r2)),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_variant_fit((&v_gguf, &r2), (&v_native, &r1)),
+            std::cmp::Ordering::Greater
+        );
     }
 
     #[test]
