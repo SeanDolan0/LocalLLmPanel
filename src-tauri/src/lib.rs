@@ -2,6 +2,7 @@
 
 pub mod commands;
 pub mod estimate;
+pub mod fit;
 pub mod hf;
 pub mod provision;
 pub mod server;
