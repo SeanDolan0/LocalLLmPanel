@@ -8,8 +8,9 @@
 │    ├─ wsl.rs      distro detect + Command runner               │
 │    ├─ provision.rs  idempotent WSL2 provisioning               │
 │    ├─ server.rs   multi-instance lifecycle, logs, metrics      │
-│    ├─ hf.rs       HF search / config / params / pull           │
+│    ├─ hf.rs       HF search / quant discovery / pull           │
 │    ├─ estimate.rs tok/s + context-fit heuristics               │
+│    ├─ fit.rs      hardware fit scoring + variant ranking       │
 │    └─ state.rs    persisted config + measured stats            │
 │         │  spawns wsl.exe -d <distro> -- bash -lc '<script>'   │
 └─────────┼───────────────────────────────────────────────────────┘
@@ -48,9 +49,17 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `tokens_per_sec(bandwidth_gbs, params, quant) = bw × 0.5 / weight-bytes-per-token`.
 - `gpu_bandwidth(name) -> (GB/s, known: bool)` — table: RTX 5090=1792, 5080=960, 5070 Ti=896, 5070 Ti Laptop=672, 5070=448, 5060 Ti=448, 5060=288, 4090=1008, 4080=716, 4070 Ti/S=672/504, 4070=504, 4060 Ti=288, 4060=272, 3090=936, 3080=760, 3070=448, 3060=360, 6080/6090 future → default 700.
 
+### `fit.rs` (pure, unit-tested)
+- `score_variant(hw, variant, arch, measured) -> FitResult` — per-variant hardware fit scoring composing `estimate.rs` functions.
+- `rank_variants(results)` & `compare_variant_fit(a, b)` — sort variants by composite score, native formats preferred over GGUF at equal score.
+- `best_variant(results, preferred_format) -> usize` — pick optimal variant respecting user preference (`default_quant`).
+- Verdicts: `Comfortable` (≤60% VRAM), `Constrained` (60–95%), `DoesNotFit` (>95%).
+
 ### `hf.rs`
 - `search(query, limit) -> Vec<HfModel>` — GET `https://huggingface.co/api/models?search=…&limit=N`.
-- Enrichment (per model, parallel, limit ~10): GET `raw/main/config.json` → context/dims; GET `raw/main/safetensors.index.json` (+ `pytorch_model.bin.index.json` fallback) → `metadata.total_size` → `params = total_size / bytes_per_dtype(config.torch_dtype)`. Missing fields → fallbacks.
+- `enrich(client, model_id, cache) -> Option<EnrichedStats>` — fetches config.json, queries `?expand[]=safetensors` API with index file fallback, cached in `AppState.enrichment_cache` (1h TTL).
+- `discover_quant_variants(client, base_model_id, semaphore) -> Vec<QuantVariant>` — discovers AWQ/GPTQ/FP8/BNB repos by naming convention and known publishers; discovers GGUF variants by parsing repo siblings.
+- `parse_gguf_quant_label(filename) -> Option<String>` — extracts quant label from GGUF filenames.
 - `pull_model(id, token)` — background thread runs `HF_TOKEN=… hf download <id>` in venv, lines parsed (`Fetching`, `Downloading`, % progress with filenames) → `pull-progress` events; `pull_status()` returns current in-flight state.
 
 ### `server.rs`
@@ -62,14 +71,15 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `chat(id, messages)` — POST `:port/v1/chat/completions` (instruct servers only) from Rust (avoids webview CORS).
 
 ### `state.rs`
-- `AppState { config: Mutex<PersistedConfig>, servers: Mutex<BTreeMap<Id, LiveServer>>, measured: Mutex<HashMap<model_id, MeasuredStats>>, reqwest: Client }`.
-- `PersistedConfig { distro, llm_dir, venv_dir, hf_token, default_quant, servers: Vec<ServerDef> }` — JSON at `%APPDATA%/local-llm-panel/config.json`; atomic save (write temp + rename).
+- `AppState { config: Mutex<PersistedConfig>, servers: Mutex<BTreeMap<Id, LiveServer>>, http: Client, pulling: Arc<Mutex<HashMap<model_id, bool>>>, gpu: Mutex<Option<GpuSnapshot>>, enrichment_cache: Mutex<HashMap<model_id, CachedEnrichment>>, rec_cache: Mutex<Option<(Vec<ModelWithFit>, Instant)>> }`.
+- `PersistedConfig { distro, llm_dir, venv_dir, hf_token, default_quant, servers: Vec<ServerDef>, measured: HashMap<model_id, MeasuredStats> }` — JSON at `%APPDATA%/local-llm-panel/config.json`; atomic save (write temp + rename).
 - `LiveServer { def, child: ChildGuard (Windows process handle), wsl_pid: Option<u32>, status, log_ring: VecDeque<String>, health_since, last_metrics }`.
 
 ## Tauri commands (public surface)
-`env_status`, `provision`, `search_models`, `model_stats`, `pull_model`, `pull_status`,
-`servers_list`, `servers_create`, `servers_delete`, `servers_start`, `servers_stop`, `servers_restart`,
-`servers_logs`, `servers_metrics`, `servers_chat`, `settings_get`, `settings_set`, `measured_stats`.
+`env_status`, `provision`, `search_models`, `search_models_with_fit`, `recommended_models`,
+`model_stats`, `pull_model`, `pull_status`, `servers_list`, `servers_create`, `servers_delete`,
+`servers_start`, `servers_stop`, `servers_restart`, `servers_logs`, `servers_metrics`,
+`servers_chat`, `settings_get`, `settings_set`, `measured_stats`.
 
 Events: `wsl-log {phase,line}`, `server-status {id,status,error?}`, `server-log {id,line}`,
 `pull-progress {model,state,file?,percent?}`.
@@ -78,7 +88,7 @@ Events: `wsl-log {phase,line}`, `server-status {id,status,error?}`, `server-log 
 - Vite + React 18 + TS; Tailwind v4 (`@tailwindcss/vite`); dark theme (zinc/indigo).
 - `App.tsx` — shell: sidebar nav (Dashboard/Search/Library/Servers/Settings) + `<Routes>`.
 - `api.ts` — typed wrappers over `@tauri-apps/api/core.invoke` + event subscriptions.
-- Pages: `Dashboard.tsx` (env status card, GPU/VRAM gauge from nvidia-smi poll), `Search.tsx` (query → table: model, params, context (config vs VRAM-fit), est tok/s per quant, pull button), `Library.tsx` (pulled = HF-cache scan via `env_status` cache path + `hf cache list` source), `Servers.tsx` (create/edit/delete rows; per-row status dot, port, log tail pane, metrics, chat drawer), `Settings.tsx` (distro, dirs, HF token, default quant, `.wslconfig` read-only + copy).
+- Pages: `Dashboard.tsx` (env status card, GPU/VRAM gauge from nvidia-smi poll), `Search.tsx` (dynamic recommendations, debounced auto-search, quant-aware fit verdicts [Comfortable/Constrained/DoesNotFit], est tok/s per quant, GGUF experimental flagging, pull button), `Library.tsx` (pulled = HF-cache scan via `env_status` cache path + `hf cache list` source), `Servers.tsx` (create/edit/delete rows; per-row status dot, port, log tail pane, metrics, chat drawer), `Settings.tsx` (distro, dirs, HF token, default quant, `.wslconfig` read-only + copy).
 
 ## Data flow
 - Poll loops in Rust (tokio tasks, 5s): `nvidia-smi` snapshot → `gpu-status` event; per-server `/health`+`/metrics` → `server-status`/`server-metrics` events; UI keeps local copies. No DB — config JSON only.
