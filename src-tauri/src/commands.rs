@@ -455,7 +455,7 @@ pub async fn recommended_models(
     // 2. Query HF API for trending text-generation models (limit=30)
     let url = reqwest::Url::parse_with_params(
         hf::HF_API,
-        &[("sort", "trending"), ("pipeline_tag", "text-generation"), ("limit", "30")],
+        &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "30")],
     )
     .map_err(|e| format!("build recommendations url: {e}"))?;
 
@@ -467,7 +467,9 @@ pub async fn recommended_models(
         .map_err(|e| format!("HF recommendations request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("HF recommendations returned {}", resp.status()));
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("HF recommendations returned {status}: {body}"));
     }
 
     let arr: Vec<serde_json::Value> = resp
@@ -1086,5 +1088,14 @@ mod tests {
         let st = AppState::new();
         let out = process_models_with_fit(&st, vec![]).await;
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_recommendations_url_params() {
+        let url = reqwest::Url::parse_with_params(
+            hf::HF_API,
+            &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "30")],
+        ).unwrap();
+        assert_eq!(url.query(), Some("sort=trendingScore&pipeline_tag=text-generation&limit=30"));
     }
 }
