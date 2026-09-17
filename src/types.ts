@@ -164,3 +164,52 @@ export interface LibraryEntry {
   size_mb: number;
   files: number;
 }
+
+export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";
+export type FormatSupport = "Native" | "Experimental";
+export type QuantFormatTag = "FP16" | "FP8" | "AWQ" | "GPTQ" | "BNB" | "GGUF";
+
+export interface QuantVariant {
+  repo_id: string;
+  format: QuantFormatTag;
+  label: string;
+  weight_bytes: number | null;
+  params_b: number | null;
+  gguf_file: string | null;
+  vllm_native: boolean;
+}
+
+export interface FitResultBackend {
+  verdict: FitVerdict;
+  score: number;
+  weight_gb: number;
+  usable_context: number;
+  native_context: number;
+  est_tok_s: number | null;
+  measured_tok_s: number | null;
+  vram_pct: number;
+  format_support: FormatSupport;
+  reason: string;
+}
+
+export interface QuantVariantWithFit {
+  variant: QuantVariant;
+  fit: FitResultBackend;
+}
+
+export interface ModelWithFit {
+  id: string;
+  downloads: number;
+  likes: number;
+  trending_score: number;
+  pipeline_tag: string | null;
+  params_b: number | null;
+  context: number | null;
+  context_source: string | null;
+  context_estimated: boolean;
+  head_dim: number | null;
+  n_layers: number | null;
+  n_kv_heads: number | null;
+  variants: QuantVariantWithFit[];
+  best_variant_idx: number;
+}

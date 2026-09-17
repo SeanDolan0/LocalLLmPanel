@@ -3,11 +3,15 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   CreateServerInput,
   EnvStatus,
+  FitResultBackend,
   MetricsSnapshot,
   ModelStats,
+  ModelWithFit,
   ModelWithStats,
   ProvisionReport,
   PullStatus,
+  QuantVariant,
+  QuantVariantWithFit,
   ServerDef,
   ServerListRow,
   ServerLogEvent,
@@ -16,6 +20,13 @@ import type {
   WslConfigInfo,
   WslLogEvent,
 } from "./types";
+
+export type {
+  FitResultBackend,
+  ModelWithFit,
+  QuantVariant,
+  QuantVariantWithFit,
+};
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -26,6 +37,10 @@ export const api = {
   provision: () => invoke<ProvisionReport>("provision"),
   searchModels: (query: string, quant?: string) =>
     invoke<ModelWithStats[]>("search_models", { query, quant: quant ?? null }),
+  searchModelsWithFit: (query: string) =>
+    invoke<ModelWithFit[]>("search_models_with_fit", { query }),
+  recommendedModels: () =>
+    invoke<ModelWithFit[]>("recommended_models"),
   modelStats: (modelId: string, quant?: string) =>
     invoke<ModelStats>("model_stats", { modelId, quant: quant ?? null }),
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),
