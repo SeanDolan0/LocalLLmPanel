@@ -15,6 +15,12 @@ pub struct CachedEnrichment {
     pub fetched_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+pub struct CachedQuants {
+    pub variants: Vec<crate::hf::QuantVariant>,
+    pub fetched_at: Instant,
+}
+
 // ---------------------------------------------------------------------------
 // Server definitions & measured stats (persisted)
 // ---------------------------------------------------------------------------
@@ -226,6 +232,7 @@ pub struct AppState {
     /// Latest GPU snapshot (polled by the monitor task, read by dashboard).
     pub gpu: Mutex<Option<GpuSnapshot>>,
     pub enrichment_cache: Mutex<HashMap<String, CachedEnrichment>>,
+    pub quant_cache: Mutex<HashMap<String, CachedQuants>>,
     pub rec_cache: Mutex<Option<(Vec<crate::commands::ModelWithFit>, Instant, u64)>>,
 }
 
@@ -251,12 +258,23 @@ impl AppState {
             pulling: Arc::new(Mutex::new(HashMap::new())),
             gpu: Mutex::new(None),
             enrichment_cache: Mutex::new(HashMap::new()),
+            quant_cache: Mutex::new(HashMap::new()),
             rec_cache: Mutex::new(None),
         }
     }
 
     pub fn config(&self) -> PersistedConfig {
         self.config.lock().unwrap().clone()
+    }
+
+    pub fn hf_token(&self) -> Option<String> {
+        let cfg = self.config();
+        let t = cfg.hf_token.trim().to_string();
+        if !t.is_empty() {
+            Some(t)
+        } else {
+            std::env::var("HF_TOKEN").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        }
     }
 
     pub fn save_config(&self) {

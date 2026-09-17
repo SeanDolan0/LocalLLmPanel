@@ -112,7 +112,7 @@ function matchesCategory(m: ModelWithFit, cat: string): boolean {
 export default function Search() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
-  const debouncedQuery = useDebounce(query, 400);
+  const debouncedQuery = useDebounce(query, 500);
 
   const [results, setResults] = useState<ModelWithFit[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -372,13 +372,29 @@ export default function Search() {
 
       {/* Error Banners */}
       {searchErr && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
-          {searchErr}
+        <div className="flex items-center justify-between rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
+          <span>{searchErr}</span>
+          {(searchErr.includes("429") || searchErr.toLowerCase().includes("rate limit")) && (
+            <button
+              onClick={() => navigate("/settings")}
+              className="ml-3 shrink-0 rounded bg-red-500/20 px-2.5 py-1 text-xs font-medium text-red-200 hover:bg-red-500/30"
+            >
+              Open Settings
+            </button>
+          )}
         </div>
       )}
       {recsErr && results === null && (
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-300">
-          Could not load recommendations: {recsErr}
+        <div className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-300">
+          <span>Could not load recommendations: {recsErr}</span>
+          {(recsErr.includes("429") || recsErr.toLowerCase().includes("rate limit")) && (
+            <button
+              onClick={() => navigate("/settings")}
+              className="ml-3 shrink-0 rounded bg-amber-500/20 px-2.5 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/30"
+            >
+              Open Settings
+            </button>
+          )}
         </div>
       )}
 

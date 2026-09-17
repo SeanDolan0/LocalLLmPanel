@@ -39,17 +39,33 @@ pub struct EnrichedStats {
     pub torch_dtype: Option<String>,
 }
 
+pub fn apply_auth(mut req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    if let Some(t) = token.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    req
+}
+
 /// Search HF for models matching `query`.
-pub async fn search(client: &reqwest::Client, query: &str, limit: usize) -> Result<Vec<HfModel>> {
+pub async fn search(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+    token: Option<&str>,
+) -> Result<Vec<HfModel>> {
     let url = reqwest::Url::parse_with_params(HF_API, &[("search", query), ("limit", &limit.to_string())])
         .map_err(|e| anyhow!("build url: {e}"))?;
-    let resp = client
-        .get(url)
+    let resp = apply_auth(client.get(url), token)
         .send()
         .await
         .context("HF search request failed")?;
     if !resp.status().is_success() {
-        bail!("HF search returned {}", resp.status());
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            bail!("HF API rate limit exceeded (429 Too Many Requests). If you haven't added a Hugging Face token, please configure one in Settings to increase your quota.");
+        }
+        bail!("HF search returned {status}: {body}");
     }
     let arr: Vec<Value> = resp.json().await.context("HF search JSON parse")?;
     let mut out = Vec::with_capacity(arr.len());
@@ -84,10 +100,15 @@ pub async fn search(client: &reqwest::Client, query: &str, limit: usize) -> Resu
 }
 
 /// Fetch `raw/<branch>/<file>` for a model id; None on 404 / network error.
-async fn fetch_raw(client: &reqwest::Client, model_id: &str, file: &str) -> Option<Value> {
+async fn fetch_raw(
+    client: &reqwest::Client,
+    model_id: &str,
+    file: &str,
+    token: Option<&str>,
+) -> Option<Value> {
     for branch in ["main", "master"] {
         let url = format!("https://huggingface.co/{model_id}/raw/{branch}/{file}");
-        if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(resp) = apply_auth(client.get(&url), token).send().await {
             if resp.status().is_success() {
                 return resp.json().await.ok();
             }
@@ -101,6 +122,7 @@ pub async fn enrich(
     client: &reqwest::Client,
     model_id: &str,
     cache: Option<&std::sync::Mutex<std::collections::HashMap<String, crate::state::CachedEnrichment>>>,
+    token: Option<&str>,
 ) -> Option<EnrichedStats> {
     // 1. Check cache first (return if TTL < 1 hour / 3600 seconds)
     if let Some(c) = cache {
@@ -114,7 +136,7 @@ pub async fn enrich(
     }
 
     // 2. Fetch config.json as existing
-    let cfg = fetch_raw(client, model_id, "config.json").await?;
+    let cfg = fetch_raw(client, model_id, "config.json", token).await?;
     let (context_config, src) = estimate::parse_context(&cfg);
     let (context, context_source, context_estimated) = if context_config > 0 {
         (context_config, "config.json", false)
@@ -142,7 +164,7 @@ pub async fn enrich(
     // 3. Try ?expand[]=safetensors API for params before falling back to index files
     let mut params_b = None;
     let expand_url = format!("{HF_API}/{model_id}?expand[]=safetensors");
-    if let Ok(resp) = client.get(&expand_url).send().await {
+    if let Ok(resp) = apply_auth(client.get(&expand_url), token).send().await {
         if resp.status().is_success() {
             if let Ok(info) = resp.json::<Value>().await {
                 // 4. If safetensors expand succeeds, set params_b
@@ -154,7 +176,7 @@ pub async fn enrich(
     // 5. If still None, fall back to index files logic
     if params_b.is_none() {
         for index_file in ["safetensors.index.json", "pytorch_model.bin.index.json"] {
-            if let Some(idx) = fetch_raw(client, model_id, index_file).await {
+            if let Some(idx) = fetch_raw(client, model_id, index_file, token).await {
                 if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref()) {
                     params_b = Some(p);
                     break;
@@ -253,12 +275,70 @@ pub async fn discover_quant_variants(
     client: &reqwest::Client,
     base_model_id: &str,
     sem: &tokio::sync::Semaphore,
+    cache: Option<&std::sync::Mutex<std::collections::HashMap<String, crate::state::CachedQuants>>>,
+    token: Option<&str>,
 ) -> Vec<QuantVariant> {
-    let mut variants = Vec::new();
+    // 1. Check cache first (TTL 1 hour)
+    if let Some(c) = cache {
+        if let Ok(guard) = c.lock() {
+            if let Some(entry) = guard.get(base_model_id) {
+                if entry.fetched_at.elapsed() < std::time::Duration::from_secs(3600) {
+                    return entry.variants.clone();
+                }
+            }
+        }
+    }
+
+    // 2. If the model is already a known quant format (e.g. -AWQ, -GPTQ, -FP8, -bnb-4bit),
+    // don't burn network requests searching for child quants of a quantized repo.
+    if let Some(fmt) = format_from_repo_suffix(base_model_id) {
+        let res = vec![QuantVariant {
+            repo_id: base_model_id.to_string(),
+            format: fmt.clone(),
+            label: match fmt {
+                QuantFormat::AWQ => "AWQ".into(),
+                QuantFormat::GPTQ => "GPTQ".into(),
+                QuantFormat::FP8 => "FP8".into(),
+                QuantFormat::BNB => "BNB-4bit".into(),
+                _ => "Unknown".into(),
+            },
+            weight_bytes: None,
+            params_b: None,
+            gguf_file: None,
+            vllm_native: true,
+        }];
+        if let Some(c) = cache {
+            if let Ok(mut guard) = c.lock() {
+                guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
+                    variants: res.clone(),
+                    fetched_at: std::time::Instant::now(),
+                });
+            }
+        }
+        return res;
+    }
+
     let base_name = extract_base_name(base_model_id);
     let org = base_model_id.split('/').next().unwrap_or("");
 
-    // 1. Always include FP16 as the base variant
+    // 3. If it is a GGUF repo, inspect it directly without searching other publishers
+    if base_model_id.to_lowercase().ends_with("-gguf") || base_model_id.to_lowercase().contains(".gguf") {
+        let clean_base = base_name.trim_end_matches("-GGUF").trim_end_matches("-gguf");
+        let res = check_gguf(client, org, clean_base, sem, token).await;
+        if let Some(c) = cache {
+            if let Ok(mut guard) = c.lock() {
+                guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
+                    variants: res.clone(),
+                    fetched_at: std::time::Instant::now(),
+                });
+            }
+        }
+        return res;
+    }
+
+    let mut variants = Vec::new();
+
+    // 4. Always include FP16 as the base variant
     variants.push(QuantVariant {
         repo_id: base_model_id.to_string(),
         format: QuantFormat::FP16,
@@ -269,22 +349,22 @@ pub async fn discover_quant_variants(
         vllm_native: true,
     });
 
-    // 2 & 3 & 4. Run cross-repo candidate, publisher, and GGUF queries concurrently
+    // 5. Run cross-repo candidate, publisher, and GGUF queries concurrently
     let suffixes = ["-AWQ", "-GPTQ-Int4", "-GPTQ", "-FP8", "-FP8-dynamic", "-bnb-4bit"];
     let (c0, c1, c2, c3, c4, c5, p0, p1, p2, p3, g0, g1, g2) = tokio::join!(
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[0]), sem),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[1]), sem),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[2]), sem),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[3]), sem),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[4]), sem),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[5]), sem),
-        check_publisher(client, "neuralmagic", base_name, sem),
-        check_publisher(client, "hugging-quants", base_name, sem),
-        check_publisher(client, "ISTA-DASLab", base_name, sem),
-        check_publisher(client, "TheBloke", base_name, sem),
-        check_gguf(client, "unsloth", base_name, sem),
-        check_gguf(client, "bartowski", base_name, sem),
-        check_gguf(client, "TheBloke", base_name, sem),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[0]), sem, token),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[1]), sem, token),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[2]), sem, token),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[3]), sem, token),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[4]), sem, token),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[5]), sem, token),
+        check_publisher(client, "neuralmagic", base_name, sem, token),
+        check_publisher(client, "hugging-quants", base_name, sem, token),
+        check_publisher(client, "ISTA-DASLab", base_name, sem, token),
+        check_publisher(client, "TheBloke", base_name, sem, token),
+        check_gguf(client, "unsloth", base_name, sem, token),
+        check_gguf(client, "bartowski", base_name, sem, token),
+        check_gguf(client, "TheBloke", base_name, sem, token),
     );
 
     for repo_id in [c0, c1, c2, c3, c4, c5, p0, p1, p2, p3].into_iter().flatten() {
@@ -318,6 +398,16 @@ pub async fn discover_quant_variants(
             unique.push(v);
         }
     }
+
+    if let Some(c) = cache {
+        if let Ok(mut guard) = c.lock() {
+            guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
+                variants: unique.clone(),
+                fetched_at: std::time::Instant::now(),
+            });
+        }
+    }
+
     unique
 }
 
@@ -325,10 +415,12 @@ async fn check_candidate(
     client: &reqwest::Client,
     candidate: String,
     sem: &tokio::sync::Semaphore,
+    token: Option<&str>,
 ) -> Option<String> {
     let _permit = sem.acquire().await.ok()?;
     let url = format!("https://huggingface.co/api/models/{candidate}");
-    match client.get(&url).send().await {
+    let req = apply_auth(client.get(&url), token);
+    match req.send().await {
         Ok(resp) if resp.status().is_success() => Some(candidate),
         _ => None,
     }
@@ -339,11 +431,13 @@ async fn check_publisher(
     pub_org: &'static str,
     base_name: &str,
     sem: &tokio::sync::Semaphore,
+    token: Option<&str>,
 ) -> Option<String> {
     let _permit = sem.acquire().await.ok()?;
     let search_q = format!("{pub_org}/{base_name}");
     let url = format!("https://huggingface.co/api/models?search={search_q}&limit=5");
-    match client.get(&url).send().await {
+    let req = apply_auth(client.get(&url), token);
+    match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(arr) = resp.json::<Vec<Value>>().await {
                 for m in arr {
@@ -362,18 +456,26 @@ async fn check_publisher(
 
 async fn check_gguf(
     client: &reqwest::Client,
-    pub_org: &'static str,
+    pub_org: &str,
     base_name: &str,
     sem: &tokio::sync::Semaphore,
+    token: Option<&str>,
 ) -> Vec<QuantVariant> {
     let mut out = Vec::new();
-    let repo_id = format!("{pub_org}/{base_name}-GGUF");
+    let repo_id = if pub_org.is_empty() {
+        base_name.to_string()
+    } else if base_name.to_lowercase().ends_with("-gguf") {
+        format!("{pub_org}/{base_name}")
+    } else {
+        format!("{pub_org}/{base_name}-GGUF")
+    };
     let _permit = match sem.acquire().await {
         Ok(p) => p,
         Err(_) => return out,
     };
     let url = format!("https://huggingface.co/api/models/{repo_id}");
-    if let Ok(resp) = client.get(&url).send().await {
+    let req = apply_auth(client.get(&url), token);
+    if let Ok(resp) = req.send().await {
         if resp.status().is_success() {
             if let Ok(info) = resp.json::<Value>().await {
                 if let Some(siblings) = info.get("siblings").and_then(|v| v.as_array()) {
@@ -524,11 +626,53 @@ mod tests {
             },
         );
 
-        let res = enrich(&client, "dummy/model", Some(&cache)).await;
+        let res = enrich(&client, "dummy/model", Some(&cache), None).await;
         assert!(res.is_some());
         let s = res.unwrap();
         assert_eq!(s.context, 8192);
         assert_eq!(s.params_b, Some(3.5));
+    }
+
+    #[tokio::test]
+    async fn test_quant_cache_hit_returns_cached_without_network() {
+        let client = reqwest::Client::new();
+        let cache = Mutex::new(HashMap::new());
+        let sem = tokio::sync::Semaphore::new(1);
+        let dummy_quants = vec![QuantVariant {
+            repo_id: "test/model-AWQ".into(),
+            format: QuantFormat::AWQ,
+            label: "AWQ".into(),
+            weight_bytes: Some(4_000_000_000),
+            params_b: Some(7.0),
+            gguf_file: None,
+            vllm_native: true,
+        }];
+        cache.lock().unwrap().insert(
+            "test/model".to_string(),
+            crate::state::CachedQuants {
+                variants: dummy_quants.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let res = discover_quant_variants(&client, "test/model", &sem, Some(&cache), None).await;
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].label, "AWQ");
+    }
+
+    #[test]
+    fn test_apply_auth_header() {
+        let client = reqwest::Client::new();
+        let req = apply_auth(client.get("https://huggingface.co/api/models"), Some("hf_test123"));
+        let built = req.build().unwrap();
+        assert_eq!(
+            built.headers().get("Authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer hf_test123")
+        );
+
+        let req_none = apply_auth(client.get("https://huggingface.co/api/models"), None);
+        let built_none = req_none.build().unwrap();
+        assert!(built_none.headers().get("Authorization").is_none());
     }
 
     #[test]

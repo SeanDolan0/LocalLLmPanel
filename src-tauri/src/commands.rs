@@ -175,13 +175,14 @@ pub async fn search_models(
 ) -> Result<Vec<ModelWithStats>, String> {
     let st = (*state).clone();
     let quant = quant.unwrap_or_else(|| st.config().default_quant);
-    let results = hf::search(&st.http, &query, 12)
+    let token = st.hf_token();
+    let results = hf::search(&st.http, &query, 12, token.as_deref())
         .await
         .map_err(|e| e.to_string())?;
     // Parallel enrichment, bounded at 12.
     let mut enriched: Vec<ModelWithStats> = Vec::with_capacity(results.len());
     for m in results {
-        let stats = hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache)).await;
+        let stats = hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache), token.as_deref()).await;
         let (params_b, context, context_source, context_estimated, head_dim) = match &stats {
             Some(s) => (s.params_b, Some(s.context), Some(s.context_source), s.context_estimated, s.head_dim),
             None => (None, None, None, false, None),
@@ -313,6 +314,7 @@ async fn process_models_with_fit(
     let disc_sem = Arc::new(Semaphore::new(6));
     let hw = hardware_profile(st).unwrap_or_else(fallback_hardware_profile);
     let preferred = st.config().default_quant;
+    let token = st.hf_token();
 
     let futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>>> = models
         .into_iter()
@@ -321,12 +323,14 @@ async fn process_models_with_fit(
             let disc_sem = Arc::clone(&disc_sem);
             let hw = hw.clone();
             let preferred = preferred.clone();
+            let token = token.clone();
             let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>> = Box::pin(async move {
+                let token_ref = token.as_deref();
                 let enrich_fut = async {
                     let _permit = enrich_sem.acquire().await.ok();
-                    hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache)).await
+                    hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache), token_ref).await
                 };
-                let disc_fut = hf::discover_quant_variants(&st.http, &m.id, &disc_sem);
+                let disc_fut = hf::discover_quant_variants(&st.http, &m.id, &disc_sem, Some(&st.quant_cache), token_ref);
                 let (stats, variants) = tokio::join!(enrich_fut, disc_fut);
 
                 let (params_b, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads) = match &stats {
@@ -425,7 +429,8 @@ pub async fn search_models_with_fit(
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let results = hf::search(&st.http, q, 12)
+    let token = st.hf_token();
+    let results = hf::search(&st.http, q, 12, token.as_deref())
         .await
         .map_err(|e| e.to_string())?;
     let out = process_models_with_fit(&st, results).await;
@@ -452,16 +457,16 @@ pub async fn recommended_models(
         }
     }
 
-    // 2. Query HF API for trending text-generation models (limit=30)
+    // 2. Query HF API for trending text-generation models (limit=16)
+    let token = st.hf_token();
     let url = reqwest::Url::parse_with_params(
         hf::HF_API,
-        &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "30")],
+        &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "16")],
     )
     .map_err(|e| format!("build recommendations url: {e}"))?;
 
-    let resp = st
-        .http
-        .get(url)
+    let req = hf::apply_auth(st.http.get(url), token.as_deref());
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("HF recommendations request failed: {e}"))?;
@@ -469,6 +474,9 @@ pub async fn recommended_models(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err("HF API rate limit exceeded (429 Too Many Requests). If you haven't added a Hugging Face token, please configure one in Settings to increase your quota.".into());
+        }
         return Err(format!("HF recommendations returned {status}: {body}"));
     }
 
@@ -547,7 +555,8 @@ pub async fn model_stats(
 ) -> Result<ModelStats, String> {
     let st = (*state).clone();
     let quant = quant.unwrap_or_else(|| st.config().default_quant);
-    let stats = hf::enrich(&st.http, &model_id, Some(&st.enrichment_cache))
+    let token = st.hf_token();
+    let stats = hf::enrich(&st.http, &model_id, Some(&st.enrichment_cache), token.as_deref())
         .await
         .ok_or_else(|| format!("could not enrich {model_id}"))?;
     let (gpu_name, vram_mb) = {
@@ -683,11 +692,12 @@ pub async fn servers_create(
     };
     let quant = input.quant.unwrap_or_else(|| st.config().default_quant.clone());
     let task = input.task.unwrap_or_else(|| "instruct".into());
+    let token = st.hf_token();
     // Default max_model_len := min(declared context, VRAM context-fit) at quant.
     let max_model_len = match input.max_model_len {
         Some(l) => Some(l),
         None => {
-            let stats = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache)).await;
+            let stats = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await;
             let gpu = st.gpu.lock().unwrap().clone();
             let fit = match (&stats, gpu.as_ref()) {
                 (Some(s), Some(g))
@@ -713,7 +723,7 @@ pub async fn servers_create(
             Some(fit.map(|f| f.min(max_ctx)).unwrap_or(max_ctx))
         }
     };
-    let params_b = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache)).await.and_then(|s| s.params_b);
+    let params_b = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await.and_then(|s| s.params_b);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1094,8 +1104,8 @@ mod tests {
     fn test_recommendations_url_params() {
         let url = reqwest::Url::parse_with_params(
             hf::HF_API,
-            &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "30")],
+            &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "16")],
         ).unwrap();
-        assert_eq!(url.query(), Some("sort=trendingScore&pipeline_tag=text-generation&limit=30"));
+        assert_eq!(url.query(), Some("sort=trendingScore&pipeline_tag=text-generation&limit=16"));
     }
 }
