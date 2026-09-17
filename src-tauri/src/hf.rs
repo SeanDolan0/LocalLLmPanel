@@ -195,6 +195,203 @@ pub async fn enrich(
     Some(stats)
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub enum QuantFormat { FP16, FP8, AWQ, GPTQ, BNB, GGUF }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantVariant {
+    pub repo_id: String,
+    pub format: QuantFormat,
+    pub label: String,
+    pub weight_bytes: Option<u64>,
+    pub params_b: Option<f64>,
+    pub gguf_file: Option<String>,
+    pub vllm_native: bool,
+}
+
+/// Parse GGUF quant label from filename. Returns None for non-GGUF files.
+pub fn parse_gguf_quant_label(filename: &str) -> Option<String> {
+    if !filename.ends_with(".gguf") { return None; }
+    let stem = filename.strip_suffix(".gguf").unwrap();
+    // Strip shard suffix like -00001-of-00003
+    let stem = regex_lite::Regex::new(r"-\d{5}-of-\d{5}$")
+        .ok()?.replace(stem, "").to_string();
+    // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*
+    let re = regex_lite::Regex::new(
+        r"[-_]((?:UD-)?(?:I?Q\d+(?:_(?:K(?:_[SMLX]{1,2})?|0|XXS|XS|S|M|NL))?))$"
+    ).ok()?;
+    re.captures(&stem)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Extract base model name (part after the org/user prefix).
+pub fn extract_base_name(model_id: &str) -> &str {
+    model_id.split('/').last().unwrap_or(model_id)
+}
+
+/// Detect quant format from repo name suffix.
+pub fn format_from_repo_suffix(name: &str) -> Option<QuantFormat> {
+    let n = name.to_lowercase();
+    if n.ends_with("-awq") { return Some(QuantFormat::AWQ); }
+    if n.contains("-gptq") { return Some(QuantFormat::GPTQ); }
+    if n.ends_with("-fp8") || n.ends_with("-fp8-dynamic") { return Some(QuantFormat::FP8); }
+    if n.ends_with("-bnb-4bit") { return Some(QuantFormat::BNB); }
+    None
+}
+
+/// Discover quant variants for a base model. Best-effort: failures are silently skipped.
+pub async fn discover_quant_variants(
+    client: &reqwest::Client,
+    base_model_id: &str,
+    sem: &tokio::sync::Semaphore,
+) -> Vec<QuantVariant> {
+    let mut variants = Vec::new();
+    let base_name = extract_base_name(base_model_id);
+    let org = base_model_id.split('/').next().unwrap_or("");
+
+    // 1. Always include FP16 as the base variant
+    variants.push(QuantVariant {
+        repo_id: base_model_id.to_string(),
+        format: QuantFormat::FP16,
+        label: "FP16".into(),
+        weight_bytes: None,
+        params_b: None,
+        gguf_file: None,
+        vllm_native: true,
+    });
+
+    // 2 & 3 & 4. Run cross-repo candidate, publisher, and GGUF queries concurrently
+    let suffixes = ["-AWQ", "-GPTQ-Int4", "-GPTQ", "-FP8", "-FP8-dynamic", "-bnb-4bit"];
+    let (c0, c1, c2, c3, c4, c5, p0, p1, p2, p3, g0, g1, g2) = tokio::join!(
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[0]), sem),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[1]), sem),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[2]), sem),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[3]), sem),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[4]), sem),
+        check_candidate(client, format!("{org}/{base_name}{}", suffixes[5]), sem),
+        check_publisher(client, "neuralmagic", base_name, sem),
+        check_publisher(client, "hugging-quants", base_name, sem),
+        check_publisher(client, "ISTA-DASLab", base_name, sem),
+        check_publisher(client, "TheBloke", base_name, sem),
+        check_gguf(client, "unsloth", base_name, sem),
+        check_gguf(client, "bartowski", base_name, sem),
+        check_gguf(client, "TheBloke", base_name, sem),
+    );
+
+    for repo_id in [c0, c1, c2, c3, c4, c5, p0, p1, p2, p3].into_iter().flatten() {
+        if let Some(fmt) = format_from_repo_suffix(&repo_id) {
+            variants.push(QuantVariant {
+                repo_id: repo_id.clone(),
+                format: fmt.clone(),
+                label: match fmt {
+                    QuantFormat::AWQ => "AWQ".into(),
+                    QuantFormat::GPTQ => "GPTQ".into(),
+                    QuantFormat::FP8 => "FP8".into(),
+                    QuantFormat::BNB => "BNB-4bit".into(),
+                    _ => "Unknown".into(),
+                },
+                weight_bytes: None,
+                params_b: None,
+                gguf_file: None,
+                vllm_native: true,
+            });
+        }
+    }
+
+    variants.extend(g0);
+    variants.extend(g1);
+    variants.extend(g2);
+
+    // Deduplicate by format+label
+    let mut unique = Vec::new();
+    for v in variants {
+        if !unique.iter().any(|u: &QuantVariant| u.format == v.format && u.label == v.label) {
+            unique.push(v);
+        }
+    }
+    unique
+}
+
+async fn check_candidate(
+    client: &reqwest::Client,
+    candidate: String,
+    sem: &tokio::sync::Semaphore,
+) -> Option<String> {
+    let _permit = sem.acquire().await.ok()?;
+    let url = format!("https://huggingface.co/api/models/{candidate}");
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => Some(candidate),
+        _ => None,
+    }
+}
+
+async fn check_publisher(
+    client: &reqwest::Client,
+    pub_org: &'static str,
+    base_name: &str,
+    sem: &tokio::sync::Semaphore,
+) -> Option<String> {
+    let _permit = sem.acquire().await.ok()?;
+    let search_q = format!("{pub_org}/{base_name}");
+    let url = format!("https://huggingface.co/api/models?search={search_q}&limit=5");
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(arr) = resp.json::<Vec<Value>>().await {
+                for m in arr {
+                    if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                        if format_from_repo_suffix(id).is_some() {
+                            return Some(id.to_string());
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+async fn check_gguf(
+    client: &reqwest::Client,
+    pub_org: &'static str,
+    base_name: &str,
+    sem: &tokio::sync::Semaphore,
+) -> Vec<QuantVariant> {
+    let mut out = Vec::new();
+    let repo_id = format!("{pub_org}/{base_name}-GGUF");
+    let _permit = match sem.acquire().await {
+        Ok(p) => p,
+        Err(_) => return out,
+    };
+    let url = format!("https://huggingface.co/api/models/{repo_id}");
+    if let Ok(resp) = client.get(&url).send().await {
+        if resp.status().is_success() {
+            if let Ok(info) = resp.json::<Value>().await {
+                if let Some(siblings) = info.get("siblings").and_then(|v| v.as_array()) {
+                    for sib in siblings {
+                        let fname = sib.get("rfilename").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(quant_label) = parse_gguf_quant_label(fname) {
+                            let size = sib.get("size").and_then(|v| v.as_u64());
+                            out.push(QuantVariant {
+                                repo_id: repo_id.clone(),
+                                format: QuantFormat::GGUF,
+                                label: quant_label,
+                                weight_bytes: size,
+                                params_b: None,
+                                gguf_file: Some(fname.to_string()),
+                                vllm_native: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+
 fn usize_of(v: &Value) -> Option<usize> {
     v.as_u64()
         .map(|n| n as usize)
@@ -351,5 +548,37 @@ mod tests {
 
         let res = enrich(&client, "nonexistent/model-expired-xyz", Some(&cache)).await;
         assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_parse_gguf_quant_label() {
+        assert_eq!(parse_gguf_quant_label("model-Q4_K_M.gguf"), Some("Q4_K_M".to_string()));
+        assert_eq!(parse_gguf_quant_label("Qwen2.5-7B-Instruct-Q8_0.gguf"), Some("Q8_0".to_string()));
+        assert_eq!(parse_gguf_quant_label("model-IQ4_NL.gguf"), Some("IQ4_NL".to_string()));
+        assert_eq!(parse_gguf_quant_label("model-UD-Q4_K_XL.gguf"), Some("UD-Q4_K_XL".to_string()));
+        assert_eq!(parse_gguf_quant_label("model-Q3_K_S-00001-of-00003.gguf"), Some("Q3_K_S".to_string()));
+        assert_eq!(parse_gguf_quant_label("model.safetensors"), None);
+        assert_eq!(parse_gguf_quant_label("README.md"), None);
+        assert_eq!(parse_gguf_quant_label("model.gguf"), None);
+        assert_eq!(parse_gguf_quant_label("model-Q5_K_M.gguf"), Some("Q5_K_M".to_string()));
+        assert_eq!(parse_gguf_quant_label("model-IQ2_XXS.gguf"), Some("IQ2_XXS".to_string()));
+    }
+
+    #[test]
+    fn test_extract_base_model_name() {
+        assert_eq!(extract_base_name("Qwen/Qwen2.5-7B-Instruct"), "Qwen2.5-7B-Instruct");
+        assert_eq!(extract_base_name("meta-llama/Meta-Llama-3.1-8B-Instruct"), "Meta-Llama-3.1-8B-Instruct");
+        assert_eq!(extract_base_name("gpt2"), "gpt2");
+    }
+
+    #[test]
+    fn test_quant_format_from_repo_id() {
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-AWQ"), Some(QuantFormat::AWQ));
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-GPTQ-Int4"), Some(QuantFormat::GPTQ));
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-FP8"), Some(QuantFormat::FP8));
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-FP8-dynamic"), Some(QuantFormat::FP8));
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-bnb-4bit"), Some(QuantFormat::BNB));
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-GGUF"), None); // GGUF handled separately via file siblings
+        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct"), None);
     }
 }
