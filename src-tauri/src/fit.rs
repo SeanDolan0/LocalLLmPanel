@@ -97,12 +97,11 @@ pub fn score_variant(
         (Some(l), Some(k), Some(h)) => estimate::kv_bytes_per_token(l, k, h),
         _ => 0.0,
     };
-    let usable_context = if kv_bpt > 0.0 && params_b > 0.0 {
-        let ctx = estimate::context_fit(
+    let usable_context = if kv_bpt > 0.0 && (params_b > 0.0 || variant.weight_bytes.is_some()) {
+        let ctx = estimate::context_fit_with_weight(
             usable_vram_mb,
             GPU_UTIL_DEFAULT,
-            params_b,
-            &variant.quant_str,
+            weight_gb,
             kv_bpt,
             OVERHEAD_MB,
         );
@@ -144,14 +143,24 @@ pub fn score_variant(
         score = score.min(25);
     }
 
+    let (ctx_room, ctx_limit) = if usable_context < 1000 {
+        (
+            format!("{} tokens", usable_context),
+            format!("{} tokens", usable_context),
+        )
+    } else {
+        (
+            format!("{}k", usable_context / 1000),
+            format!("{}k tokens", usable_context / 1000),
+        )
+    };
+
     let reason = match verdict {
         FitVerdict::Comfortable => format!(
-            "Comfortable fit ({vram_pct}% VRAM). Room for {}k context and fast generation.",
-            usable_context / 1000
+            "Comfortable fit ({vram_pct}% VRAM). Room for {ctx_room} context and fast generation."
         ),
         FitVerdict::Constrained => format!(
-            "Constrained fit ({vram_pct}% VRAM). Usable context limited to ~{}k tokens.",
-            usable_context / 1000
+            "Constrained fit ({vram_pct}% VRAM). Usable context limited to ~{ctx_limit}."
         ),
         FitVerdict::DoesNotFit => format!(
             "Does not fit — needs ~{:.1} GB but GPU has {:.1} GB VRAM.",
@@ -276,6 +285,35 @@ mod tests {
         // 4.5 GB + 2.5 GB overhead = 7 GB → 7/12.227 = 0.572 → Comfortable
         assert_eq!(r.verdict, FitVerdict::Comfortable);
         assert_eq!(r.format_support, FormatSupport::Experimental);
+        assert!(r.usable_context > 0, "GGUF comfortable fit must have positive usable context");
+    }
+
+    #[test]
+    fn test_gguf_usable_context_non_zero() {
+        let r = score_variant(
+            &hw_12gb(),
+            &variant_gguf_sized("gguf", 4_831_838_208),
+            &arch_7b(),
+            None,
+        );
+        assert_eq!(r.verdict, FitVerdict::Comfortable);
+        assert!(r.usable_context > 0);
+    }
+
+    #[test]
+    fn test_context_display_sub_1000() {
+        // Weight 8.45 GB leaves ~96 MB KV cache for 7B arch (bpt=131072) -> ~768 tokens
+        let r = score_variant(
+            &hw_12gb(),
+            &variant_gguf_sized("gguf", 9_073_000_000), // ~8.45 GB
+            &arch_7b(),
+            None,
+        );
+        assert_eq!(r.verdict, FitVerdict::Constrained);
+        assert!(r.usable_context < 1000);
+        assert!(r.usable_context >= 512);
+        assert!(r.reason.contains(&format!("{} tokens", r.usable_context)));
+        assert!(!r.reason.contains("0k"));
     }
 
     #[test]

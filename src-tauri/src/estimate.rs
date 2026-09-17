@@ -27,10 +27,31 @@ pub fn weight_gb(params_b: f64, quant: &str) -> f64 {
     params_b * bytes_per_param(quant)
 }
 
+/// Context length possible under a VRAM budget given explicit weight GB.
+///
+/// `usable_kv = vram_usable_mb - overhead_mb - weight_gb * 1024`
+/// where `vram_usable_mb = vram_total_mb * gpu_util`. Clamps non-positive KV to 0,
+/// and positive fits to at least 512 tokens.
+pub fn context_fit_with_weight(
+    vram_total_mb: f64,
+    gpu_util: f64,
+    weight_gb: f64,
+    kv_bytes_per_token: f64,
+    overhead_mb: f64,
+) -> usize {
+    let usable_vram_mb = vram_total_mb * gpu_util;
+    let weights_mb = weight_gb * 1024.0;
+    let kv_vram_mb = usable_vram_mb - weights_mb - overhead_mb;
+    if kv_vram_mb <= 0.0 || kv_bytes_per_token <= 0.0 {
+        return 0;
+    }
+    let ctx = (kv_vram_mb * 1024.0 * 1024.0 / kv_bytes_per_token) as usize;
+    ctx.max(512)
+}
+
 /// Context length possible under a VRAM budget at a given quantization.
 ///
-/// `usable_kv = vram_usable_mb - overhead_mb - weight_gb*1024`
-/// where vram_usable = vram_mb × gpu_util. Clamps results to a sane floor.
+/// Delegates to `context_fit_with_weight` using estimated weight footprint.
 pub fn context_fit(
     vram_mb: f64,
     gpu_util: f64,
@@ -39,14 +60,8 @@ pub fn context_fit(
     kv_bpt: f64,
     overhead_mb: f64,
 ) -> usize {
-    let vram_usable = vram_mb * gpu_util;
-    let weights_mb = weight_gb(params_b, quant) * 1024.0;
-    let kv_mb = vram_usable - weights_mb - overhead_mb;
-    if kv_mb <= 0.0 || kv_bpt <= 0.0 {
-        return 0;
-    }
-    let max_ctx = (kv_mb * 1024.0 * 1024.0 / kv_bpt) as usize;
-    max_ctx.max(0)
+    let w_gb = weight_gb(params_b, quant);
+    context_fit_with_weight(vram_mb, gpu_util, w_gb, kv_bpt, overhead_mb)
 }
 
 /// Estimated max decode tok/s for a single GPU: memory-bandwidth bound.
@@ -362,6 +377,22 @@ mod tests {
         let bpt = kv_bytes_per_token(32, 8, 128);
         let ctx7 = context_fit(12227.0, 0.92, 7.0, "awq", bpt, 2500.0);
         assert!(ctx7 > 6000 && ctx7 < 8000);
+    }
+
+    #[test]
+    fn test_context_fit_with_weight() {
+        let bpt = kv_bytes_per_token(32, 8, 128);
+        // 12GB total, util 0.92 = 11048 MB usable - 4500 MB weight - 2500 MB overhead = 4048 MB KV
+        let ctx = context_fit_with_weight(12000.0, 0.92, 4.39, bpt, 2500.0);
+        assert!(ctx > 30000);
+
+        // When weight exceeds usable VRAM, should return 0
+        let ctx_zero = context_fit_with_weight(12000.0, 0.92, 10.0, bpt, 2500.0);
+        assert_eq!(ctx_zero, 0);
+
+        // Clamps floor to 512 when KV is tiny but positive
+        let ctx_floor = context_fit_with_weight(12000.0, 0.92, 8.33, bpt, 2500.0);
+        assert!(ctx_floor >= 512);
     }
 
     #[test]

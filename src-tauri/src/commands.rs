@@ -322,12 +322,12 @@ async fn process_models_with_fit(
             let hw = hw.clone();
             let preferred = preferred.clone();
             let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>> = Box::pin(async move {
-                let stats = {
+                let enrich_fut = async {
                     let _permit = enrich_sem.acquire().await.ok();
                     hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache)).await
                 };
-
-                let variants = hf::discover_quant_variants(&st.http, &m.id, &disc_sem).await;
+                let disc_fut = hf::discover_quant_variants(&st.http, &m.id, &disc_sem);
+                let (stats, variants) = tokio::join!(enrich_fut, disc_fut);
 
                 let (params_b, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads) = match &stats {
                     Some(s) => (
@@ -437,13 +437,17 @@ pub async fn recommended_models(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<ModelWithFit>, String> {
     let st = (*state).clone();
+    let hw = hardware_profile(&st).unwrap_or_else(fallback_hardware_profile);
 
     // 1. Check cache (10 min TTL)
     {
-        let cache = st.rec_cache.lock().unwrap();
-        if let Some((ref cached_models, cached_at)) = *cache {
-            if cached_at.elapsed() < std::time::Duration::from_secs(600) {
+        let mut cache = st.rec_cache.lock().unwrap();
+        if let Some((ref cached_models, cached_at, cached_vram)) = *cache {
+            if cached_vram == hw.vram_total_mb && cached_at.elapsed() < std::time::Duration::from_secs(600) {
                 return Ok(cached_models.clone());
+            }
+            if cached_vram != hw.vram_total_mb {
+                *cache = None;
             }
         }
     }
@@ -506,7 +510,7 @@ pub async fn recommended_models(
     // 4. Store in cache
     if !out.is_empty() {
         let mut cache = st.rec_cache.lock().unwrap();
-        *cache = Some((out.clone(), std::time::Instant::now()));
+        *cache = Some((out.clone(), std::time::Instant::now(), hw.vram_total_mb));
     }
 
     Ok(out)
@@ -948,7 +952,7 @@ mod tests {
         // Initially empty
         assert!(st.rec_cache.lock().unwrap().is_none());
 
-        // Cache a dummy list
+        // Cache a dummy list with 16384 MB VRAM
         let dummy = vec![ModelWithFit {
             id: "test/model".into(),
             downloads: 100,
@@ -966,12 +970,13 @@ mod tests {
             best_variant_idx: 0,
         }];
 
-        *st.rec_cache.lock().unwrap() = Some((dummy.clone(), std::time::Instant::now()));
+        *st.rec_cache.lock().unwrap() = Some((dummy.clone(), std::time::Instant::now(), 16384));
         {
             let cache = st.rec_cache.lock().unwrap();
-            let (cached, time) = cache.as_ref().unwrap();
+            let (cached, time, vram) = cache.as_ref().unwrap();
             assert_eq!(cached.len(), 1);
             assert_eq!(cached[0].id, "test/model");
+            assert_eq!(*vram, 16384);
             assert!(time.elapsed() < std::time::Duration::from_secs(600));
         }
 
@@ -979,12 +984,32 @@ mod tests {
         let past = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(601))
             .unwrap();
-        *st.rec_cache.lock().unwrap() = Some((dummy, past));
+        *st.rec_cache.lock().unwrap() = Some((dummy, past, 16384));
         {
             let cache = st.rec_cache.lock().unwrap();
-            let (_, time) = cache.as_ref().unwrap();
+            let (_, time, _) = cache.as_ref().unwrap();
             assert!(time.elapsed() >= std::time::Duration::from_secs(600));
         }
+    }
+
+    #[test]
+    fn test_recommendation_cache_invalidated_on_vram_change() {
+        let st = AppState::new();
+        let dummy = vec![];
+        // Cache created with fallback 16GB
+        *st.rec_cache.lock().unwrap() = Some((dummy, std::time::Instant::now(), 16384));
+
+        // When actual GPU has 12GB, cache should be invalidated
+        let current_vram = 12227;
+        {
+            let mut cache = st.rec_cache.lock().unwrap();
+            if let Some((_, _, cached_vram)) = *cache {
+                if cached_vram != current_vram {
+                    *cache = None;
+                }
+            }
+        }
+        assert!(st.rec_cache.lock().unwrap().is_none());
     }
 
     #[test]
