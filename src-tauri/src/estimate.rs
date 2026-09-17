@@ -154,12 +154,16 @@ pub fn context_fit_tiered(
         let ram_tokens_possible = (ram_usable_mb * 1024.0 * 1024.0 / kv_bpt) as usize;
         let extended_tokens = deficit_tokens.min(ram_tokens_possible);
         let extended_context = vram_context + extended_tokens;
-        let swap_space_gb = ((extended_tokens as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0)).ceil() as usize;
+        let swap_space_gb = if extended_tokens == 0 {
+            0
+        } else {
+            ((extended_tokens as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0)).ceil().max(1.0) as usize
+        };
 
         TieredContextFit {
             vram_context,
             extended_context,
-            swap_space_gb: swap_space_gb.max(1),
+            swap_space_gb,
             cpu_offload_gb: 0,
         }
     } else if allow_weight_offload && ram_usable_mb > 0.0 {
@@ -170,13 +174,21 @@ pub fn context_fit_tiered(
         if ram_usable_mb > offload_mb {
             let remaining_ram_mb = ram_usable_mb - offload_mb;
             let ram_tokens = (remaining_ram_mb * 1024.0 * 1024.0 / kv_bpt) as usize;
-            let extended_context = ram_tokens.min(max_context).max(512);
-            let swap_space_gb = ((extended_context as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0)).ceil() as usize;
+            if ram_tokens == 0 {
+                return TieredContextFit {
+                    vram_context: 0,
+                    extended_context: 0,
+                    swap_space_gb: 0,
+                    cpu_offload_gb,
+                };
+            }
+            let extended_context = ram_tokens.min(max_context).max(512.min(max_context));
+            let swap_space_gb = ((extended_context as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0)).ceil().max(1.0) as usize;
 
             TieredContextFit {
                 vram_context: 0,
                 extended_context,
-                swap_space_gb: swap_space_gb.max(1),
+                swap_space_gb,
                 cpu_offload_gb,
             }
         } else {
@@ -818,4 +830,32 @@ mod tests {
         let res_offload = tokens_per_sec_tiered(504.0, 45.0, 0.0, "fp16", 0, 2, 0.0);
         assert_eq!(res_offload, 0.0);
     }
-}
+
+    #[test]
+    fn test_context_fit_tiered_extended_tokens_zero_swap_zero() {
+        let bpt = kv_bytes_per_token(32, 8, 128); // 131072 bytes/tok
+        // 12GB GPU, 4.4GB weights, 2500MB overhead -> ~32k tokens VRAM context.
+        // ram_usable_mb is tiny (e.g. 0.01 MB), not enough for even 1 token.
+        let res = context_fit_tiered(12000.0, 0.92, 0.01, 4.4, bpt, 2500.0, 131072, true);
+        assert!(res.vram_context > 30000);
+        assert_eq!(res.extended_context, res.vram_context);
+        assert_eq!(res.swap_space_gb, 0);
+        assert_eq!(res.cpu_offload_gb, 0);
+    }
+
+    #[test]
+    fn test_context_fit_tiered_weight_offload_small_max_context_and_zero_ram_tokens() {
+        let bpt = kv_bytes_per_token(40, 8, 128);
+        // Case A: ram has only 0.0001 MB remaining above offload -> ram_tokens == 0
+        // 15GB model requires ~7GB (7168MB) offload. ram_usable_mb = 7168.0001
+        let res_zero_tokens = context_fit_tiered(12000.0, 0.92, 7168.0001, 15.0, bpt, 2500.0, 32768, true);
+        assert_eq!(res_zero_tokens.extended_context, 0);
+        assert_eq!(res_zero_tokens.swap_space_gb, 0);
+        assert!(res_zero_tokens.cpu_offload_gb >= 6);
+
+        // Case B: max_context is 256 (< 512)
+        let res_small_ctx = context_fit_tiered(12000.0, 0.92, 32768.0, 15.0, bpt, 2500.0, 256, true);
+        assert_eq!(res_small_ctx.extended_context, 256);
+        assert!(res_small_ctx.extended_context <= 256);
+    }
+}
