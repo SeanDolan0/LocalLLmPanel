@@ -4,6 +4,7 @@ import type {
   CreateServerInput,
   EnvStatus,
   FitResultBackend,
+  MemorySettings,
   MetricsSnapshot,
   ModelStats,
   ModelWithFit,
@@ -12,20 +13,25 @@ import type {
   PullStatus,
   QuantVariant,
   QuantVariantWithFit,
+  RunMode,
   ServerDef,
   ServerListRow,
   ServerLogEvent,
   ServerStatusEvent,
   Settings,
+  SystemMemoryInfo,
   WslConfigInfo,
   WslLogEvent,
 } from "./types";
 
 export type {
   FitResultBackend,
+  MemorySettings,
   ModelWithFit,
   QuantVariant,
   QuantVariantWithFit,
+  RunMode,
+  SystemMemoryInfo,
 };
 
 // ---------------------------------------------------------------------------
@@ -61,7 +67,23 @@ export const api = {
     invoke<Settings>("settings_set", { patch }),
   wslconfigGet: () => invoke<WslConfigInfo>("wslconfig_get"),
   gpuStatus: () => invoke<import("./types").GpuSnapshot | null>("gpu_status"),
+  getMemorySettings: () => invoke<MemorySettings>("get_memory_settings"),
+  updateMemorySettings: (settings: MemorySettings) =>
+    invoke<void>("update_memory_settings", { settings }),
+  getSystemMemory: () => invoke<SystemMemoryInfo>("get_system_memory"),
 };
+
+export async function getMemorySettings(): Promise<MemorySettings> {
+  return invoke<MemorySettings>("get_memory_settings");
+}
+
+export async function updateMemorySettings(settings: MemorySettings): Promise<void> {
+  return invoke<void>("update_memory_settings", { settings });
+}
+
+export async function getSystemMemory(): Promise<SystemMemoryInfo> {
+  return invoke<SystemMemoryInfo>("get_system_memory");
+}
 
 // ---------------------------------------------------------------------------
 // Events

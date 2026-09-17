@@ -87,6 +87,8 @@ export interface ServerDef {
   served_model_name: string | null;
   enforce_eager?: boolean;
   params_b: number | null;
+  swap_space_gb?: number | null;
+  cpu_offload_gb?: number | null;
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -152,6 +154,8 @@ export interface CreateServerInput {
   quant?: string;
   served_model_name?: string;
   enforce_eager?: boolean;
+  swap_space_gb?: number | null;
+  cpu_offload_gb?: number | null;
 }
 
 export interface WslConfigInfo {
@@ -179,17 +183,43 @@ export interface QuantVariant {
   vllm_native: boolean;
 }
 
+export interface MemorySettings {
+  default_gpu_mem_util: number;
+  vram_overhead_mb: number;
+  enable_ram_overflow: boolean;
+  manual_ram_limit_mb: number | null;
+  safety_reserve_mb: number;
+  offload_weights_allowed: boolean;
+  max_context_cap: number | null;
+}
+
+export interface SystemMemoryInfo {
+  wsl_total_mb: number;
+  wsl_available_mb: number;
+  usable_budget_mb: number;
+  safety_reserve_mb: number;
+  manual_override_mb: number | null;
+}
+
+export type RunMode = "Gpu" | "GpuRamSwap" | "CpuOffload" | "DoesNotFit";
+
 export interface FitResultBackend {
   verdict: FitVerdict;
+  run_mode: RunMode;
   score: number;
   weight_gb: number;
-  usable_context: number;
+  vram_context: number;
+  extended_context: number;
   native_context: number;
+  swap_space_gb: number;
+  cpu_offload_gb: number;
   est_tok_s: number | null;
   measured_tok_s: number | null;
   vram_pct: number;
+  ram_pct: number;
   format_support: FormatSupport;
   reason: string;
+  usable_context?: any;
 }
 
 export interface QuantVariantWithFit {
