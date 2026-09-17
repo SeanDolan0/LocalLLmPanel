@@ -419,7 +419,7 @@ export default function Search() {
                   onSelect={() => setSelectedModel(m)}
                   onDeploy={deploy}
                   onPull={pull}
-                  pullState={pulls[m.id]}
+                  pullState={pulls[getBestVariant(m)?.variant.repo_id || m.id] || pulls[m.id]}
                 />
               ))}
             </div>
@@ -460,7 +460,7 @@ export default function Search() {
                   onSelect={() => setSelectedModel(m)}
                   onDeploy={deploy}
                   onPull={pull}
-                  pullState={pulls[m.id]}
+                  pullState={pulls[getBestVariant(m)?.variant.repo_id || m.id] || pulls[m.id]}
                 />
               ))}
             </div>
@@ -483,7 +483,7 @@ export default function Search() {
                     const best = getBestVariant(m);
                     const fit = best?.fit;
                     const variant = best?.variant;
-                    const pullState = pulls[m.id];
+                    const pullState = pulls[variant?.repo_id || m.id] || pulls[m.id];
                     const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
                     return (
                       <tr
@@ -508,7 +508,7 @@ export default function Search() {
                                 <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
                                   Rec: {variant?.label || variant?.format || "FP16"}
                                 </span>
-                                {variant?.format === "GGUF" && (
+                                {(variant?.format === "GGUF" || fit?.format_support === "Experimental") && (
                                   <span className="text-[9px] px-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30" title="vLLM support for GGUF is experimental">
                                     ⚠️ GGUF
                                   </span>
@@ -932,9 +932,10 @@ function ModelDetailModal({
             <div className="space-y-2.5 max-h-[48vh] overflow-y-auto pr-1">
               {sortedVariants.map((vwf, idx) => {
                 const { variant, fit } = vwf;
-                const isBest = idx === 0 || (model.best_variant_idx >= 0 && model.variants[model.best_variant_idx] === vwf);
+                const best = getBestVariant(model);
+                const isBest = vwf === best;
                 const isGguf = variant.format === "GGUF" || fit.format_support === "Experimental";
-                const pullState = pulls[variant.repo_id];
+                const pullState = pulls[variant.repo_id] || (isBest ? pulls[model.id] : undefined);
                 const tokS = fit.measured_tok_s ?? fit.est_tok_s;
 
                 return (
