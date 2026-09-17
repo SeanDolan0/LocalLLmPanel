@@ -41,6 +41,9 @@ pub fn run() {
             commands::settings_set,
             commands::wslconfig_get,
             commands::gpu_status,
+            commands::get_memory_settings,
+            commands::update_memory_settings,
+            commands::get_system_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

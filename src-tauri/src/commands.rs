@@ -1,7 +1,7 @@
 //! Tauri command layer: the app's public surface.
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
@@ -10,7 +10,7 @@ use crate::fit::{self, FitResult, HardwareProfile, ModelArchInfo, VariantInput};
 use crate::hf::{self, HfModel, QuantFormat, QuantVariant};
 use crate::provision::{self, ProvisionReport};
 use crate::server;
-use crate::state::{AppState, GpuSnapshot, MeasuredStats, PersistedConfig, ServerDef};
+use crate::state::{AppState, GpuSnapshot, MeasuredStats, MemorySettings, PersistedConfig, ServerDef};
 use tokio::sync::Semaphore;
 
 // ---------------------------------------------------------------------------
@@ -244,13 +244,23 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     let gpu = state.gpu.lock().unwrap().clone()?;
     let (bw, known) = estimate::gpu_bandwidth(&gpu.name);
     let vram = if gpu.vram_total_mb > 0 { gpu.vram_total_mb } else { 16384 };
+    let cfg = state.config();
+    let mem = &cfg.memory_settings;
+    let (ram_total_mb, ram_avail_mb) = crate::wsl::detect_wsl_memory(&cfg.distro);
+    let ram_usable_mb = if !mem.enable_ram_overflow {
+        0
+    } else if let Some(manual) = mem.manual_ram_limit_mb {
+        manual
+    } else {
+        ram_avail_mb.saturating_sub(mem.safety_reserve_mb)
+    };
     Some(HardwareProfile {
         gpu_name: gpu.name,
         vram_total_mb: vram,
         bandwidth_gbs: bw,
         bandwidth_known: known,
-        ram_total_mb: 16384,
-        ram_usable_mb: 12288,
+        ram_total_mb,
+        ram_usable_mb,
         ram_bandwidth_gbs: 65.0,
     })
 }
@@ -321,6 +331,7 @@ async fn process_models_with_fit(
     let hw = hardware_profile(st).unwrap_or_else(fallback_hardware_profile);
     let preferred = st.config().default_quant;
     let token = st.hf_token();
+    let mem_settings = st.config().memory_settings;
 
     let futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>>> = models
         .into_iter()
@@ -330,6 +341,7 @@ async fn process_models_with_fit(
             let hw = hw.clone();
             let preferred = preferred.clone();
             let token = token.clone();
+            let mem_settings = mem_settings.clone();
             let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>> = Box::pin(async move {
                 let token_ref = token.as_deref();
                 let enrich_fut = async {
@@ -387,7 +399,16 @@ async fn process_models_with_fit(
                             params_b: v.params_b,
                             is_gguf,
                         };
-                        let fit = fit::score_variant(&hw, &vi, &arch, None, 0.92, 2500.0, true, None);
+                        let fit = fit::score_variant(
+                            &hw,
+                            &vi,
+                            &arch,
+                            None,
+                            mem_settings.default_gpu_mem_util,
+                            mem_settings.vram_overhead_mb,
+                            mem_settings.offload_weights_allowed,
+                            mem_settings.max_context_cap,
+                        );
                         (v, (vi, fit))
                     })
                     .collect();
@@ -864,6 +885,62 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, patch: SettingsPatch) -> Re
     Ok(cfg.clone())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMemoryInfo {
+    pub wsl_total_mb: u64,
+    pub wsl_available_mb: u64,
+    pub usable_budget_mb: u64,
+    pub safety_reserve_mb: u64,
+    pub manual_override_mb: Option<u64>,
+}
+
+pub fn get_memory_settings_impl(st: &AppState) -> MemorySettings {
+    st.config().memory_settings
+}
+
+pub fn update_memory_settings_impl(st: &AppState, settings: MemorySettings) -> Result<(), String> {
+    let mut cfg = st.config.lock().unwrap();
+    cfg.memory_settings = settings;
+    cfg.save().map_err(|e| e.to_string())?;
+    *st.rec_cache.lock().unwrap() = None;
+    Ok(())
+}
+
+pub fn get_system_memory_impl(st: &AppState) -> SystemMemoryInfo {
+    let cfg = st.config();
+    let (wsl_total_mb, wsl_available_mb) = crate::wsl::detect_wsl_memory(&cfg.distro);
+    let mem = &cfg.memory_settings;
+    let usable_budget_mb = if !mem.enable_ram_overflow {
+        0
+    } else if let Some(manual) = mem.manual_ram_limit_mb {
+        manual
+    } else {
+        wsl_available_mb.saturating_sub(mem.safety_reserve_mb)
+    };
+    SystemMemoryInfo {
+        wsl_total_mb,
+        wsl_available_mb,
+        usable_budget_mb,
+        safety_reserve_mb: mem.safety_reserve_mb,
+        manual_override_mb: mem.manual_ram_limit_mb,
+    }
+}
+
+#[tauri::command]
+pub fn get_memory_settings(state: State<'_, Arc<AppState>>) -> MemorySettings {
+    get_memory_settings_impl(&state)
+}
+
+#[tauri::command]
+pub fn update_memory_settings(state: State<'_, Arc<AppState>>, settings: MemorySettings) -> Result<(), String> {
+    update_memory_settings_impl(&state, settings)
+}
+
+#[tauri::command]
+pub fn get_system_memory(state: State<'_, Arc<AppState>>) -> SystemMemoryInfo {
+    get_system_memory_impl(&state)
+}
+
 #[derive(Serialize)]
 pub struct WslConfigInfo {
     pub path: Option<String>,
@@ -951,6 +1028,7 @@ mod tests {
     #[test]
     fn test_hardware_profile_detected() {
         let st = AppState::new();
+        st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
         *st.gpu.lock().unwrap() = Some(GpuSnapshot {
             name: "NVIDIA GeForce RTX 4090".to_string(),
             vram_total_mb: 24576,
@@ -963,8 +1041,104 @@ mod tests {
         assert!(hw.bandwidth_known);
         assert_eq!(hw.bandwidth_gbs, 1008.0);
         assert_eq!(hw.ram_total_mb, 16384);
-        assert_eq!(hw.ram_usable_mb, 12288);
+        assert_eq!(hw.ram_usable_mb, 8192); // 12288 - 4096 (safety reserve)
         assert_eq!(hw.ram_bandwidth_gbs, 65.0);
+    }
+
+    #[test]
+    fn test_hardware_profile_ram_overflow_disabled() {
+        let st = AppState::new();
+        st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        st.config.lock().unwrap().memory_settings.enable_ram_overflow = false;
+        *st.gpu.lock().unwrap() = Some(GpuSnapshot {
+            name: "NVIDIA GeForce RTX 4090".to_string(),
+            vram_total_mb: 24576,
+            vram_free_mb: 22000,
+            util_percent: 5,
+        });
+        let hw = hardware_profile(&st).expect("should have hardware profile");
+        assert_eq!(hw.ram_usable_mb, 0);
+    }
+
+    #[test]
+    fn test_hardware_profile_manual_ram_limit() {
+        let st = AppState::new();
+        st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        st.config.lock().unwrap().memory_settings.manual_ram_limit_mb = Some(32768);
+        *st.gpu.lock().unwrap() = Some(GpuSnapshot {
+            name: "NVIDIA GeForce RTX 4090".to_string(),
+            vram_total_mb: 24576,
+            vram_free_mb: 22000,
+            util_percent: 5,
+        });
+        let hw = hardware_profile(&st).expect("should have hardware profile");
+        assert_eq!(hw.ram_usable_mb, 32768);
+    }
+
+    #[test]
+    fn test_hardware_profile_safety_reserve_saturating() {
+        let st = AppState::new();
+        st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        st.config.lock().unwrap().memory_settings.safety_reserve_mb = 20000;
+        *st.gpu.lock().unwrap() = Some(GpuSnapshot {
+            name: "NVIDIA GeForce RTX 4090".to_string(),
+            vram_total_mb: 24576,
+            vram_free_mb: 22000,
+            util_percent: 5,
+        });
+        let hw = hardware_profile(&st).expect("should have hardware profile");
+        assert_eq!(hw.ram_usable_mb, 0);
+    }
+
+    #[test]
+    fn test_memory_settings_get_and_update() {
+        let st = AppState::new();
+        let settings = get_memory_settings_impl(&st);
+        assert_eq!(settings, MemorySettings::default());
+
+        let custom = MemorySettings {
+            default_gpu_mem_util: 0.85,
+            vram_overhead_mb: 1500.0,
+            enable_ram_overflow: false,
+            manual_ram_limit_mb: Some(8192),
+            safety_reserve_mb: 2048,
+            offload_weights_allowed: false,
+            max_context_cap: Some(16384),
+        };
+
+        *st.rec_cache.lock().unwrap() = Some((vec![], std::time::Instant::now(), 16384));
+        assert!(st.rec_cache.lock().unwrap().is_some());
+
+        let res = update_memory_settings_impl(&st, custom.clone());
+        assert!(res.is_ok());
+        assert_eq!(get_memory_settings_impl(&st), custom);
+        assert!(st.rec_cache.lock().unwrap().is_none(), "rec_cache must be invalidated");
+
+        let path = PersistedConfig::path();
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn test_get_system_memory() {
+        let st = AppState::new();
+        st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        let sys_mem = get_system_memory_impl(&st);
+        assert_eq!(sys_mem.wsl_total_mb, 16384);
+        assert_eq!(sys_mem.wsl_available_mb, 12288);
+        assert_eq!(sys_mem.usable_budget_mb, 8192); // 12288 - 4096
+        assert_eq!(sys_mem.safety_reserve_mb, 4096);
+        assert_eq!(sys_mem.manual_override_mb, None);
+
+        st.config.lock().unwrap().memory_settings.manual_ram_limit_mb = Some(14000);
+        let sys_mem2 = get_system_memory_impl(&st);
+        assert_eq!(sys_mem2.usable_budget_mb, 14000);
+        assert_eq!(sys_mem2.manual_override_mb, Some(14000));
+
+        st.config.lock().unwrap().memory_settings.enable_ram_overflow = false;
+        let sys_mem3 = get_system_memory_impl(&st);
+        assert_eq!(sys_mem3.usable_budget_mb, 0);
     }
 
     #[test]
@@ -1128,6 +1302,61 @@ mod tests {
         let st = AppState::new();
         let out = process_models_with_fit(&st, vec![]).await;
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_models_with_fit_uses_memory_settings() {
+        let st = AppState::new();
+        st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        st.config.lock().unwrap().memory_settings.max_context_cap = Some(2048);
+
+        let model_id = "test/cached-model".to_string();
+        st.enrichment_cache.lock().unwrap().insert(
+            model_id.clone(),
+            crate::state::CachedEnrichment {
+                stats: hf::EnrichedStats {
+                    context: 32768,
+                    context_source: "config.json",
+                    context_estimated: false,
+                    params_b: Some(7.0),
+                    head_dim: Some(128),
+                    n_layers: Some(32),
+                    n_kv_heads: Some(8),
+                    torch_dtype: None,
+                },
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+        st.quant_cache.lock().unwrap().insert(
+            model_id.clone(),
+            crate::state::CachedQuants {
+                variants: vec![QuantVariant {
+                    repo_id: model_id.clone(),
+                    format: QuantFormat::AWQ,
+                    label: "AWQ".into(),
+                    weight_bytes: Some(4_000_000_000),
+                    params_b: Some(7.0),
+                    gguf_file: None,
+                    vllm_native: true,
+                }],
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+
+        let models = vec![HfModel {
+            id: model_id,
+            downloads: 100,
+            likes: 10,
+            trending_score: 5.0,
+            private: false,
+            pipeline_tag: Some("text-generation".into()),
+            stats: None,
+        }];
+
+        let res = process_models_with_fit(&st, models).await;
+        assert_eq!(res.len(), 1);
+        let variant = &res[0].variants[0];
+        assert_eq!(variant.fit.extended_context, 2048);
     }
 
     #[test]

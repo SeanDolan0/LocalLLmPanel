@@ -42,6 +42,38 @@ pub fn is_apt_distro(name: &str) -> bool {
     n.contains("ubuntu") || n.contains("debian") || n.contains("kali") || n.contains("mint")
 }
 
+/// Parse `/proc/meminfo` contents into `(total_mb, avail_mb)`.
+pub fn parse_meminfo(content: &str) -> (u64, u64) {
+    let mut total_kb = 0u64;
+    let mut avail_kb = 0u64;
+    for line in content.lines() {
+        if line.starts_with("MemTotal:") {
+            total_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        } else if line.starts_with("MemAvailable:") {
+            avail_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        }
+    }
+    (total_kb / 1024, avail_kb / 1024)
+}
+
+/// Detect total and available memory in WSL2 (in MB).
+/// Falls back to 16GB total / 12GB available on failure. Never panics.
+pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
+    let mut cmd = wsl_command();
+    cmd.env("WSL_UTF8", "1");
+    cmd.args(["-d", distro, "--", "cat", "/proc/meminfo"]);
+    if let Ok(o) = cmd.output() {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let (total, avail) = parse_meminfo(&s);
+            if total > 0 {
+                return (total, avail);
+            }
+        }
+    }
+    (16384, 12288) // Safe fallback: 16GB total / 12GB avail
+}
+
 /// Result of a synchronous WSL script run.
 #[derive(Debug, Clone)]
 pub struct RunOutput {
@@ -245,5 +277,32 @@ mod tests {
         // This tests the real local machine; if no wsl.exe at all, we still
         // shouldn't panic — just return None.
         let _ = detect_default_distro();
+    }
+
+    #[test]
+    fn test_parse_proc_meminfo() {
+        let sample = "MemTotal:       24576000 kB\nMemFree:         4000000 kB\nMemAvailable:   18432000 kB\n";
+        let (total_mb, avail_mb) = parse_meminfo(sample);
+        assert_eq!(total_mb, 24000);
+        assert_eq!(avail_mb, 18000);
+    }
+
+    #[test]
+    fn test_parse_meminfo_empty_and_garbage() {
+        let (total_mb, avail_mb) = parse_meminfo("");
+        assert_eq!(total_mb, 0);
+        assert_eq!(avail_mb, 0);
+
+        let garbage = "Something: abc kB\nMemTotal: not_a_number kB\n";
+        let (total_mb, avail_mb) = parse_meminfo(garbage);
+        assert_eq!(total_mb, 0);
+        assert_eq!(avail_mb, 0);
+    }
+
+    #[test]
+    fn test_detect_wsl_memory_nonexistent_distro_fallback() {
+        let (total_mb, avail_mb) = detect_wsl_memory("__nonexistent_distro_test_xyz__");
+        assert_eq!(total_mb, 16384);
+        assert_eq!(avail_mb, 12288);
     }
 }
