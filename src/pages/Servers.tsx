@@ -372,15 +372,15 @@ function NewServerForm({
     if (!modelId.trim()) return;
     setCreating(true);
     try {
-      const parsedSwap = swapSpaceGb !== "" ? parseFloat(swapSpaceGb) : null;
-      const parsedOffload = cpuOffloadGb !== "" ? parseFloat(cpuOffloadGb) : null;
+      const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
+      const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
       const input: CreateServerInput = {
         name: name.trim() || modelId.split("/").pop() || "server",
         model_id: modelId.trim(),
         task,
         quant,
         gpu_mem_util: parseFloat(gpuUtil) || 0.92,
-        max_model_len: maxLen ? parseInt(maxLen) || undefined : undefined,
+        max_model_len: maxLen ? parseInt(maxLen, 10) || undefined : undefined,
         swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
         cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
         served_model_name: served.trim() || undefined,
@@ -424,33 +424,33 @@ function NewServerForm({
         <Field
           label="Max model len (blank = auto)"
           hint={
-            vramContextLimit && vramContextLimit > 0
-              ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit)} tokens | RAM Swap: > ${fmtNum(vramContextLimit)} tokens`
+            (vramContextLimit ?? 0) > 0
+              ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit!)} tokens | RAM Swap: > ${fmtNum(vramContextLimit!)} tokens`
               : "Context ceiling in tokens. If exceeding VRAM, RAM swap space will be used."
           }
         >
           <input
             className={inputCls}
             placeholder={
-              vramContextLimit
-                ? `auto (~${fmtNum(vramContextLimit)} VRAM)`
+              (vramContextLimit ?? 0) > 0
+                ? `auto (~${fmtNum(vramContextLimit!)} VRAM)`
                 : "auto (context ∩ VRAM fit)"
             }
             value={maxLen}
             onChange={(e) => setMaxLen(e.target.value)}
           />
-          {vramContextLimit && vramContextLimit > 0 && (
+          {(vramContextLimit ?? 0) > 0 && (
             <div className="mt-1.5 flex items-center gap-2 text-[11px]">
               <span className="inline-flex items-center gap-1 text-emerald-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                VRAM: ≤{fmtNum(vramContextLimit)}
+                VRAM: ≤{fmtNum(vramContextLimit!)}
               </span>
               <span className="text-slate-600">➔</span>
               <span className="inline-flex items-center gap-1 text-cyan-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-                RAM Swap: &gt;{fmtNum(vramContextLimit)}
+                RAM Swap: &gt;{fmtNum(vramContextLimit!)}
               </span>
-              {maxLen && parseInt(maxLen) > vramContextLimit && (
+              {maxLen && parseInt(maxLen, 10) > vramContextLimit! && (
                 <span className="text-[11px] font-semibold text-cyan-300 ml-auto">
                   (Uses RAM swap)
                 </span>

@@ -92,6 +92,9 @@ export function RunModeBadge({ mode }: { mode: RunMode }) {
 // Dual Context Badge Component
 // ---------------------------------------------------------------------------
 export function ContextBadge({ fit }: { fit: FitResultBackend }) {
+  if (fit.vram_context === 0 && fit.extended_context === 0) {
+    return <span className="text-xs text-neutral-500">—</span>;
+  }
   if (fit.run_mode === "GpuRamSwap") {
     return (
       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-cyan-950/80 text-cyan-300 border border-cyan-800">
