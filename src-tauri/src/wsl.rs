@@ -61,7 +61,11 @@ pub fn parse_meminfo(content: &str) -> (u64, u64) {
 pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
-    cmd.args(["-d", distro, "--", "cat", "/proc/meminfo"]);
+    if distro.trim().is_empty() {
+        cmd.args(["--", "cat", "/proc/meminfo"]);
+    } else {
+        cmd.args(["-d", distro, "--", "cat", "/proc/meminfo"]);
+    }
     if let Ok(o) = cmd.output() {
         if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout);
@@ -304,5 +308,13 @@ mod tests {
         let (total_mb, avail_mb) = detect_wsl_memory("__nonexistent_distro_test_xyz__");
         assert_eq!(total_mb, 16384);
         assert_eq!(avail_mb, 12288);
+    }
+
+    #[test]
+    fn test_detect_wsl_memory_empty_distro() {
+        // Empty distro queries default distro or returns fallback; must never panic
+        let (total_mb, avail_mb) = detect_wsl_memory("");
+        assert!(total_mb > 0);
+        assert!(avail_mb > 0);
     }
 }

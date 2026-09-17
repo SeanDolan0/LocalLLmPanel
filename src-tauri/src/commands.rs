@@ -1090,8 +1090,30 @@ mod tests {
         assert_eq!(hw.ram_usable_mb, 0);
     }
 
+    struct ConfigBackupGuard {
+        path: std::path::PathBuf,
+        original_content: Option<Vec<u8>>,
+    }
+
+    impl Drop for ConfigBackupGuard {
+        fn drop(&mut self) {
+            if let Some(content) = &self.original_content {
+                let _ = std::fs::write(&self.path, content);
+            } else if self.path.exists() {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+
     #[test]
     fn test_memory_settings_get_and_update() {
+        let path = PersistedConfig::path();
+        let original_content = std::fs::read(&path).ok();
+        let _guard = ConfigBackupGuard {
+            path: path.clone(),
+            original_content,
+        };
+
         let st = AppState::new();
         let settings = get_memory_settings_impl(&st);
         assert_eq!(settings, MemorySettings::default());
@@ -1113,11 +1135,6 @@ mod tests {
         assert!(res.is_ok());
         assert_eq!(get_memory_settings_impl(&st), custom);
         assert!(st.rec_cache.lock().unwrap().is_none(), "rec_cache must be invalidated");
-
-        let path = PersistedConfig::path();
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
     }
 
     #[test]
