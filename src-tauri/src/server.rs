@@ -95,6 +95,19 @@ fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
         args.push("--served-model-name".into());
         args.push(shell_quote(served));
     }
+    if let Some(swap) = def.swap_space_gb {
+        if swap > 0 {
+            args.push("--swap-space".into());
+            args.push(swap.to_string());
+        }
+    }
+    if let Some(offload) = def.cpu_offload_gb {
+        if offload > 0 {
+            args.push("--cpu-offload-gb".into());
+            args.push(offload.to_string());
+        }
+    }
+
     // vLLM disables pinned-memory/UVA on WSL2 by default (see
     // vllm/platforms/cuda.py), which crashes the V1 engine with
     // "UVA is not available". Kernels >= 4.19.121 support it once enabled.
@@ -110,6 +123,11 @@ fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
     parts.push(format!("exec python -m vllm.entrypoints.openai.api_server {}", args.join(" ")));
     parts.join(" && ")
 }
+
+pub fn build_start_command(def: &ServerDef, hf_token: &str) -> String {
+    launch_script("~/llm-lp/.venv", def, hf_token)
+}
+
 
 // ---------------------------------------------------------------------------
 // Events
@@ -607,6 +625,18 @@ mod tests {
         assert!(script.contains("--max-model-len 2048"));
         assert!(script.contains("export HF_TOKEN='hf_secret_123'"));
     }
+
+    #[test]
+    fn test_build_start_command_swap_and_cpu_offload() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8010, "fp16", None);
+        d.swap_space_gb = Some(8);
+        d.cpu_offload_gb = Some(4);
+        let cmd = build_start_command(&d, "");
+        assert!(cmd.contains("--swap-space 8"), "command must include --swap-space 8: {cmd}");
+        assert!(cmd.contains("--cpu-offload-gb 4"), "command must include --cpu-offload-gb 4: {cmd}");
+        assert!(cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY=1"));
+    }
+
 
     #[test]
     fn metrics_parse_both_generations() {
