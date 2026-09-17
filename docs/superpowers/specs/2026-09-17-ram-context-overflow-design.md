@@ -32,6 +32,10 @@ When probing system hardware (in `wsl.rs` and `commands.rs`), the system execute
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySettings {
+    /// Target GPU VRAM utilization ratio for serving and estimation (e.g., 0.92 = 92%). Default: 0.92.
+    pub default_gpu_mem_util: f64,
+    /// Estimated runtime & CUDA driver VRAM overhead in MB. Default: 2500.
+    pub vram_overhead_mb: f64,
     /// Whether RAM overflow is allowed for extending context beyond VRAM. Default: true.
     pub enable_ram_overflow: bool,
     /// Manual override in MB for usable RAM budget. If None, auto-detects from WSL2.
@@ -40,6 +44,8 @@ pub struct MemorySettings {
     pub safety_reserve_mb: u64,
     /// Allow offloading model weights to CPU RAM when model > VRAM. Default: true.
     pub offload_weights_allowed: bool,
+    /// Optional global ceiling on context length (tokens) across all models. None = model native max.
+    pub max_context_cap: Option<usize>,
 }
 ```
 
@@ -140,10 +146,15 @@ In `server.rs::build_start_command`:
 ## 4. Frontend Presentation Layer (`src/`)
 
 1. **Settings (`Settings.tsx`)**:
-   - Card displaying detected WSL2 memory ceiling and host physical RAM.
-   - Toggle to enable/disable RAM context overflow.
-   - Input for manual RAM budget override.
-   - Toggle for weight offloading.
+   - Dedicated **"Hardware & Memory Tuning"** card with full user control:
+     - **VRAM Utilization Ratio**: Slider / number input from 50% to 98% (default: 92% / `0.92`). Directly controls how much of the GPU memory pool is targeted by vLLM and the fit engine.
+     - **VRAM Overhead Buffer (MB)**: Adjustable input (e.g. 1500–4000 MB, default: 2500 MB) for CUDA driver and runtime reservation.
+     - **WSL2 & Host RAM Display**: Live telemetry showing WSL2 configured memory, available RAM, and host physical RAM.
+     - **RAM Context Overflow**: Master toggle to enable/disable extending context into RAM.
+     - **RAM Budget Allocation**: Choice between Auto-detect (WSL2 available minus safety reserve) or Manual RAM Budget (in GB/MB).
+     - **RAM Safety Reserve (MB)**: Configurable reserve (default: 4096 MB) kept untouched to prevent Linux OOM-killer triggers.
+     - **Weight Offload Policy**: Toggle to allow/disallow offloading model layers to RAM (`--cpu-offload-gb`) when weights exceed VRAM.
+     - **Global Context Cap**: Optional token ceiling (e.g., limit all models to 32k, 64k, or Leave Uncapped) for users who want to prevent massive context memory allocations.
 2. **Model Cards & Discovery (`Search.tsx`, `Library.tsx`, `api.ts`)**:
    - **Context Badge**: `8k VRAM ➔ 64k RAM` (or `32k VRAM` if non-overflowed).
    - **RunMode Badge**:
