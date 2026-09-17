@@ -219,7 +219,6 @@ export interface FitResultBackend {
   ram_pct: number;
   format_support: FormatSupport;
   reason: string;
-  usable_context?: any;
 }
 
 export interface QuantVariantWithFit {

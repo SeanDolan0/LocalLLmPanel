@@ -220,7 +220,7 @@ pub fn score_variant(
         )
     };
 
-    let (_ext_room, ext_limit) = if tiered.extended_context < 1000 {
+    let (_, ext_limit) = if tiered.extended_context < 1000 {
         (
             format!("{} tokens", tiered.extended_context),
             format!("{} tokens", tiered.extended_context),

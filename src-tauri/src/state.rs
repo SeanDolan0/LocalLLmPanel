@@ -439,6 +439,15 @@ mod tests {
         assert_eq!(s.swap_space_gb, Some(16));
         assert_eq!(s.cpu_offload_gb, Some(8));
 
+        let mut server = s.clone();
+        server.swap_space_gb = Some(8);
+        server.cpu_offload_gb = Some(4);
+        let serialized = serde_json::to_string(&server).unwrap();
+        let deserialized: ServerDef = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.swap_space_gb, Some(8));
+        assert_eq!(deserialized.cpu_offload_gb, Some(4));
+        assert_eq!(deserialized, server);
+
         let legacy_json = r#"{
             "id": "s1",
             "name": "test",

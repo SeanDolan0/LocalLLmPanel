@@ -637,6 +637,22 @@ mod tests {
         assert!(cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY=1"));
     }
 
+    #[test]
+    fn test_build_start_command_swap_and_cpu_offload_omitted_when_zero_or_none() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8010, "fp16", None);
+        d.swap_space_gb = Some(0);
+        d.cpu_offload_gb = Some(0);
+        let cmd_zero = build_start_command(&d, "");
+        assert!(!cmd_zero.contains("--swap-space"), "command must not include --swap-space: {cmd_zero}");
+        assert!(!cmd_zero.contains("--cpu-offload-gb"), "command must not include --cpu-offload-gb: {cmd_zero}");
+
+        d.swap_space_gb = None;
+        d.cpu_offload_gb = None;
+        let cmd_none = build_start_command(&d, "");
+        assert!(!cmd_none.contains("--swap-space"), "command must not include --swap-space: {cmd_none}");
+        assert!(!cmd_none.contains("--cpu-offload-gb"), "command must not include --cpu-offload-gb: {cmd_none}");
+    }
+
 
     #[test]
     fn metrics_parse_both_generations() {
