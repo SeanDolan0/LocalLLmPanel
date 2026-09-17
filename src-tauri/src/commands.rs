@@ -249,6 +249,9 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
         vram_total_mb: vram,
         bandwidth_gbs: bw,
         bandwidth_known: known,
+        ram_total_mb: 16384,
+        ram_usable_mb: 12288,
+        ram_bandwidth_gbs: 65.0,
     })
 }
 
@@ -258,6 +261,9 @@ fn fallback_hardware_profile() -> HardwareProfile {
         vram_total_mb: 16384,
         bandwidth_gbs: 700.0,
         bandwidth_known: false,
+        ram_total_mb: 16384,
+        ram_usable_mb: 12288,
+        ram_bandwidth_gbs: 65.0,
     }
 }
 
@@ -381,7 +387,7 @@ async fn process_models_with_fit(
                             params_b: v.params_b,
                             is_gguf,
                         };
-                        let fit = fit::score_variant(&hw, &vi, &arch, None);
+                        let fit = fit::score_variant(&hw, &vi, &arch, None, 0.92, 2500.0, true, None);
                         (v, (vi, fit))
                     })
                     .collect();
@@ -952,6 +958,9 @@ mod tests {
         assert_eq!(hw.vram_total_mb, 24576);
         assert!(hw.bandwidth_known);
         assert_eq!(hw.bandwidth_gbs, 1008.0);
+        assert_eq!(hw.ram_total_mb, 16384);
+        assert_eq!(hw.ram_usable_mb, 12288);
+        assert_eq!(hw.ram_bandwidth_gbs, 65.0);
     }
 
     #[test]
@@ -965,6 +974,9 @@ mod tests {
         assert_eq!(fb.vram_total_mb, 16384);
         assert_eq!(fb.bandwidth_gbs, 700.0);
         assert!(!fb.bandwidth_known);
+        assert_eq!(fb.ram_total_mb, 16384);
+        assert_eq!(fb.ram_usable_mb, 12288);
+        assert_eq!(fb.ram_bandwidth_gbs, 65.0);
     }
 
     #[test]
@@ -1061,13 +1073,18 @@ mod tests {
                     },
                     fit: FitResult {
                         verdict: fit::FitVerdict::Constrained,
+                        run_mode: fit::RunMode::GpuRamSwap,
                         score: 75,
                         weight_gb: 15.2,
-                        usable_context: 8192,
+                        vram_context: 8192,
+                        extended_context: 16384,
                         native_context: 32768,
+                        swap_space_gb: 2,
+                        cpu_offload_gb: 0,
                         est_tok_s: Some(45.0),
                         measured_tok_s: None,
                         vram_pct: 85,
+                        ram_pct: 20,
                         format_support: fit::FormatSupport::Native,
                         reason: "Constrained fit".into(),
                     },
