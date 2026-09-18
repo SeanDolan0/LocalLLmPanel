@@ -257,12 +257,15 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     let cfg = state.config();
     let mem = &cfg.memory_settings;
     let (ram_total_mb, ram_avail_mb) = crate::wsl::detect_wsl_memory(&cfg.distro);
-    let ram_usable_mb = if !mem.enable_ram_overflow {
-        0
-    } else if let Some(manual) = mem.manual_ram_limit_mb {
+    let potential_ram = if let Some(manual) = mem.manual_ram_limit_mb {
         manual
     } else {
         ram_avail_mb.saturating_sub(mem.safety_reserve_mb)
+    };
+    let ram_usable_mb = if !mem.enable_ram_overflow {
+        0
+    } else {
+        potential_ram
     };
     Some(HardwareProfile {
         gpu_name: gpu.name,
@@ -271,6 +274,7 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
         bandwidth_known: known,
         ram_total_mb,
         ram_usable_mb,
+        ram_potential_mb: potential_ram,
         ram_bandwidth_gbs: 65.0,
     })
 }
@@ -283,6 +287,7 @@ fn fallback_hardware_profile() -> HardwareProfile {
         bandwidth_known: false,
         ram_total_mb: 16384,
         ram_usable_mb: 12288,
+        ram_potential_mb: 12288,
         ram_bandwidth_gbs: 65.0,
     }
 }
@@ -1063,6 +1068,42 @@ pub async fn gpu_status(state: State<'_, Arc<AppState>>) -> Result<Option<GpuSna
     .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Open external URL in system browser
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Only http and https URLs are allowed".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map_err(|e| format!("Failed to open URL in browser: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL in browser: {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL in browser: {e}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,7 +1133,10 @@ mod tests {
     fn test_hardware_profile_ram_overflow_disabled() {
         let st = AppState::new();
         st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
-        st.config.lock().unwrap().memory_settings.enable_ram_overflow = false;
+        st.config.lock().unwrap().memory_settings = MemorySettings {
+            enable_ram_overflow: false,
+            ..MemorySettings::default()
+        };
         *st.gpu.lock().unwrap() = Some(GpuSnapshot {
             name: "NVIDIA GeForce RTX 4090".to_string(),
             vram_total_mb: 24576,
@@ -1101,6 +1145,7 @@ mod tests {
         });
         let hw = hardware_profile(&st).expect("should have hardware profile");
         assert_eq!(hw.ram_usable_mb, 0);
+        assert_eq!(hw.ram_potential_mb, 8192); // 12288 - 4096 (potential remains known)
     }
 
     #[test]
@@ -1458,5 +1503,12 @@ mod tests {
             &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "16")],
         ).unwrap();
         assert_eq!(url.query(), Some("sort=trendingScore&pipeline_tag=text-generation&limit=16"));
+    }
+
+    #[test]
+    fn test_open_url_validation() {
+        assert!(open_url("ftp://evil.com".into()).is_err());
+        assert!(open_url("javascript:alert(1)".into()).is_err());
+        assert!(open_url("file:///etc/passwd".into()).is_err());
     }
 }

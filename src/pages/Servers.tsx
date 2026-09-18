@@ -433,7 +433,9 @@ function NewServerForm({
             className={inputCls}
             placeholder={
               (vramContextLimit ?? 0) > 0
-                ? `auto (~${fmtNum(vramContextLimit!)} VRAM)`
+                ? (initialMaxLen && initialMaxLen > vramContextLimit!
+                    ? `auto (~${fmtNum(vramContextLimit!)} VRAM ➔ ~${fmtNum(initialMaxLen)} RAM)`
+                    : `auto (~${fmtNum(vramContextLimit!)} VRAM)`)
                 : "auto (context ∩ VRAM fit)"
             }
             value={maxLen}
@@ -448,13 +450,21 @@ function NewServerForm({
               <span className="text-slate-600">➔</span>
               <span className="inline-flex items-center gap-1 text-cyan-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-                RAM Swap: &gt;{fmtNum(vramContextLimit!)}
+                RAM Swap: {initialMaxLen && initialMaxLen > vramContextLimit! ? `up to ~${fmtNum(initialMaxLen)} tokens` : `>${fmtNum(vramContextLimit!)}`}
               </span>
               {maxLen && parseInt(maxLen, 10) > vramContextLimit! && (
                 <span className="text-[11px] font-semibold text-cyan-300 ml-auto">
                   (Uses RAM swap)
                 </span>
               )}
+            </div>
+          )}
+          {(vramContextLimit ?? 0) === 0 && (initialMaxLen ?? 0) > 0 && (
+            <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+              <span className="inline-flex items-center gap-1 text-amber-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                RAM Context: up to ~{fmtNum(initialMaxLen!)} tokens (CPU Offload)
+              </span>
             </div>
           )}
         </Field>

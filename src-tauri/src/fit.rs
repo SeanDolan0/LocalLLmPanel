@@ -2,7 +2,7 @@
 //!
 //! Pure functions composing `estimate.rs`. No I/O, fully unit-testable.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::estimate;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub const CONSTRAINED_MAX_RATIO: f64 = 0.95;
 pub const OVERHEAD_MB: f64 = 2500.0;
 pub const GPU_UTIL_DEFAULT: f64 = 0.92;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareProfile {
     pub gpu_name: String,
     pub vram_total_mb: u64,
@@ -32,7 +32,23 @@ pub struct HardwareProfile {
     pub bandwidth_known: bool,
     pub ram_total_mb: u64,
     pub ram_usable_mb: u64,
+    #[serde(default)]
+    pub ram_potential_mb: u64,
     pub ram_bandwidth_gbs: f64,
+}
+
+impl HardwareProfile {
+    pub fn potential_ram_mb(&self) -> f64 {
+        if self.ram_potential_mb > 0 {
+            self.ram_potential_mb as f64
+        } else if self.ram_usable_mb > 0 {
+            self.ram_usable_mb as f64
+        } else if self.ram_total_mb > 0 {
+            (self.ram_total_mb as f64 * 0.75).max(0.0)
+        } else {
+            0.0
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,16 +133,41 @@ pub fn score_variant(
         _ => estimate::estimate_kv_bytes_per_token(params_b),
     };
     let target_context = max_context_cap.unwrap_or(arch.context).min(arch.context);
+    let active_ram = hw.ram_usable_mb as f64;
+    let potential_ram = hw.potential_ram_mb();
+
     let tiered = estimate::context_fit_tiered(
         usable_vram_mb,
         gpu_util,
-        hw.ram_usable_mb as f64,
+        active_ram,
         weight_gb,
         kv_bpt,
         vram_overhead_mb,
         target_context,
         allow_weight_offload,
     );
+
+    // Compute potential overflow context if active RAM overflow is disabled or limited,
+    // so the user can always see what context window is achievable with RAM overflow.
+    let (extended_context, swap_space_gb, cpu_offload_gb) = if potential_ram > active_ram {
+        let potential_tiered = estimate::context_fit_tiered(
+            usable_vram_mb,
+            gpu_util,
+            potential_ram,
+            weight_gb,
+            kv_bpt,
+            vram_overhead_mb,
+            target_context,
+            true,
+        );
+        (
+            potential_tiered.extended_context.max(tiered.extended_context),
+            if tiered.swap_space_gb > 0 { tiered.swap_space_gb } else { potential_tiered.swap_space_gb },
+            if tiered.cpu_offload_gb > 0 { tiered.cpu_offload_gb } else { potential_tiered.cpu_offload_gb },
+        )
+    } else {
+        (tiered.extended_context, tiered.swap_space_gb, tiered.cpu_offload_gb)
+    };
 
     // Determine RunMode
     let run_mode = if tiered.extended_context == 0 {
@@ -271,10 +312,10 @@ pub fn score_variant(
         score,
         weight_gb,
         vram_context: tiered.vram_context,
-        extended_context: tiered.extended_context,
+        extended_context,
         native_context: arch.context,
-        swap_space_gb: tiered.swap_space_gb,
-        cpu_offload_gb: tiered.cpu_offload_gb,
+        swap_space_gb,
+        cpu_offload_gb,
         est_tok_s,
         measured_tok_s,
         vram_pct,
@@ -331,6 +372,7 @@ mod tests {
             bandwidth_known: true,
             ram_total_mb: 24576,
             ram_usable_mb: 20480,
+            ram_potential_mb: 20480,
             ram_bandwidth_gbs: 65.0,
         };
         let v = variant("awq", false);
@@ -351,6 +393,7 @@ mod tests {
             bandwidth_known: true,
             ram_total_mb: 32768,
             ram_usable_mb: 24576,
+            ram_potential_mb: 24576,
             ram_bandwidth_gbs: 65.0,
         };
         // 7.6B fp16 = 15.2 GB weights on 8GB GPU -> shortfall ~10GB -> offload to RAM
@@ -385,6 +428,7 @@ mod tests {
             bandwidth_known: true,
             ram_total_mb: 8192,
             ram_usable_mb: 4096,
+            ram_potential_mb: 4096,
             ram_bandwidth_gbs: 65.0,
         };
         let arch_70b = ModelArchInfo { params_b: Some(70.0), context: 8192, n_layers: Some(80), n_kv_heads: Some(8), head_dim: Some(128) };
@@ -405,6 +449,7 @@ mod tests {
             bandwidth_known: true,
             ram_total_mb: 24576,
             ram_usable_mb: 20480,
+            ram_potential_mb: 20480,
             ram_bandwidth_gbs: 65.0,
         }
     }
@@ -601,6 +646,7 @@ mod tests {
             bandwidth_known: true,
             ram_total_mb: 32768,
             ram_usable_mb: 24576,
+            ram_potential_mb: 24576,
             ram_bandwidth_gbs: 65.0,
         };
         // Arch with missing layer dims but known params
@@ -621,5 +667,43 @@ mod tests {
         assert!(res.vram_context > 0, "usable context should not be 0");
         assert!(res.est_tok_s.is_some(), "est speed should be present");
         assert!(res.est_tok_s.unwrap() > 10.0, "est speed should be reasonable");
+    }
+
+    #[test]
+    fn test_score_variant_ram_overflow_disabled_always_calculates_extended_context() {
+        // Even when active ram_usable_mb is 0 (RAM overflow disabled in settings),
+        // ram_potential_mb allows calculating the achievable context with RAM overflow.
+        let hw = HardwareProfile {
+            gpu_name: "RTX 5070 Ti".into(),
+            vram_total_mb: 12227,
+            bandwidth_gbs: 672.0,
+            bandwidth_known: true,
+            ram_total_mb: 24576,
+            ram_usable_mb: 0, // Disabled in active settings
+            ram_potential_mb: 20480, // Physical system usable RAM
+            ram_bandwidth_gbs: 65.0,
+        };
+        let v = variant("awq", false);
+        let arch = arch_7b(); // 32k native context
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
+        // Active execution mode should be pure GPU because overflow is disabled in settings
+        assert_eq!(r.run_mode, RunMode::Gpu);
+        // But extended_context and swap_space_gb must show the RAM overflow potential
+        assert!(r.extended_context > r.vram_context);
+        assert_eq!(r.extended_context, 32768);
+        assert!(r.swap_space_gb > 0);
+    }
+
+    #[test]
+    fn test_score_variant_fits_fully_in_vram_native_context_no_overflow() {
+        // When 100% of native context already fits in VRAM, extended_context equals vram_context
+        let hw = hw_12gb();
+        let v = variant("fp16", false);
+        let arch = arch_0_5b(); // 32k native context fits entirely in 12GB VRAM
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
+        assert_eq!(r.run_mode, RunMode::Gpu);
+        assert_eq!(r.vram_context, 32768);
+        assert_eq!(r.extended_context, 32768);
+        assert_eq!(r.swap_space_gb, 0);
     }
 }

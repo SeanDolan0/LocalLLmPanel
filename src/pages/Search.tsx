@@ -95,9 +95,24 @@ export function ContextBadge({ fit }: { fit: FitResultBackend }) {
   if (fit.vram_context === 0 && fit.extended_context === 0) {
     return <span className="text-xs text-neutral-500">—</span>;
   }
-  if (fit.run_mode === "GpuRamSwap") {
+  if (fit.extended_context > fit.vram_context) {
+    if (fit.vram_context === 0) {
+      return (
+        <span
+          className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-amber-950/80 text-amber-300 border border-amber-800"
+          title={`0 tokens fit in VRAM. Offloaded to RAM: ${fmtNum(fit.extended_context)} tokens (requires ${fit.cpu_offload_gb}GB CPU offload, ~${fit.swap_space_gb}GB swap)`}
+        >
+          <span className="font-semibold text-slate-400">0k VRAM</span>
+          <span>➔</span>
+          <span className="font-bold text-amber-200">{Math.round(fit.extended_context / 1000)}k RAM</span>
+        </span>
+      );
+    }
     return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-cyan-950/80 text-cyan-300 border border-cyan-800">
+      <span
+        className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-cyan-950/80 text-cyan-300 border border-cyan-800"
+        title={`VRAM Context: ${fmtNum(fit.vram_context)} tokens | With RAM Overflow: up to ${fmtNum(fit.extended_context)} tokens (requires ~${fit.swap_space_gb}GB swap space in system RAM)`}
+      >
         <span className="font-semibold">{Math.round(fit.vram_context / 1000)}k VRAM</span>
         <span>➔</span>
         <span className="font-bold text-cyan-200">{Math.round(fit.extended_context / 1000)}k RAM</span>
@@ -105,7 +120,10 @@ export function ContextBadge({ fit }: { fit: FitResultBackend }) {
     );
   }
   return (
-    <span className="text-xs text-neutral-300">
+    <span
+      className="text-xs text-neutral-300"
+      title={`Fits natively in VRAM: ${fmtNum(fit.vram_context)} tokens (native max: ${fmtNum(fit.native_context || fit.vram_context)} tokens, RAM overflow not needed)`}
+    >
       {Math.round((fit.vram_context || fit.extended_context) / 1000)}k {fit.run_mode === "CpuOffload" ? "RAM" : "VRAM"}
     </span>
   );
@@ -588,8 +606,28 @@ export default function Search() {
                         className="border-b border-edge/60 last:border-0 hover:bg-surface-2/70 transition-colors cursor-pointer"
                       >
                         <td className="px-3 py-2.5 max-w-[280px]">
-                          <div className="font-medium text-slate-200 truncate hover:text-indigo-300" title={m.id}>
-                            {m.id}
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="font-medium text-slate-200 truncate hover:text-indigo-300" title={m.id}>
+                              {m.id}
+                            </span>
+                            <a
+                              href={`https://huggingface.co/${m.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                api.openUrl(`https://huggingface.co/${m.id}`).catch((err) => {
+                                  console.error("Failed to open Hugging Face URL:", err);
+                                });
+                              }}
+                              className="text-slate-500 hover:text-indigo-300 p-0.5 rounded transition-colors shrink-0"
+                              title="Open on Hugging Face"
+                            >
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                              </svg>
+                            </a>
                           </div>
                           <div className="flex items-center gap-2 text-[11px] text-slate-500">
                             {m.pipeline_tag && <span>{m.pipeline_tag}</span>}
@@ -799,12 +837,32 @@ function ModelCard({
 
         {/* Model Identification: Prominent, Unrestricted Width */}
         <div className="space-y-1">
-          <h3
-            className="font-bold text-slate-100 text-base group-hover:text-indigo-300 transition-colors leading-snug line-clamp-2"
-            title={model.id}
-          >
-            {modelName}
-          </h3>
+          <div className="flex items-start justify-between gap-2">
+            <h3
+              className="font-bold text-slate-100 text-base group-hover:text-indigo-300 transition-colors leading-snug line-clamp-2"
+              title={model.id}
+            >
+              {modelName}
+            </h3>
+            <a
+              href={`https://huggingface.co/${model.id}`}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                api.openUrl(`https://huggingface.co/${model.id}`).catch((err) => {
+                  console.error("Failed to open Hugging Face URL:", err);
+                });
+              }}
+              className="text-slate-500 hover:text-indigo-400 p-0.5 rounded hover:bg-surface-3 transition-colors shrink-0 mt-0.5"
+              title="Open on Hugging Face"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </a>
+          </div>
           <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
             {author && (
               <span className="text-slate-500 font-mono" title={`Author / Org: ${author}`}>
@@ -1052,7 +1110,14 @@ function ModelDetailModal({
                 href={`https://huggingface.co/${model.id}`}
                 target="_blank"
                 rel="noreferrer"
-                className="text-indigo-400 hover:text-indigo-300 hover:underline flex items-center gap-1 font-sans text-[11px]"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  api.openUrl(`https://huggingface.co/${model.id}`).catch((err) => {
+                    console.error("Failed to open Hugging Face URL:", err);
+                  });
+                }}
+                className="text-indigo-400 hover:text-indigo-300 hover:underline flex items-center gap-1 font-sans text-[11px] cursor-pointer"
                 title="Open on Hugging Face"
               >
                 <span>Hugging Face</span>
@@ -1245,8 +1310,26 @@ function ModelDetailModal({
                           )}
                         </div>
 
-                        <div className="font-mono text-xs text-slate-400 truncate" title={variant.repo_id}>
-                          {variant.repo_id}
+                        <div className="font-mono text-xs text-slate-400 truncate flex items-center gap-1.5" title={variant.repo_id}>
+                          <span className="truncate">{variant.repo_id}</span>
+                          <a
+                            href={`https://huggingface.co/${variant.repo_id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              api.openUrl(`https://huggingface.co/${variant.repo_id}`).catch((err) => {
+                                console.error("Failed to open Hugging Face URL:", err);
+                              });
+                            }}
+                            className="text-indigo-400/80 hover:text-indigo-300 transition-colors p-0.5 inline-flex items-center cursor-pointer shrink-0"
+                            title={`Open ${variant.repo_id} on Hugging Face`}
+                          >
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                            </svg>
+                          </a>
                           {variant.gguf_file && (
                             <span className="text-amber-300/90 ml-1.5 font-sans">
                               (file: {variant.gguf_file})

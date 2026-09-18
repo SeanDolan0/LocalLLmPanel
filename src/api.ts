@@ -71,6 +71,7 @@ export const api = {
   updateMemorySettings: (settings: MemorySettings) =>
     invoke<void>("update_memory_settings", { settings }),
   getSystemMemory: () => invoke<SystemMemoryInfo>("get_system_memory"),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
 };
 
 export async function getMemorySettings(): Promise<MemorySettings> {
