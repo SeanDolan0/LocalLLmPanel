@@ -1,6 +1,6 @@
 [package]
 name = "llm-panel"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local vLLM Panel — manage vLLM servers inside WSL2"
 authors = ["Local LLM Panel"]
 edition = "2021"
@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"
 dirs = "6"
 anyhow = "1"
 regex-lite = "0.1"
+llmfit-core = { path = "crates/llmfit-core" }
 
 [profile.release]
 codegen-units = 1

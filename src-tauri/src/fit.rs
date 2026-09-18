@@ -61,6 +61,10 @@ pub struct FitResult {
     pub ram_pct: u8,
     pub format_support: FormatSupport,
     pub reason: String,
+    pub usable_context: usize,
+    pub score_components: Option<crate::llmfit_adapter::ScoreComponentsDto>,
+    pub runtime: Option<String>,
+    pub notes: Vec<String>,
 }
 
 /// Minimal QuantVariant for scoring (full struct lives in hf.rs, this
@@ -276,7 +280,11 @@ pub fn score_variant(
         vram_pct,
         ram_pct,
         format_support,
-        reason,
+        reason: reason.clone(),
+        usable_context: tiered.vram_context.max(tiered.extended_context),
+        score_components: None,
+        runtime: Some(if variant.is_gguf { "llama.cpp".into() } else { "vLLM".into() }),
+        notes: vec![reason],
     }
 }
 

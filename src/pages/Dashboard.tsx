@@ -75,7 +75,7 @@ export default function Dashboard() {
       )}
 
       {/* Health row */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardTitle>WSL</CardTitle>
           {env ? (
@@ -125,6 +125,29 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="text-sm text-slate-500">nvidia-smi not visible inside WSL.</div>
+          )}
+        </Card>
+
+        <Card>
+          <CardTitle>System & Memory</CardTitle>
+          {env ? (
+            <div className="space-y-1.5 text-sm">
+              <div className="font-medium text-slate-200 truncate" title={env.cpu_name ?? undefined}>
+                {env.cpu_name ? env.cpu_name.replace("(R)", "").replace("(TM)", "") : "Host CPU"}
+              </div>
+              <div className="text-xs text-slate-500">
+                {env.cpu_cores ? `${env.cpu_cores} cores · ` : ""}
+                RAM: {env.available_ram_gb ? fmtNum(env.available_ram_gb, 1) : "?"} / {env.total_ram_gb ? fmtNum(env.total_ram_gb, 1) : "?"} GB free
+              </div>
+              <div className="text-xs text-slate-500">
+                est. RAM bandwidth <span className="text-slate-300 font-mono">{env.ram_bandwidth_gbps ?? "?"} GB/s</span>
+              </div>
+              <div className="text-xs text-slate-500">
+                Runtimes: <span className="text-emerald-300">{env.providers_detected && env.providers_detected.length > 0 ? env.providers_detected.join(", ") : "llama.cpp, vLLM"}</span>
+              </div>
+            </div>
+          ) : (
+            <Spinner />
           )}
         </Card>
 

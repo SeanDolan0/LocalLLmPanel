@@ -4,6 +4,7 @@ pub mod commands;
 pub mod estimate;
 pub mod fit;
 pub mod hf;
+pub mod llmfit_adapter;
 pub mod provision;
 pub mod server;
 pub mod state;

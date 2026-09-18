@@ -29,6 +29,12 @@ pub struct EnvStatus {
     pub running_weight_gb: f64,
     pub gpu_bandwidth_gbs: f64,
     pub gpu_bw_known: bool,
+    pub cpu_name: Option<String>,
+    pub cpu_cores: Option<usize>,
+    pub total_ram_gb: Option<f64>,
+    pub available_ram_gb: Option<f64>,
+    pub ram_bandwidth_gbps: Option<f64>,
+    pub providers_detected: Vec<String>,
 }
 
 fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
@@ -106,6 +112,26 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             (false, None)
         };
 
+        let llmfit_specs = crate::llmfit_adapter::get_system_specs();
+        let cpu_name = Some(llmfit_specs.cpu_name.clone());
+        let cpu_cores = Some(llmfit_specs.total_cpu_cores);
+        let total_ram_gb = Some((llmfit_specs.total_ram_gb * 10.0).round() / 10.0);
+        let available_ram_gb = Some((llmfit_specs.available_ram_gb * 10.0).round() / 10.0);
+        let ram_bandwidth_gbps = Some(117.0);
+
+        let mut providers_detected = Vec::new();
+        let llamacpp = llmfit_core::providers::LlamaCppProvider::new();
+        if llmfit_core::providers::ModelProvider::is_available(&llamacpp) {
+            providers_detected.push("llama.cpp".to_string());
+        }
+        let ollama = llmfit_core::providers::OllamaProvider::new();
+        if llmfit_core::providers::ModelProvider::is_available(&ollama) {
+            providers_detected.push("Ollama".to_string());
+        }
+        if env_report.as_ref().map(|r| r.vllm_version.is_some()).unwrap_or(false) {
+            providers_detected.push("vLLM (WSL)".to_string());
+        }
+
         EnvStatus {
             wsl_ok,
             distro: distro_detected,
@@ -117,6 +143,12 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             running_weight_gb,
             gpu_bandwidth_gbs: bandwidth,
             gpu_bw_known: known,
+            cpu_name,
+            cpu_cores,
+            total_ram_gb,
+            available_ram_gb,
+            ram_bandwidth_gbps,
+            providers_detected,
         }
     })
     .await
@@ -216,29 +248,7 @@ pub async fn search_models(
     Ok(enriched)
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct QuantVariantWithFit {
-    pub variant: QuantVariant,
-    pub fit: FitResult,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelWithFit {
-    pub id: String,
-    pub downloads: i64,
-    pub likes: i64,
-    pub trending_score: f64,
-    pub pipeline_tag: Option<String>,
-    pub params_b: Option<f64>,
-    pub context: Option<usize>,
-    pub context_source: Option<&'static str>,
-    pub context_estimated: bool,
-    pub head_dim: Option<usize>,
-    pub n_layers: Option<usize>,
-    pub n_kv_heads: Option<usize>,
-    pub variants: Vec<QuantVariantWithFit>,
-    pub best_variant_idx: usize,
-}
+pub use crate::llmfit_adapter::{GgufSourceDto, ModelWithFit, QuantVariantWithFit, ScoreComponentsDto};
 
 fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     let gpu = state.gpu.lock().unwrap().clone()?;
@@ -423,21 +433,53 @@ async fn process_models_with_fit(
                     .map(|(variant, (_, fit))| QuantVariantWithFit { variant, fit })
                     .collect();
 
+                let best_fit = final_variants.get(best_variant_idx).map(|v| &v.fit);
+                let score = best_fit.map(|f| f.score as f64).unwrap_or(0.0);
+                let score_components = best_fit.and_then(|f| f.score_components);
+                let best_quant = final_variants.get(best_variant_idx).map(|v| v.variant.label.clone());
+                let runtime = best_fit.and_then(|f| f.runtime.clone());
+                let run_mode = best_fit.map(|f| format!("{:?}", f.run_mode));
+                let usable_context = best_fit.map(|f| f.usable_context);
+                let est_tok_s = best_fit.and_then(|f| f.est_tok_s);
+                let memory_required_gb = best_fit.map(|f| f.weight_gb);
+                let notes = best_fit.map(|f| f.notes.clone()).unwrap_or_default();
+
                 ModelWithFit {
                     id: m.id,
+                    provider: None,
                     downloads: m.downloads,
                     likes: m.likes,
                     trending_score: m.trending_score,
                     pipeline_tag: m.pipeline_tag,
                     params_b,
+                    parameter_count: params_b.map(|p| format!("{p:.1}B")),
                     context,
                     context_source,
                     context_estimated,
                     head_dim,
                     n_layers,
                     n_kv_heads,
+                    use_case: None,
+                    category: None,
+                    release_date: None,
                     variants: final_variants,
                     best_variant_idx,
+                    score,
+                    score_components,
+                    best_quant,
+                    runtime,
+                    fit_level: None,
+                    run_mode,
+                    usable_context,
+                    effective_context_length: usable_context,
+                    estimated_tps: est_tok_s,
+                    memory_required_gb,
+                    memory_available_gb: None,
+                    utilization_pct: None,
+                    notes,
+                    capabilities: Vec::new(),
+                    gguf_sources: Vec::new(),
+                    installed: false,
                 }
             });
             fut
@@ -460,17 +502,29 @@ pub async fn search_models_with_fit(
     state: State<'_, Arc<AppState>>,
     query: String,
 ) -> Result<Vec<ModelWithFit>, String> {
-    let st = (*state).clone();
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let token = st.hf_token();
-    let results = hf::search(&st.http, q, 12, token.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
-    let out = process_models_with_fit(&st, results).await;
-    Ok(out)
+
+    // 1. Search local llmfit curated database first (exact formulas, instant, zero rate limits)
+    let mut results = crate::llmfit_adapter::search_models_local(q, 30);
+
+    // 2. Augment with Hugging Face API search if fewer than 15 local results
+    if results.len() < 15 {
+        let st = (*state).clone();
+        let token = st.hf_token();
+        if let Ok(hf_results) = hf::search(&st.http, q, 12, token.as_deref()).await {
+            let existing_ids: std::collections::HashSet<String> = results.iter().map(|m| m.id.to_lowercase()).collect();
+            let new_hf: Vec<_> = hf_results.into_iter().filter(|m| !existing_ids.contains(&m.id.to_lowercase())).collect();
+            if !new_hf.is_empty() {
+                let mut hf_scored = process_models_with_fit(&st, new_hf).await;
+                results.append(&mut hf_scored);
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 #[tauri::command]
@@ -493,67 +547,10 @@ pub async fn recommended_models(
         }
     }
 
-    // 2. Query HF API for trending text-generation models (limit=16)
-    let token = st.hf_token();
-    let url = reqwest::Url::parse_with_params(
-        hf::HF_API,
-        &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "16")],
-    )
-    .map_err(|e| format!("build recommendations url: {e}"))?;
+    // 2. Exact match to `llmfit recommend` on the local hardware
+    let out = crate::llmfit_adapter::recommend_models(50);
 
-    let req = hf::apply_auth(st.http.get(url), token.as_deref());
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("HF recommendations request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err("HF API rate limit exceeded (429 Too Many Requests). If you haven't added a Hugging Face token, please configure one in Settings to increase your quota.".into());
-        }
-        return Err(format!("HF recommendations returned {status}: {body}"));
-    }
-
-    let arr: Vec<serde_json::Value> = resp
-        .json()
-        .await
-        .map_err(|e| format!("HF recommendations JSON parse: {e}"))?;
-
-    let mut models = Vec::with_capacity(arr.len());
-    for m in arr {
-        let id = m
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if id.is_empty() {
-            continue;
-        }
-        let downloads = m.get("downloads").and_then(|v| v.as_i64()).unwrap_or(0);
-        let likes = m.get("likes").and_then(|v| v.as_i64()).unwrap_or(0);
-        let trending = m.get("trendingScore").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let private = m.get("private").and_then(|v| v.as_bool()).unwrap_or(false);
-        let pipeline = m
-            .get("pipeline_tag")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        models.push(HfModel {
-            id,
-            downloads,
-            likes,
-            trending_score: trending,
-            private,
-            pipeline_tag: pipeline,
-            stats: None,
-        });
-    }
-
-    // 3. Process models with fit
-    let out = process_models_with_fit(&st, models).await;
-
-    // 4. Store in cache
+    // 3. Store in cache
     if !out.is_empty() {
         let mut cache = st.rec_cache.lock().unwrap();
         *cache = Some((out.clone(), std::time::Instant::now(), hw.vram_total_mb));
@@ -581,6 +578,13 @@ pub struct ModelStats {
     pub measured: Option<MeasuredStats>,
     pub vram_total_mb: Option<u64>,
     pub gpu_name: Option<String>,
+    pub score: Option<f64>,
+    pub score_components: Option<ScoreComponentsDto>,
+    pub usable_context: Option<usize>,
+    pub runtime: Option<String>,
+    pub fit_level: Option<String>,
+    pub run_mode: Option<String>,
+    pub notes: Vec<String>,
 }
 
 #[tauri::command]
@@ -627,6 +631,37 @@ pub async fn model_stats(
     };
     let pb = stats.params_b.unwrap_or(0.0);
     let measured = st.config().measured.get(&model_id).cloned();
+
+    let (llmfit_score, score_components, usable_context, runtime, fit_level, run_mode, notes) = {
+        let db = crate::llmfit_adapter::get_model_database();
+        let specs = crate::llmfit_adapter::get_system_specs();
+        if let Some(m) = db.find_model(&model_id).into_iter().next() {
+            let fit = llmfit_core::fit::ModelFit::analyze(m, specs);
+            (
+                Some((fit.score * 10.0).round() / 10.0),
+                Some(fit.score_components.into()),
+                Some(fit.usable_context as usize),
+                Some(fit.runtime.label().to_string()),
+                Some(match fit.fit_level {
+                    llmfit_core::fit::FitLevel::Perfect => "Perfect".to_string(),
+                    llmfit_core::fit::FitLevel::Good => "Good".to_string(),
+                    llmfit_core::fit::FitLevel::Marginal => "Marginal".to_string(),
+                    llmfit_core::fit::FitLevel::TooTight => "Too Tight".to_string(),
+                }),
+                Some(match fit.run_mode {
+                    llmfit_core::fit::RunMode::Gpu => "GPU".to_string(),
+                    llmfit_core::fit::RunMode::MoeOffload => "MoE Offload".to_string(),
+                    llmfit_core::fit::RunMode::CpuOffload => "CPU Offload".to_string(),
+                    llmfit_core::fit::RunMode::CpuOnly => "CPU Only".to_string(),
+                    llmfit_core::fit::RunMode::TensorParallel => "Tensor Parallel".to_string(),
+                }),
+                fit.notes,
+            )
+        } else {
+            (None, None, None, None, None, None, Vec::new())
+        }
+    };
+
     Ok(ModelStats {
         model_id: model_id.clone(),
         params_b: stats.params_b,
@@ -645,6 +680,13 @@ pub async fn model_stats(
         measured,
         vram_total_mb: Some(vram_mb).filter(|v| *v > 0),
         gpu_name: Some(gpu_name).filter(|g| !g.is_empty()),
+        score: llmfit_score,
+        score_components,
+        usable_context,
+        runtime,
+        fit_level,
+        run_mode,
+        notes,
     })
 }
 
@@ -1029,6 +1071,7 @@ mod tests {
     fn test_hardware_profile_detected() {
         let st = AppState::new();
         st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        st.config.lock().unwrap().memory_settings = MemorySettings::default();
         *st.gpu.lock().unwrap() = Some(GpuSnapshot {
             name: "NVIDIA GeForce RTX 4090".to_string(),
             vram_total_mb: 24576,
@@ -1079,7 +1122,11 @@ mod tests {
     fn test_hardware_profile_safety_reserve_saturating() {
         let st = AppState::new();
         st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
-        st.config.lock().unwrap().memory_settings.safety_reserve_mb = 20000;
+        st.config.lock().unwrap().memory_settings = MemorySettings {
+            safety_reserve_mb: 20000,
+            manual_ram_limit_mb: None,
+            ..MemorySettings::default()
+        };
         *st.gpu.lock().unwrap() = Some(GpuSnapshot {
             name: "NVIDIA GeForce RTX 4090".to_string(),
             vram_total_mb: 24576,
@@ -1113,6 +1160,7 @@ mod tests {
             path: path.clone(),
             original_content,
         };
+        let _ = std::fs::remove_file(&path);
 
         let st = AppState::new();
         let settings = get_memory_settings_impl(&st);
@@ -1141,6 +1189,7 @@ mod tests {
     fn test_get_system_memory() {
         let st = AppState::new();
         st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
+        st.config.lock().unwrap().memory_settings = MemorySettings::default();
         let sys_mem = get_system_memory_impl(&st);
         assert_eq!(sys_mem.wsl_total_mb, 16384);
         assert_eq!(sys_mem.wsl_available_mb, 12288);
@@ -1196,6 +1245,7 @@ mod tests {
             n_kv_heads: Some(8),
             variants: vec![],
             best_variant_idx: 0,
+            ..Default::default()
         }];
 
         *st.rec_cache.lock().unwrap() = Some((dummy.clone(), std::time::Instant::now(), 16384));
@@ -1244,17 +1294,22 @@ mod tests {
     fn test_model_with_fit_serialization() {
         let m = ModelWithFit {
             id: "Qwen/Qwen2.5-7B".into(),
+            provider: Some("Qwen".into()),
             downloads: 50000,
             likes: 1200,
             trending_score: 89.5,
             pipeline_tag: Some("text-generation".into()),
             params_b: Some(7.6),
+            parameter_count: Some("7.6B".into()),
             context: Some(32768),
             context_source: Some("config.json"),
             context_estimated: false,
             head_dim: Some(128),
             n_layers: Some(32),
             n_kv_heads: Some(8),
+            use_case: Some("Chat".into()),
+            category: Some("Chat".into()),
+            release_date: None,
             variants: vec![
                 QuantVariantWithFit {
                     variant: QuantVariant {
@@ -1274,6 +1329,7 @@ mod tests {
                         vram_context: 8192,
                         extended_context: 16384,
                         native_context: 32768,
+                        usable_context: 16384,
                         swap_space_gb: 2,
                         cpu_offload_gb: 0,
                         est_tok_s: Some(45.0),
@@ -1282,10 +1338,29 @@ mod tests {
                         ram_pct: 20,
                         format_support: fit::FormatSupport::Native,
                         reason: "Constrained fit".into(),
+                        score_components: None,
+                        runtime: Some("vLLM".into()),
+                        notes: vec![],
                     },
                 },
             ],
             best_variant_idx: 0,
+            score: 75.0,
+            score_components: None,
+            best_quant: Some("FP16".into()),
+            runtime: Some("vLLM".into()),
+            fit_level: Some("Good".into()),
+            run_mode: Some("GPU".into()),
+            usable_context: Some(16384),
+            effective_context_length: Some(16384),
+            estimated_tps: Some(45.0),
+            memory_required_gb: Some(15.2),
+            memory_available_gb: Some(16.0),
+            utilization_pct: Some(95.0),
+            notes: vec![],
+            capabilities: vec![],
+            gguf_sources: vec![],
+            installed: false,
         };
 
         let json = serde_json::to_string(&m).expect("serialize");

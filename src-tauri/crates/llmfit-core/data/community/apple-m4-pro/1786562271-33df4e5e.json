@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "submittedAtUnix": 1786562271,
+  "tool": {
+    "name": "llmfit",
+    "version": "1.1.9"
+  },
+  "hardware": {
+    "hwClass": "UNIFIED",
+    "hardwareName": "Apple M4 Pro",
+    "memTierGb": 24,
+    "vramGb": 24.0,
+    "gpuCount": 1,
+    "unifiedMemory": true,
+    "cpu": "Apple M4 Pro",
+    "cpuCores": 14,
+    "ramGb": 24.0,
+    "os": "macos"
+  },
+  "results": [
+    {
+      "model": "Muse-Glimmer-30B-Q4_K_M.gguf",
+      "provider": "llamacpp",
+      "numRuns": 3,
+      "avgTps": 13.17,
+      "minTps": 12.94,
+      "maxTps": 13.36,
+      "avgTtftMs": null,
+      "avgTotalMs": 22788.39,
+      "avgOutputTokens": 300.0
+    }
+  ]
+}

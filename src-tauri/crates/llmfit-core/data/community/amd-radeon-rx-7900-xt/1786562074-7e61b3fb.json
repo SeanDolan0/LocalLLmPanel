@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "submittedAtUnix": 1786562074,
+  "tool": {
+    "name": "llmfit",
+    "version": "1.1.9"
+  },
+  "hardware": {
+    "hwClass": "DISCRETE_GPU",
+    "hardwareName": "AMD Radeon RX 7900 XT",
+    "memTierGb": 16,
+    "vramGb": 19.98,
+    "gpuCount": 1,
+    "unifiedMemory": false,
+    "cpu": "Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz",
+    "cpuCores": 20,
+    "ramGb": 62.49,
+    "os": "linux"
+  },
+  "results": [
+    {
+      "model": "Muse-Glimmer-30B-Q4_K_M.gguf",
+      "provider": "llamacpp",
+      "numRuns": 3,
+      "avgTps": 35.17,
+      "minTps": 35.09,
+      "maxTps": 35.28,
+      "avgTtftMs": null,
+      "avgTotalMs": 8529.58,
+      "avgOutputTokens": 300.0
+    }
+  ]
+}

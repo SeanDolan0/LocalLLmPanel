@@ -29,6 +29,12 @@ export interface EnvStatus {
   running_weight_gb: number;
   gpu_bandwidth_gbs: number;
   gpu_bw_known: boolean;
+  cpu_name?: string | null;
+  cpu_cores?: number | null;
+  total_ram_gb?: number | null;
+  available_ram_gb?: number | null;
+  ram_bandwidth_gbps?: number | null;
+  providers_detected?: string[];
 }
 
 export interface ModelWithStats {
@@ -64,6 +70,13 @@ export interface ModelStats {
   measured: MeasuredStats | null;
   vram_total_mb: number | null;
   gpu_name: string | null;
+  score?: number | null;
+  score_components?: ScoreComponents | null;
+  usable_context?: number | null;
+  runtime?: string | null;
+  fit_level?: string | null;
+  run_mode?: string | null;
+  notes?: string[];
 }
 
 export interface MeasuredStats {
@@ -203,6 +216,18 @@ export interface SystemMemoryInfo {
 
 export type RunMode = "Gpu" | "GpuRamSwap" | "CpuOffload" | "DoesNotFit";
 
+export interface ScoreComponents {
+  quality: number;
+  speed: number;
+  fit: number;
+  context: number;
+}
+
+export interface GgufSource {
+  provider: string;
+  repo: string;
+}
+
 export interface FitResultBackend {
   verdict: FitVerdict;
   run_mode: RunMode;
@@ -211,6 +236,7 @@ export interface FitResultBackend {
   vram_context: number;
   extended_context: number;
   native_context: number;
+  usable_context?: number;
   swap_space_gb: number;
   cpu_offload_gb: number;
   est_tok_s: number | null;
@@ -219,6 +245,9 @@ export interface FitResultBackend {
   ram_pct: number;
   format_support: FormatSupport;
   reason: string;
+  score_components?: ScoreComponents | null;
+  runtime?: string | null;
+  notes?: string[];
 }
 
 export interface QuantVariantWithFit {
@@ -228,17 +257,38 @@ export interface QuantVariantWithFit {
 
 export interface ModelWithFit {
   id: string;
+  provider?: string | null;
   downloads: number;
   likes: number;
   trending_score: number;
   pipeline_tag: string | null;
   params_b: number | null;
+  parameter_count?: string | null;
   context: number | null;
   context_source: string | null;
   context_estimated: boolean;
   head_dim: number | null;
   n_layers: number | null;
   n_kv_heads: number | null;
+  use_case?: string | null;
+  category?: string | null;
+  release_date?: string | null;
   variants: QuantVariantWithFit[];
   best_variant_idx: number;
+  score?: number;
+  score_components?: ScoreComponents | null;
+  best_quant?: string | null;
+  runtime?: string | null;
+  fit_level?: string | null;
+  run_mode?: string | null;
+  usable_context?: number | null;
+  effective_context_length?: number | null;
+  estimated_tps?: number | null;
+  memory_required_gb?: number | null;
+  memory_available_gb?: number | null;
+  utilization_pct?: number | null;
+  notes?: string[];
+  capabilities?: string[];
+  gguf_sources?: GgufSource[];
+  installed?: boolean;
 }

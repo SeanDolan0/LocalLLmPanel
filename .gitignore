@@ -10,6 +10,7 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+.opencode/
 # Env / secrets
 .env
 *.local
