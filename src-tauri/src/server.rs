@@ -51,8 +51,14 @@ fn shell_quote(s: &str) -> String {
 /// Build the `bash -lc` launcher. The script activates the venv, records the
 /// process PID (bash exec → vLLM keeps the same PID), then `exec`s vLLM so it
 /// runs in the foreground of the wsl.exe console (logs stream to the panel).
-fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
+fn launch_script(
+    venv_dir: &str,
+    def: &ServerDef,
+    hf_token: &str,
+    adv: &crate::state::AdvancedSettings,
+) -> String {
     let mut parts: Vec<String> = vec![
+        format!("mkdir -p {}/../run", venv_dir),
         format!("cd {}/..", venv_dir),
         format!(". {}/bin/activate", venv_dir),
         format!("echo $$ > {}/../run/{}.pid", venv_dir, def.id),
@@ -61,7 +67,8 @@ fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
     args.push("--model".into());
     args.push(shell_quote(&def.model_id));
     args.push("--host".into());
-    args.push("127.0.0.1".into());
+    let host = if adv.host.trim().is_empty() { "127.0.0.1" } else { adv.host.trim() };
+    args.push(host.into());
     args.push("--port".into());
     args.push(def.port.to_string());
     args.push("--gpu-memory-utilization".into());
@@ -108,11 +115,64 @@ fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
         }
     }
 
-    // vLLM disables pinned-memory/UVA on WSL2 by default (see
-    // vllm/platforms/cuda.py), which crashes the V1 engine with
-    // "UVA is not available". Kernels >= 4.19.121 support it once enabled.
+    // Advanced vLLM engine flags
+    if let Some(key) = &adv.api_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            args.push("--api-key".into());
+            args.push(shell_quote(trimmed));
+        }
+    }
+    if adv.kv_cache_dtype.to_ascii_lowercase() != "auto" && !adv.kv_cache_dtype.trim().is_empty() {
+        args.push("--kv-cache-dtype".into());
+        args.push(adv.kv_cache_dtype.trim().to_string());
+    }
+    if adv.enable_prefix_caching {
+        args.push("--enable-prefix-caching".into());
+    }
+    if adv.enable_chunked_prefill {
+        args.push("--enable-chunked-prefill".into());
+    }
+    if let Some(seqs) = adv.max_num_seqs {
+        if seqs > 0 {
+            args.push("--max-num-seqs".into());
+            args.push(seqs.to_string());
+        }
+    }
+    if adv.disable_custom_all_reduce {
+        args.push("--disable-custom-all-reduce".into());
+    }
+    if let Some(extra) = &adv.extra_vllm_args {
+        for token in extra.split_whitespace() {
+            if !token.is_empty() {
+                args.push(token.to_string());
+            }
+        }
+    }
+
+    // Environment variables
     let preamble = "export VLLM_WSL2_ENABLE_PIN_MEMORY=1";
     parts.insert(0, preamble.into());
+    if !adv.log_level.trim().is_empty() {
+        parts.insert(0, format!("export VLLM_LOGGING_LEVEL='{}'", adv.log_level.trim()));
+    }
+    if adv.hf_offline {
+        parts.insert(0, "export HF_HUB_OFFLINE=1".into());
+    }
+    if let Some(home) = &adv.hf_home {
+        let home_trim = home.trim();
+        if !home_trim.is_empty() {
+            parts.insert(0, format!("mkdir -p {home_trim} && export HF_HOME={home_trim}"));
+        }
+    }
+    if let Some(custom_envs) = &adv.custom_env_vars {
+        for line in custom_envs.lines() {
+            let line_trim = line.trim();
+            if !line_trim.is_empty() && !line_trim.starts_with('#') && line_trim.contains('=') {
+                parts.insert(0, format!("export {line_trim}"));
+            }
+        }
+    }
     let token_ok = !hf_token.is_empty()
         && hf_token
             .chars()
@@ -125,7 +185,16 @@ fn launch_script(venv_dir: &str, def: &ServerDef, hf_token: &str) -> String {
 }
 
 pub fn build_start_command(def: &ServerDef, hf_token: &str) -> String {
-    launch_script("~/llm-lp/.venv", def, hf_token)
+    let adv = crate::state::AdvancedSettings::default();
+    launch_script("~/llm-lp/.venv", def, hf_token, &adv)
+}
+
+pub fn build_start_command_with_advanced(
+    def: &ServerDef,
+    hf_token: &str,
+    adv: &crate::state::AdvancedSettings,
+) -> String {
+    launch_script("~/llm-lp/.venv", def, hf_token, adv)
 }
 
 
@@ -170,6 +239,7 @@ pub fn start_server(
     id: &str,
 ) -> Result<()> {
     let cfg = state.config();
+    let distro = state.resolve_distro();
     let def = cfg
         .find_server(id)
         .cloned()
@@ -183,7 +253,7 @@ pub fn start_server(
         }
     }
 
-    let script = launch_script(&cfg.venv_dir, &def, &cfg.hf_token);
+    let script = launch_script(&cfg.venv_dir, &def, &cfg.hf_token, &cfg.advanced_settings);
     let id_log = id.to_string();
     let state_log = Arc::clone(state);
     let app_ev = app.map(|a| (*a).clone());
@@ -195,7 +265,7 @@ pub fn start_server(
             let _ = app.emit("server-log", ServerLogEvent { id: id_log.clone(), line });
         }
     };
-    let child = wsl::WslChild::spawn(&cfg.distro, &script, log_cb)
+    let child = wsl::WslChild::spawn(&distro, &script, log_cb)
         .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
     let wsl_pid = child.pid();
 
@@ -342,6 +412,7 @@ fn update_status(state: &Arc<AppState>, id: &str, status: ServerStatus) {
 /// timeout kill the wsl.exe process tree. Idempotent.
 pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
+    let distro = state.resolve_distro();
     let mut child = {
         let mut servers = state.servers.lock().unwrap();
         match servers.get_mut(id) {
@@ -356,12 +427,12 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
 
     // 1) SIGTERM on the WSL side (graceful: vLLM drains in-flight requests).
     let pid_from_file = wsl::run_script(
-        &cfg.distro,
+        &distro,
         &format!("cat {}/../run/{id}.pid 2>/dev/null || true", cfg.venv_dir),
     );
     let mut term_ok = false;
     if let Some(pid) = pid_from_file.stdout.trim().parse::<u32>().ok() {
-        let kill = wsl::run_script(&cfg.distro, &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"));
+        let kill = wsl::run_script(&distro, &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"));
         term_ok = kill.stdout.contains("killed");
     }
 
@@ -600,7 +671,12 @@ mod tests {
 
     #[test]
     fn launch_script_instruct() {
-        let script = launch_script("~/llm-lp/.venv", &def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None), "");
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None),
+            "",
+            &crate::state::AdvancedSettings::default(),
+        );
         assert!(script.contains("exec python -m vllm.entrypoints.openai.api_server"));
         assert!(script.contains("--model 'Qwen/Qwen2.5-0.5B-Instruct'"));
         assert!(script.contains("--port 8010"));
@@ -618,12 +694,51 @@ mod tests {
             "~/llm-lp/.venv",
             &def("BAAI/bge-small-en-v1.5", "embed", 8020, "fp8", Some("embedder")),
             "hf_secret_123",
+            &crate::state::AdvancedSettings::default(),
         );
         assert!(script.contains("--runner pooling"));
         assert!(script.contains("--quantization fp8"));
         assert!(script.contains("--served-model-name 'embedder'"));
         assert!(script.contains("--max-model-len 2048"));
         assert!(script.contains("export HF_TOKEN='hf_secret_123'"));
+    }
+
+    #[test]
+    fn test_launch_script_with_advanced_settings() {
+        let adv = crate::state::AdvancedSettings {
+            hf_home: Some("/mnt/d/ai/hf".into()),
+            hf_offline: true,
+            host: "0.0.0.0".into(),
+            api_key: Some("sk-test-123".into()),
+            kv_cache_dtype: "fp8".into(),
+            enable_prefix_caching: true,
+            enable_chunked_prefill: true,
+            max_num_seqs: Some(64),
+            disable_custom_all_reduce: true,
+            log_level: "DEBUG".into(),
+            extra_vllm_args: Some("--tensor-parallel-size 2".into()),
+            custom_env_vars: Some("CUDA_VISIBLE_DEVICES=0,1\n# comment\nNCCL_DEBUG=INFO".into()),
+        };
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def("meta-llama/Llama-3-8B-Instruct", "instruct", 8000, "fp16", None),
+            "hf_token_xyz",
+            &adv,
+        );
+        assert!(script.contains("export HF_HOME=/mnt/d/ai/hf"));
+        assert!(script.contains("mkdir -p /mnt/d/ai/hf"));
+        assert!(script.contains("export HF_HUB_OFFLINE=1"));
+        assert!(script.contains("export VLLM_LOGGING_LEVEL='DEBUG'"));
+        assert!(script.contains("export CUDA_VISIBLE_DEVICES=0,1"));
+        assert!(script.contains("export NCCL_DEBUG=INFO"));
+        assert!(script.contains("--host 0.0.0.0"));
+        assert!(script.contains("--api-key 'sk-test-123'"));
+        assert!(script.contains("--kv-cache-dtype fp8"));
+        assert!(script.contains("--enable-prefix-caching"));
+        assert!(script.contains("--enable-chunked-prefill"));
+        assert!(script.contains("--max-num-seqs 64"));
+        assert!(script.contains("--disable-custom-all-reduce"));
+        assert!(script.contains("--tensor-parallel-size 2"));
     }
 
     #[test]

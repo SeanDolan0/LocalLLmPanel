@@ -758,6 +758,19 @@ export default function Search() {
         </div>
       )}
 
+      {/* Failed Pulls Indicator Banner */}
+      {Object.entries(pulls).filter(([, p]) => p.state === "failed" && p.file).length > 0 && (
+        <div className="space-y-1 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
+          {Object.entries(pulls)
+            .filter(([, p]) => p.state === "failed" && p.file)
+            .map(([m, p]) => (
+              <div key={m} className="truncate">
+                <span className="text-rose-200 font-semibold">{m} failed</span>: {p.file}
+              </div>
+            ))}
+        </div>
+      )}
+
       {/* Model Details & Discovered Quant Variants Modal */}
       {selectedModel && (
         <ModelDetailModal
@@ -1038,6 +1051,7 @@ function ModelCard({
                   ? "red"
                   : "indigo"
               }
+              title={pullState.file || undefined}
             >
               {pullState.state}
             </Badge>
@@ -1412,6 +1426,7 @@ function ModelDetailModal({
                                   ? "red"
                                   : "indigo"
                               }
+                              title={pullState.file || undefined}
                             >
                               {pullState.state}
                             </Badge>

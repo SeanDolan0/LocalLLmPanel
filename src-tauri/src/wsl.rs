@@ -17,23 +17,70 @@ pub fn wsl_command() -> Command {
     cmd
 }
 
-/// Detect the default WSL distro from `wsl -l -q`.
-pub fn detect_default_distro() -> Option<String> {
-    let out = wsl_command()
-        .env("WSL_UTF8", "1")
-        .args(["-l", "-q"])
-        .output()
-        .ok()?;
+/// List all installed WSL distros cleanly.
+pub fn installed_distros() -> Vec<String> {
+    let out = match wsl_command().env("WSL_UTF8", "1").args(["-l", "-q"]).output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
     let text = String::from_utf8_lossy(&out.stdout);
+    let mut list = Vec::new();
     for line in text.lines() {
         let clean: String = line.chars().filter(|c| *c != '\u{0}').collect();
         let clean = clean.trim();
-        if clean.is_empty() || clean.contains("legal notice") || clean.to_lowercase().contains("windows") {
+        if clean.is_empty()
+            || clean.contains("legal notice")
+            || clean.to_lowercase().contains("windows")
+        {
             continue;
         }
-        return Some(clean.to_string());
+        let clean_s = clean.to_string();
+        if !list.contains(&clean_s) {
+            list.push(clean_s);
+        }
     }
-    None
+    list
+}
+
+/// Detect the best WSL distro to use:
+/// 1. First checks `wsl -l -v` for default distro marked with `*`
+/// 2. If default isn't apt-based, searches installed distros for an apt-based one
+/// 3. Falls back to any installed distro that responds to `echo ok`
+pub fn detect_default_distro() -> Option<String> {
+    // 1. Check wsl -l -v to find the default distro (marked with '*')
+    if let Ok(out) = wsl_command().env("WSL_UTF8", "1").args(["-l", "-v"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let clean: String = line.chars().filter(|c| *c != '\u{0}').collect();
+            let clean = clean.trim();
+            if clean.starts_with('*') {
+                let name = clean.trim_start_matches('*').trim();
+                let name = name.split_whitespace().next().unwrap_or("").trim();
+                if !name.is_empty() && is_apt_distro(name) && run_script(name, "echo ok").ok {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+
+    let distros = installed_distros();
+
+    // 2. Scan installed distros for an apt-based one that responds to echo ok
+    for d in &distros {
+        if is_apt_distro(d) && run_script(d, "echo ok").ok {
+            return Some(d.clone());
+        }
+    }
+
+    // 3. Fallback to any installed distro that responds to echo ok
+    for d in &distros {
+        if run_script(d, "echo ok").ok {
+            return Some(d.clone());
+        }
+    }
+
+    // 4. Return the first installed distro if any
+    distros.into_iter().next()
 }
 
 /// Check if a distro looks Ubuntu-ish (apt-based).
@@ -155,6 +202,9 @@ pub fn run_script_stream(
         let mut partial = String::new();
         for b in reader.bytes() {
             let Ok(b) = b else { break };
+            if b == b'\0' {
+                continue;
+            }
             if b == b'\n' {
                 out.push_str(&partial);
                 out.push('\n');
@@ -236,8 +286,9 @@ impl WslChild {
                 let reader = BufReader::new(stream);
                 for line in reader.lines() {
                     if let Ok(l) = line {
+                        let clean: String = l.chars().filter(|c| *c != '\u{0}').collect();
                         if let Ok(mut cb) = cb.lock() {
-                            cb(l);
+                            cb(clean);
                         }
                     }
                 }
@@ -316,5 +367,14 @@ mod tests {
         let (total_mb, avail_mb) = detect_wsl_memory("");
         assert!(total_mb > 0);
         assert!(avail_mb > 0);
+    }
+
+    #[test]
+    fn test_installed_distros() {
+        let list = installed_distros();
+        for d in &list {
+            assert!(!d.contains('\u{0}'));
+            assert!(!d.is_empty());
+        }
     }
 }

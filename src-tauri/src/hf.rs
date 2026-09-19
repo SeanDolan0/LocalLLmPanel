@@ -703,7 +703,7 @@ pub fn pull_model(
 
     let app = app.clone();
     let model_id = model_id.to_string();
-    let distro = state.config().distro;
+    let distro = state.resolve_distro();
     let venv = state.config().venv_dir;
     let hf_token = state.config().hf_token;
     let token_ok = !hf_token.is_empty()
@@ -715,6 +715,22 @@ pub fn pull_model(
     } else {
         String::new()
     };
+    let adv = state.config().advanced_settings;
+    let home_env = if let Some(home) = &adv.hf_home {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            format!("mkdir -p {trimmed} && export HF_HOME={trimmed} && ")
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let offline_env = if adv.hf_offline {
+        "export HF_HUB_OFFLINE=1 && "
+    } else {
+        ""
+    };
     let mid = model_id.clone();
 
     std::thread::spawn(move || {
@@ -725,8 +741,8 @@ pub fn pull_model(
             String::new()
         };
         let script = format!(
-            "{} . {}/bin/activate && HF_HUB_DISABLE_TQDM=1 {}hf download {} 2>&1 || echo __HF_PULL_FAILED__",
-            maybe_cd, venv, token_env, mid
+            "{}{}{} . {}/bin/activate && HF_HUB_DISABLE_TQDM=1 {}hf download {} 2>&1 || echo __HF_PULL_FAILED__",
+            home_env, offline_env, maybe_cd, venv, token_env, mid
         );
         let model_ev = model_id.clone();
         let app_ev = app.clone();
@@ -748,9 +764,26 @@ pub fn pull_model(
         } else {
             "failed"
         };
+        let err_msg = if state_label == "failed" {
+            let clean_err: String = out.stderr.chars().filter(|c| *c != '\u{0}').collect();
+            let clean_err = clean_err.trim();
+            if !clean_err.is_empty() {
+                Some(clean_err.to_string())
+            } else {
+                let clean_out: String = out.stdout.chars().filter(|c| *c != '\u{0}').collect();
+                let last_line = clean_out.lines().last().unwrap_or("").trim();
+                if !last_line.is_empty() {
+                    Some(last_line.to_string())
+                } else {
+                    Some("Download failed".to_string())
+                }
+            }
+        } else {
+            None
+        };
         let _ = app.emit(
             "pull-progress",
-            PullStatus { model: model_id.clone(), state: state_label.into(), file: None, percent: None },
+            PullStatus { model: model_id.clone(), state: state_label.into(), file: err_msg, percent: None },
         );
         let mut pulling = pulling_arc.lock().unwrap();
         pulling.remove(&model_id);

@@ -63,7 +63,7 @@ export const api = {
     invoke<Record<string, unknown>>("servers_chat", { id, messages }),
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
   settingsGet: () => invoke<Settings>("settings_get"),
-  settingsSet: (patch: Partial<Pick<Settings, "distro" | "llm_dir" | "venv_dir" | "hf_token" | "default_quant">>) =>
+  settingsSet: (patch: Partial<Pick<Settings, "distro" | "llm_dir" | "venv_dir" | "hf_token" | "default_quant" | "advanced_settings">>) =>
     invoke<Settings>("settings_set", { patch }),
   wslconfigGet: () => invoke<WslConfigInfo>("wslconfig_get"),
   gpuStatus: () => invoke<import("./types").GpuSnapshot | null>("gpu_status"),
@@ -72,6 +72,7 @@ export const api = {
     invoke<void>("update_memory_settings", { settings }),
   getSystemMemory: () => invoke<SystemMemoryInfo>("get_system_memory"),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+  wslDistros: () => invoke<string[]>("wsl_distros"),
 };
 
 export async function getMemorySettings(): Promise<MemorySettings> {

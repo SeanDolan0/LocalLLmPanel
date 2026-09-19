@@ -18,9 +18,11 @@ export function CardTitle({ children, right }: { children: ReactNode; right?: Re
 export function Badge({
   color = "slate",
   children,
+  title,
 }: {
   color?: "slate" | "emerald" | "amber" | "red" | "indigo" | "cyan";
   children: ReactNode;
+  title?: string;
 }) {
   const map = {
     slate: "bg-slate-500/10 text-slate-300 border-slate-500/30",
@@ -31,7 +33,7 @@ export function Badge({
     cyan: "bg-cyan-500/10 text-cyan-300 border-cyan-500/30",
   };
   return (
-    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${map[color]}`}>
+    <span title={title} className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${map[color]}`}>
       {children}
     </span>
   );

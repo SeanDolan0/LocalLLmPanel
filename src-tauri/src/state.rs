@@ -122,6 +122,81 @@ impl Default for MemorySettings {
 }
 
 // ---------------------------------------------------------------------------
+// Advanced developer settings (persisted)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdvancedSettings {
+    /// Custom HF cache directory (e.g. /mnt/d/ai-models/hf)
+    #[serde(default)]
+    pub hf_home: Option<String>,
+    /// Offline mode (HF_HUB_OFFLINE=1)
+    #[serde(default)]
+    pub hf_offline: bool,
+    /// Default host binding: "127.0.0.1" (local) or "0.0.0.0" (LAN/remote)
+    #[serde(default = "default_host")]
+    pub host: String,
+    /// Optional global API key for OpenAI-compatible endpoint
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Default KV cache data type: "auto", "fp8", "fp8_e5m2", "fp8_e4m3"
+    #[serde(default = "default_auto")]
+    pub kv_cache_dtype: String,
+    /// Enable prefix caching (KV cache reuse across prompts/turns)
+    #[serde(default = "default_true")]
+    pub enable_prefix_caching: bool,
+    /// Enable chunked prefill (better interleave of prompt & decode)
+    #[serde(default)]
+    pub enable_chunked_prefill: bool,
+    /// Max concurrency / sequence count limit (None = vLLM default 256)
+    #[serde(default)]
+    pub max_num_seqs: Option<usize>,
+    /// Disable custom P2P all-reduce (often required for multi-GPU on consumer RTX or WSL2)
+    #[serde(default)]
+    pub disable_custom_all_reduce: bool,
+    /// Logging level: "INFO", "DEBUG", "WARNING", "ERROR"
+    #[serde(default = "default_info")]
+    pub log_level: String,
+    /// Extra arbitrary CLI arguments appended to vLLM launch (e.g. "--tensor-parallel-size 2")
+    #[serde(default)]
+    pub extra_vllm_args: Option<String>,
+    /// Custom environment variables (KEY=VAL lines)
+    #[serde(default)]
+    pub custom_env_vars: Option<String>,
+}
+
+fn default_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_auto() -> String {
+    "auto".to_string()
+}
+
+fn default_info() -> String {
+    "INFO".to_string()
+}
+
+impl Default for AdvancedSettings {
+    fn default() -> Self {
+        Self {
+            hf_home: None,
+            hf_offline: false,
+            host: default_host(),
+            api_key: None,
+            kv_cache_dtype: default_auto(),
+            enable_prefix_caching: true,
+            enable_chunked_prefill: false,
+            max_num_seqs: None,
+            disable_custom_all_reduce: false,
+            log_level: default_info(),
+            extra_vllm_args: None,
+            custom_env_vars: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Persisted config
 // ---------------------------------------------------------------------------
 
@@ -137,14 +212,17 @@ pub struct PersistedConfig {
     pub measured: HashMap<String, MeasuredStats>,
     #[serde(default)]
     pub memory_settings: MemorySettings,
+    #[serde(default)]
+    pub advanced_settings: AdvancedSettings,
 }
 
 pub type AppConfig = PersistedConfig;
 
 impl Default for PersistedConfig {
     fn default() -> Self {
+        let distro = crate::wsl::detect_default_distro().unwrap_or_else(|| "Ubuntu".to_string());
         PersistedConfig {
-            distro: "Ubuntu".to_string(),
+            distro,
             llm_dir: "~/llm-lp".to_string(),
             venv_dir: "~/llm-lp/.venv".to_string(),
             hf_token: String::new(),
@@ -152,6 +230,7 @@ impl Default for PersistedConfig {
             servers: Vec::new(),
             measured: HashMap::new(),
             memory_settings: MemorySettings::default(),
+            advanced_settings: AdvancedSettings::default(),
         }
     }
 }
@@ -308,8 +387,18 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_default();
+        let mut config = PersistedConfig::load();
+        // If the configured distro does not respond or is empty, auto-heal to detected working distro
+        if !config.distro.starts_with("__test_")
+            && (config.distro.is_empty() || !crate::wsl::run_script(&config.distro, "echo ok").ok)
+        {
+            if let Some(detected) = crate::wsl::detect_default_distro() {
+                config.distro = detected;
+                let _ = config.save();
+            }
+        }
         AppState {
-            config: Mutex::new(PersistedConfig::load()),
+            config: Mutex::new(config),
             servers: Mutex::new(BTreeMap::new()),
             http,
             pulling: Arc::new(Mutex::new(HashMap::new())),
@@ -322,6 +411,23 @@ impl AppState {
 
     pub fn config(&self) -> PersistedConfig {
         self.config.lock().unwrap().clone()
+    }
+
+    pub fn resolve_distro(&self) -> String {
+        let current = self.config.lock().unwrap().distro.clone();
+        if current.starts_with("__test_") {
+            return current;
+        }
+        if !current.is_empty() && crate::wsl::run_script(&current, "echo ok").ok {
+            return current;
+        }
+        if let Some(detected) = crate::wsl::detect_default_distro() {
+            let mut cfg = self.config.lock().unwrap();
+            cfg.distro = detected.clone();
+            let _ = cfg.save();
+            return detected;
+        }
+        current
     }
 
     pub fn hf_token(&self) -> Option<String> {
@@ -464,5 +570,24 @@ mod tests {
         let s_legacy: ServerDef = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(s_legacy.swap_space_gb, None);
         assert_eq!(s_legacy.cpu_offload_gb, None);
+    }
+
+    #[test]
+    fn test_advanced_settings_defaults_and_roundtrip() {
+        let adv = AdvancedSettings::default();
+        assert_eq!(adv.host, "127.0.0.1");
+        assert_eq!(adv.kv_cache_dtype, "auto");
+        assert!(adv.enable_prefix_caching);
+        assert!(!adv.enable_chunked_prefill);
+        assert_eq!(adv.log_level, "INFO");
+
+        let json = serde_json::to_string(&adv).unwrap();
+        let deserialized: AdvancedSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, adv);
+
+        // Test empty json defaults
+        let empty_json = "{}";
+        let from_empty: AdvancedSettings = serde_json::from_str(empty_json).unwrap();
+        assert_eq!(from_empty, adv);
     }
 }

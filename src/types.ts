@@ -124,6 +124,21 @@ export interface ServerListRow {
   metrics: MetricsSnapshot | null;
 }
 
+export interface AdvancedSettings {
+  hf_home?: string | null;
+  hf_offline: boolean;
+  host: string;
+  api_key?: string | null;
+  kv_cache_dtype: string;
+  enable_prefix_caching: boolean;
+  enable_chunked_prefill: boolean;
+  max_num_seqs?: number | null;
+  disable_custom_all_reduce: boolean;
+  log_level: string;
+  extra_vllm_args?: string | null;
+  custom_env_vars?: string | null;
+}
+
 export interface Settings {
   distro: string;
   llm_dir: string;
@@ -132,6 +147,7 @@ export interface Settings {
   default_quant: string;
   servers: ServerDef[];
   measured: Record<string, MeasuredStats>;
+  advanced_settings: AdvancedSettings;
 }
 
 export interface PullStatus {

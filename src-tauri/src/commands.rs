@@ -59,8 +59,7 @@ fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
 pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let cfg = st.config();
-        let distro_detected = crate::wsl::detect_default_distro().unwrap_or_else(|| cfg.distro.clone());
+        let distro_detected = st.resolve_distro();
         let wsl_ok = crate::wsl::run_script(&distro_detected, "echo ok").ok;
         let prov_out = crate::wsl::run_script(&distro_detected, "cat ~/llm-lp/.provisioned 2>/dev/null || true");
         let gpu = gpu_snapshot(&distro_detected);
@@ -160,13 +159,7 @@ pub async fn provision(app: AppHandle, state: State<'_, Arc<AppState>>) -> Resul
     let st = (*state).clone();
     let app = app.clone();
     let cfg = st.config();
-    let detected = crate::wsl::detect_default_distro();
-    let distro = match detected {
-        Some(ref d) if !crate::wsl::run_script(&cfg.distro, "echo ok").ok && crate::wsl::run_script(d, "echo ok").ok => {
-            d.clone()
-        }
-        _ => cfg.distro.clone(),
-    };
+    let distro = st.resolve_distro();
     let venv = cfg.venv_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let on_log = |phase: &str, line: &str| {
@@ -256,7 +249,12 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     let vram = if gpu.vram_total_mb > 0 { gpu.vram_total_mb } else { 16384 };
     let cfg = state.config();
     let mem = &cfg.memory_settings;
-    let (ram_total_mb, ram_avail_mb) = crate::wsl::detect_wsl_memory(&cfg.distro);
+    let distro = if cfg.distro.starts_with("__test_") {
+        cfg.distro.clone()
+    } else {
+        state.resolve_distro()
+    };
+    let (ram_total_mb, ram_avail_mb) = crate::wsl::detect_wsl_memory(&distro);
     let potential_ram = if let Some(manual) = mem.manual_ram_limit_mb {
         manual
     } else {
@@ -901,6 +899,7 @@ pub struct SettingsPatch {
     pub venv_dir: Option<String>,
     pub hf_token: Option<String>,
     pub default_quant: Option<String>,
+    pub advanced_settings: Option<crate::state::AdvancedSettings>,
 }
 
 #[tauri::command]
@@ -927,6 +926,9 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, patch: SettingsPatch) -> Re
     }
     if let Some(q) = patch.default_quant {
         cfg.default_quant = q;
+    }
+    if let Some(adv) = patch.advanced_settings {
+        cfg.advanced_settings = adv;
     }
     cfg.save().map_err(|e| e.to_string())?;
     Ok(cfg.clone())
@@ -955,7 +957,12 @@ pub fn update_memory_settings_impl(st: &AppState, settings: MemorySettings) -> R
 
 pub fn get_system_memory_impl(st: &AppState) -> SystemMemoryInfo {
     let cfg = st.config();
-    let (wsl_total_mb, wsl_available_mb) = crate::wsl::detect_wsl_memory(&cfg.distro);
+    let distro = if cfg.distro.starts_with("__test_") {
+        cfg.distro.clone()
+    } else {
+        st.resolve_distro()
+    };
+    let (wsl_total_mb, wsl_available_mb) = crate::wsl::detect_wsl_memory(&distro);
     let mem = &cfg.memory_settings;
     let usable_budget_mb = if !mem.enable_ram_overflow {
         0
@@ -1016,14 +1023,7 @@ pub struct LibraryEntry {
 pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<LibraryEntry>, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let detected = crate::wsl::detect_default_distro();
-        let cfg_distro = st.config().distro;
-        let distro = match detected {
-            Some(ref d) if !crate::wsl::run_script(&cfg_distro, "echo ok").ok && crate::wsl::run_script(d, "echo ok").ok => {
-                d.clone()
-            }
-            _ => cfg_distro,
-        };
+        let distro = st.resolve_distro();
         // Hub cache dirs are `models--owner--name` or `models--name`; replace the first `--` with `/`.
         let out = crate::wsl::run_script(
             &distro,
@@ -1056,7 +1056,7 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
 pub async fn gpu_status(state: State<'_, Arc<AppState>>) -> Result<Option<GpuSnapshot>, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let distro = st.config().distro;
+        let distro = st.resolve_distro();
         let snap = gpu_snapshot(&distro);
         if let Some(s) = snap.clone() {
             let mut gpu = st.gpu.lock().unwrap();
@@ -1102,6 +1102,11 @@ pub fn open_url(url: String) -> Result<(), String> {
             .map_err(|e| format!("Failed to open URL in browser: {e}"))?;
         Ok(())
     }
+}
+
+#[tauri::command]
+pub fn wsl_distros() -> Vec<String> {
+    crate::wsl::installed_distros()
 }
 
 #[cfg(test)]
