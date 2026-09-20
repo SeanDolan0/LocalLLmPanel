@@ -324,15 +324,25 @@ async fn write_response(
     stream.flush().await.map_err(|e| e.to_string())
 }
 
-/// Forward a chat/completions request to the target vLLM port, preserving
-/// streaming when the caller asked for `"stream": true`.
 async fn proxy_chat(
     stream: &mut TcpStream,
     state: &Arc<AppState>,
     port: u16,
     body: &[u8],
 ) -> Result<(), String> {
-    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    proxy_post(stream, state, port, "/v1/chat/completions", body).await
+}
+
+/// Forward a chat/completions request to the target vLLM port, preserving
+/// streaming when the caller asked for `"stream": true`.
+async fn proxy_post(
+    stream: &mut TcpStream,
+    state: &Arc<AppState>,
+    port: u16,
+    upstream_path: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{port}{upstream_path}");
     let streaming = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
