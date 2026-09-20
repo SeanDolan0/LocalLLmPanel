@@ -213,19 +213,28 @@ fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Resu
 
 fn expand_archive(zip: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir_all(destination)?;
-    let status = hidden_command("powershell")
+    let output = hidden_command("powershell")
+        .env("LOCAL_LLM_PANEL_ARCHIVE", zip)
+        .env("LOCAL_LLM_PANEL_DESTINATION", destination)
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-            zip.to_string_lossy().as_ref(),
-            destination.to_string_lossy().as_ref(),
+            "Expand-Archive -LiteralPath $env:LOCAL_LLM_PANEL_ARCHIVE -DestinationPath $env:LOCAL_LLM_PANEL_DESTINATION -Force",
         ])
-        .status()
+        .output()
         .context("launching PowerShell archive extractor")?;
-    if !status.success() {
-        return Err(anyhow!("Expand-Archive failed for {}", zip.display()));
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "Expand-Archive failed for {}{}",
+            zip.display(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
     }
     Ok(())
 }
@@ -607,9 +616,9 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_assets, choose_assets_for_machine, executable_from_config, github_client,
-        github_releases_with_info, github_request, parse_devices, select_release, Asset,
-        CudaVersion, Release, RELEASES_API,
+        choose_assets, choose_assets_for_machine, executable_from_config, expand_archive,
+        github_client, github_releases_with_info, github_request, hidden_command, parse_devices,
+        select_release, Asset, CudaVersion, Release, RELEASES_API,
     };
     use crate::state::PersistedConfig;
 
@@ -642,6 +651,44 @@ mod tests {
         } else {
             std::env::remove_var("PATH");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expands_archive_using_paths_with_spaces() {
+        let root = std::env::temp_dir().join(format!(
+            "local-llm-panel-expand-test-{}",
+            std::process::id()
+        ));
+        let source = root.join("source with spaces");
+        let archive = root.join("archive with spaces.zip");
+        let destination = root.join("destination with spaces");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("marker.txt"), b"ok").unwrap();
+
+        let archive_output = hidden_command("powershell")
+            .env("LOCAL_LLM_PANEL_TEST_SOURCE", source.join("marker.txt"))
+            .env("LOCAL_LLM_PANEL_TEST_ARCHIVE", &archive)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Compress-Archive -LiteralPath $env:LOCAL_LLM_PANEL_TEST_SOURCE -DestinationPath $env:LOCAL_LLM_PANEL_TEST_ARCHIVE -Force",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            archive_output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&archive_output.stderr)
+        );
+
+        expand_archive(&archive, &destination).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("marker.txt")).unwrap(),
+            "ok"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
