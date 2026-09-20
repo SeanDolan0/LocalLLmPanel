@@ -688,7 +688,15 @@ export default function Search() {
                             <div>
                               <span className="font-mono text-cyan-300">{fmtTokPerSec(tokS)}</span>
                               {fit?.measured_tok_s != null && (
-                                <div className="text-[9px] text-emerald-400">measured</div>
+                                <div className="text-[9px] text-emerald-400 font-medium">
+                                  measured
+                                  {fit.est_tok_s != null && fit.est_tok_s > 0 && (
+                                    <span className="ml-1 text-[8px] text-emerald-300">
+                                      ({Math.round(((fit.measured_tok_s - fit.est_tok_s) / fit.est_tok_s) * 100) >= 0 ? "+" : ""}
+                                      {Math.round(((fit.measured_tok_s - fit.est_tok_s) / fit.est_tok_s) * 100)}%)
+                                    </span>
+                                  )}
+                                </div>
                               )}
                             </div>
                           ) : (
@@ -923,6 +931,19 @@ function ModelCard({
             <div className="font-mono font-semibold text-cyan-300 text-xs mt-0.5">
               {fmtTokPerSec(tokS)}
             </div>
+            {fit?.measured_tok_s != null && fit?.est_tok_s != null && fit.est_tok_s > 0 && (
+              <div
+                className={`mt-0.5 inline-flex items-center gap-0.5 rounded px-1 py-0.2 text-[9px] font-medium border ${
+                  fit.measured_tok_s >= fit.est_tok_s
+                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                    : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                }`}
+                title={`Measured ${fmtTokPerSec(fit.measured_tok_s)} vs Estimated ${fmtTokPerSec(fit.est_tok_s)}`}
+              >
+                ⚡ {Math.round(((fit.measured_tok_s - fit.est_tok_s) / fit.est_tok_s) * 100) >= 0 ? "+" : ""}
+                {Math.round(((fit.measured_tok_s - fit.est_tok_s) / fit.est_tok_s) * 100)}% vs est
+              </div>
+            )}
           </div>
         </div>
 

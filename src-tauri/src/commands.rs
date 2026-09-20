@@ -938,6 +938,43 @@ pub fn conversations_delete(
     crate::state::Conversation::save_all(&convs)
 }
 
+#[tauri::command]
+pub async fn benchmarks_run(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    let st = (*state).clone();
+    tokio::spawn(async move {
+        server::run_benchmark(Some(app), st, server_id).await;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn benchmarks_cancel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    if let Some(notify) = state.benchmark_cancels.lock().unwrap().get(&server_id) {
+        notify.notify_waiters();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn benchmarks_history(
+    state: State<'_, Arc<AppState>>,
+    server_id: Option<String>,
+) -> Result<Vec<crate::state::BenchmarkRun>, String> {
+    let bms = state.benchmarks.lock().unwrap();
+    if let Some(sid) = server_id {
+        Ok(bms.iter().filter(|b| b.server_id == sid).cloned().collect())
+    } else {
+        Ok(bms.clone())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------

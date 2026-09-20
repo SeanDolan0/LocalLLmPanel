@@ -28,6 +28,10 @@ import type {
   ChatDonePayload,
   ChatCancelPayload,
   ChatErrorPayload,
+  BenchmarkRun,
+  BenchmarkStepPayload,
+  BenchmarkCancelPayload,
+  BenchmarkErrorPayload,
 } from "./types";
 
 export type {
@@ -87,6 +91,12 @@ export const api = {
     invoke<void>("conversations_save", { conversation }),
   conversationsDelete: (id: string) =>
     invoke<void>("conversations_delete", { id }),
+  benchmarksRun: (serverId: string) =>
+    invoke<void>("benchmarks_run", { serverId }),
+  benchmarksCancel: (serverId: string) =>
+    invoke<void>("benchmarks_cancel", { serverId }),
+  benchmarksHistory: (serverId?: string) =>
+    invoke<BenchmarkRun[]>("benchmarks_history", { serverId: serverId ?? null }),
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
   settingsGet: () => invoke<Settings>("settings_get"),
   settingsSet: (patch: Partial<Pick<Settings, "distro" | "llm_dir" | "venv_dir" | "hf_token" | "default_quant" | "advanced_settings">>) =>
@@ -133,6 +143,14 @@ export const events = {
     listen<ChatCancelPayload>("chat-cancel", (e) => cb(e.payload)),
   chatError: (cb: (e: ChatErrorPayload) => void) =>
     listen<ChatErrorPayload>("chat-error", (e) => cb(e.payload)),
+  benchmarkStep: (cb: (e: BenchmarkStepPayload) => void) =>
+    listen<BenchmarkStepPayload>("benchmark-step", (e) => cb(e.payload)),
+  benchmarkDone: (cb: (e: BenchmarkRun) => void) =>
+    listen<BenchmarkRun>("benchmark-done", (e) => cb(e.payload)),
+  benchmarkCancel: (cb: (e: BenchmarkCancelPayload) => void) =>
+    listen<BenchmarkCancelPayload>("benchmark-cancel", (e) => cb(e.payload)),
+  benchmarkError: (cb: (e: BenchmarkErrorPayload) => void) =>
+    listen<BenchmarkErrorPayload>("benchmark-error", (e) => cb(e.payload)),
 };
 
 // ---------------------------------------------------------------------------

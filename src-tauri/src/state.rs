@@ -9,6 +9,7 @@ use std::time::Instant;
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
+pub const BENCHMARKS_FILE_NAME: &str = "benchmarks.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -48,6 +49,48 @@ impl Conversation {
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
         }
         let text = serde_json::to_string_pretty(convs).map_err(|e| format!("serialize: {e}"))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchmarkRun {
+    pub id: String,
+    pub server_id: String,
+    pub model_id: String,
+    pub quant: Option<String>,
+    pub timestamp: u64,
+    pub prompt_tok_s: f64,
+    pub gen_tok_s: f64,
+    pub latency_ms: f64,
+    pub prompt_count: usize,
+}
+
+impl BenchmarkRun {
+    pub fn path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(CONFIG_DIR_NAME)
+            .join(BENCHMARKS_FILE_NAME)
+    }
+
+    pub fn load_all() -> Vec<BenchmarkRun> {
+        let path = Self::path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn save_all(runs: &[BenchmarkRun]) -> Result<(), String> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        }
+        let text = serde_json::to_string_pretty(runs).map_err(|e| format!("serialize: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
@@ -418,6 +461,8 @@ pub struct AppState {
     pub rec_cache: Mutex<Option<(Vec<crate::commands::ModelWithFit>, Instant, u64)>>,
     pub conversations: Mutex<Vec<Conversation>>,
     pub chat_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    pub benchmarks: Mutex<Vec<BenchmarkRun>>,
+    pub benchmark_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -456,6 +501,8 @@ impl AppState {
             rec_cache: Mutex::new(None),
             conversations: Mutex::new(Conversation::load_all()),
             chat_cancels: Mutex::new(HashMap::new()),
+            benchmarks: Mutex::new(BenchmarkRun::load_all()),
+            benchmark_cancels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -669,5 +716,25 @@ mod tests {
         let parsed: Conversation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, c);
         assert_eq!(parsed.messages.len(), 3);
+    }
+
+    #[test]
+    fn test_benchmark_run_serialization_and_roundtrip() {
+        use super::BenchmarkRun;
+        let b = BenchmarkRun {
+            id: "bm-1".to_string(),
+            server_id: "srv-1".to_string(),
+            model_id: "Qwen/Qwen2.5-Coder-7B-Instruct".to_string(),
+            quant: Some("AWQ".to_string()),
+            timestamp: 123456789,
+            prompt_tok_s: 450.5,
+            gen_tok_s: 85.2,
+            latency_ms: 120.0,
+            prompt_count: 3,
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        let parsed: BenchmarkRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, b);
+        assert_eq!(parsed.gen_tok_s, 85.2);
     }
 }

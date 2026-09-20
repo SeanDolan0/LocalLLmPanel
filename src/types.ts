@@ -344,3 +344,33 @@ export interface ChatErrorPayload {
   server_id: string;
   error: string;
 }
+
+export interface BenchmarkRun {
+  id: string;
+  server_id: string;
+  model_id: string;
+  quant: string | null;
+  timestamp: number;
+  prompt_tok_s: number;
+  gen_tok_s: number;
+  latency_ms: number;
+  prompt_count: number;
+}
+
+export interface BenchmarkStepPayload {
+  server_id: string;
+  step: number;
+  total_steps: number;
+  prompt_tok_s: number;
+  gen_tok_s: number;
+  latency_ms: number;
+}
+
+export interface BenchmarkCancelPayload {
+  server_id: string;
+}
+
+export interface BenchmarkErrorPayload {
+  server_id: string;
+  error: string;
+}

@@ -809,6 +809,186 @@ pub async fn chat_stream(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchmarkStepPayload {
+    pub server_id: String,
+    pub step: usize,
+    pub total_steps: usize,
+    pub prompt_tok_s: f64,
+    pub gen_tok_s: f64,
+    pub latency_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchmarkCancelPayload {
+    pub server_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchmarkErrorPayload {
+    pub server_id: String,
+    pub error: String,
+}
+
+pub fn standardized_benchmark_prompts() -> [&'static str; 3] {
+    [
+        "Explain the core difference between synchronous and asynchronous I/O in three brief bullet points.",
+        "Write a Python function `lru_cache_custom(capacity)` that implements a simple Least Recently Used cache using a doubly linked list and hash map. Include brief docstrings and comments explaining how eviction works.",
+        "Analyze the following technical architectural pattern: Event-driven architecture (EDA) decouples producers from consumers through asynchronous event brokers such as Apache Kafka, RabbitMQ, and AWS SQS/SNS. In high-throughput distributed systems, event-driven designs provide advantages such as horizontal scalability, resilient fault isolation, and temporal decoupling, while introducing challenges including eventual consistency, message ordering guarantees, distributed tracing complexity, and idempotent consumer handling. In contrast, synchronous RPC models such as gRPC and REST provide immediate request-response semantics, simpler error handling, and strict consistency at the cost of tighter coupling and susceptibility to cascading latency bottlenecks. Based on this, please provide: 1) A trade-off matrix comparing Event-Driven vs Synchronous RPC across latency, fault isolation, operational complexity, and data consistency. 2) Three specific scenarios where EDA should be preferred, and three where synchronous RPC is the superior choice. 3) Recommendations for mitigating eventual consistency anomalies."
+    ]
+}
+
+pub async fn run_benchmark(
+    app: Option<tauri::AppHandle>,
+    state: Arc<AppState>,
+    server_id: String,
+) {
+    let cancel_notify = Arc::new(tokio::sync::Notify::new());
+    state
+        .benchmark_cancels
+        .lock()
+        .unwrap()
+        .insert(server_id.clone(), cancel_notify.clone());
+
+    let res: Result<Option<crate::state::BenchmarkRun>> = async {
+        let def = state
+            .config()
+            .find_server(&server_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no server {server_id}"))?;
+        if def.task != "instruct" {
+            bail!("server {server_id} is not an instruct server");
+        }
+        let url = format!("http://127.0.0.1:{}/v1/chat/completions", def.port);
+        let prompts = standardized_benchmark_prompts();
+        let total_steps = prompts.len();
+
+        let mut step_results: Vec<(f64, f64, f64)> = Vec::new();
+
+        for (idx, prompt) in prompts.iter().enumerate() {
+            let step = idx + 1;
+            let body = serde_json::json!({
+                "model": def.effective_model_name(),
+                "messages": [
+                    {"role": "system", "content": "You are a concise, accurate benchmark runner."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "stream": false
+            });
+
+            let t0 = Instant::now();
+            let send_future = state.http.post(&url).json(&body).send();
+
+            let resp = tokio::select! {
+                _ = cancel_notify.notified() => {
+                    return Ok(None);
+                }
+                res = send_future => {
+                    res.with_context(|| format!("POST {url}"))?
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                bail!("benchmark step {step} failed ({status}): {text}");
+            }
+
+            let json: serde_json::Value = resp.json().await.context("read benchmark json")?;
+            let elapsed_s = t0.elapsed().as_secs_f64();
+            let latency_ms = t0.elapsed().as_millis() as f64;
+
+            let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(60) as f64;
+            let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(64) as f64;
+
+            let gen_tok_s = if elapsed_s > 0.0 { completion_tokens / elapsed_s } else { 0.0 };
+            let prompt_tok_s = if elapsed_s > 0.0 { prompt_tokens / (elapsed_s * 0.25).max(0.01) } else { 0.0 };
+
+            step_results.push((prompt_tok_s, gen_tok_s, latency_ms));
+
+            if let Some(ref a) = app {
+                let _ = a.emit(
+                    "benchmark-step",
+                    BenchmarkStepPayload {
+                        server_id: server_id.clone(),
+                        step,
+                        total_steps,
+                        prompt_tok_s,
+                        gen_tok_s,
+                        latency_ms,
+                    },
+                );
+            }
+        }
+
+        let n = step_results.len() as f64;
+        let avg_prompt_tok_s = step_results.iter().map(|(p, _, _)| p).sum::<f64>() / n;
+        let avg_gen_tok_s = step_results.iter().map(|(_, g, _)| g).sum::<f64>() / n;
+        let avg_latency_ms = step_results.iter().map(|(_, _, l)| l).sum::<f64>() / n;
+
+        let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let run = crate::state::BenchmarkRun {
+            id: format!("bm_{now_sec}_{}", def.port),
+            server_id: server_id.clone(),
+            model_id: def.model_id.clone(),
+            quant: Some(def.quant.clone()),
+            timestamp: now_sec,
+            prompt_tok_s: avg_prompt_tok_s,
+            gen_tok_s: avg_gen_tok_s,
+            latency_ms: avg_latency_ms,
+            prompt_count: total_steps,
+        };
+
+        // Persist run
+        {
+            let mut bms = state.benchmarks.lock().unwrap();
+            bms.insert(0, run.clone());
+            let _ = crate::state::BenchmarkRun::save_all(&bms);
+        }
+
+        // Update measured stats in config
+        {
+            let mut cfg = state.config.lock().unwrap();
+            let entry = cfg.measured.entry(def.model_id.clone()).or_default();
+            entry.tokens_per_sec = Some(avg_gen_tok_s);
+            entry.prompt_tokens_per_sec = Some(avg_prompt_tok_s);
+            entry.measured_at_ms = Some(now_sec * 1000);
+            let _ = cfg.save();
+        }
+
+        Ok(Some(run))
+    }
+    .await;
+
+    state.benchmark_cancels.lock().unwrap().remove(&server_id);
+
+    match res {
+        Ok(Some(run)) => {
+            if let Some(ref a) = app {
+                let _ = a.emit("benchmark-done", run);
+            }
+        }
+        Ok(None) => {
+            if let Some(ref a) = app {
+                let _ = a.emit("benchmark-cancel", BenchmarkCancelPayload { server_id });
+            }
+        }
+        Err(e) => {
+            if let Some(ref a) = app {
+                let _ = a.emit(
+                    "benchmark-error",
+                    BenchmarkErrorPayload {
+                        server_id,
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    }
+}
+
 pub fn server_logs(state: &Arc<AppState>, server_id: &str, since: usize) -> String {
     let servers = state.servers.lock().unwrap();
     match servers.get(server_id) {
@@ -994,5 +1174,14 @@ mod tests {
         assert_eq!(parse_sse_token(": ping"), None);
         assert_eq!(parse_sse_token(""), None);
         assert_eq!(parse_sse_token("random text"), None);
+    }
+
+    #[test]
+    fn test_standardized_benchmark_prompts() {
+        use super::standardized_benchmark_prompts;
+        let prompts = standardized_benchmark_prompts();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts[0].len() < prompts[1].len());
+        assert!(prompts[1].len() < prompts[2].len());
     }
 }

@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { effectiveModelName } from "../types";
-import type { CreateServerInput, ServerListRow, ChatMessage, Conversation } from "../types";
+import type { CreateServerInput, ServerListRow, ChatMessage, Conversation, BenchmarkRun } from "../types";
 
 export default function Servers() {
   const location = useLocation();
@@ -227,6 +227,12 @@ export default function Servers() {
                       Stop
                     </Button>
                   )}
+                  {r.status === "running" && r.def.task === "instruct" && (
+                    <>
+                      <ChatButton serverId={r.def.id} port={r.def.port} model={effectiveModelName(r.def)} />
+                      <BenchmarkButton serverId={r.def.id} model={effectiveModelName(r.def)} />
+                    </>
+                  )}
                   {r.status === "running" && (
                     <Button variant="ghost" disabled={busy === r.def.id} onClick={() => act(r.def.id, () => api.serversRestart(r.def.id))}>
                       Restart
@@ -259,7 +265,10 @@ export default function Servers() {
                 <div className="flex gap-2">
                   <span className={`${statusColor(selectedRow.status)} text-sm font-medium`}>{selectedRow.status}</span>
                   {selectedRow.status === "running" && selectedRow.def.task === "instruct" && (
-                    <ChatButton serverId={selectedRow.def.id} port={selectedRow.def.port} model={effectiveModelName(selectedRow.def)} />
+                    <>
+                      <ChatButton serverId={selectedRow.def.id} port={selectedRow.def.port} model={effectiveModelName(selectedRow.def)} />
+                      <BenchmarkButton serverId={selectedRow.def.id} model={effectiveModelName(selectedRow.def)} />
+                    </>
                   )}
                 </div>
               }
@@ -1064,6 +1073,220 @@ function ChatDrawer({
               </Button>
             )}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BenchmarkButton({ serverId, model }: { serverId: string; model: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button variant="ghost" onClick={() => setOpen(true)}>⚡ Benchmark</Button>
+      {open && (
+        <BenchmarkDrawer serverId={serverId} model={model} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+function BenchmarkDrawer({
+  serverId,
+  model,
+  onClose,
+}: {
+  serverId: string;
+  model: string;
+  onClose: () => void;
+}) {
+  const [history, setHistory] = useState<BenchmarkRun[]>([]);
+  const [running, setRunning] = useState(false);
+  const [currentStep, setCurrentStep] = useState<{
+    step: number;
+    total_steps: number;
+    prompt_tok_s: number;
+    gen_tok_s: number;
+    latency_ms: number;
+  } | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  const loadHistory = useCallback(() => {
+    api.benchmarksHistory(serverId).then(setHistory).catch(console.error);
+  }, [serverId]);
+
+  useEffect(() => {
+    loadHistory();
+
+    const unsubStep = events.benchmarkStep((e) => {
+      if (e.server_id !== serverId) return;
+      setCurrentStep(e);
+      setStatusMsg(`Completed prompt ${e.step} of ${e.total_steps}`);
+    });
+
+    const unsubDone = events.benchmarkDone((run) => {
+      if (run.server_id !== serverId) return;
+      setRunning(false);
+      setCurrentStep(null);
+      setStatusMsg(`Benchmark complete: ${run.gen_tok_s.toFixed(1)} tok/s`);
+      setHistory((prev) => [run, ...prev]);
+    });
+
+    const unsubCancel = events.benchmarkCancel((e) => {
+      if (e.server_id !== serverId) return;
+      setRunning(false);
+      setCurrentStep(null);
+      setStatusMsg("Benchmark cancelled.");
+    });
+
+    const unsubError = events.benchmarkError((e) => {
+      if (e.server_id !== serverId) return;
+      setRunning(false);
+      setCurrentStep(null);
+      setStatusMsg(`Benchmark error: ${e.error}`);
+    });
+
+    return () => {
+      unsubStep.then((fn) => fn());
+      unsubDone.then((fn) => fn());
+      unsubCancel.then((fn) => fn());
+      unsubError.then((fn) => fn());
+    };
+  }, [serverId, loadHistory]);
+
+  const handleRun = async () => {
+    setRunning(true);
+    setCurrentStep(null);
+    setStatusMsg("Starting 3-prompt standardized benchmark suite (small, medium, large context)...");
+    try {
+      await api.benchmarksRun(serverId);
+    } catch (err) {
+      setRunning(false);
+      setStatusMsg(`Failed to start benchmark: ${String(err)}`);
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      await api.benchmarksCancel(serverId);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-[80vh] w-full max-w-4xl flex-col rounded-2xl border border-edge bg-surface-1 shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-edge bg-surface-2/40 px-5 py-3.5">
+          <div className="flex items-center gap-2.5">
+            <span className="text-base font-bold text-slate-100">Benchmark Suite</span>
+            <span className="text-xs text-slate-400">· {model}</span>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-200 text-sm font-medium"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Live Runner Card */}
+        <div className="border-b border-edge bg-surface-2/60 p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-200">Standardized Speed & Latency Benchmark</h4>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Executes 3 repeatable prompts (small: 50 tok, medium: 250 tok, large: 1000 tok) to measure prompt prefill & generation tok/s.
+              </p>
+            </div>
+            {running ? (
+              <Button variant="danger" onClick={handleStop}>
+                ⏹ Stop Benchmark
+              </Button>
+            ) : (
+              <Button onClick={handleRun}>
+                ⚡ Run Benchmark
+              </Button>
+            )}
+          </div>
+
+          {/* Progress / Status */}
+          {statusMsg && (
+            <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {running && <Spinner />}
+                <span>{statusMsg}</span>
+              </div>
+              {currentStep && (
+                <div className="flex items-center gap-4 font-mono">
+                  <span>Gen: <strong className="text-emerald-300">{fmtTokPerSec(currentStep.gen_tok_s)}</strong></span>
+                  <span>Prompt: <strong className="text-cyan-300">{fmtTokPerSec(currentStep.prompt_tok_s)}</strong></span>
+                  <span>Latency: <strong className="text-slate-200">{currentStep.latency_ms.toFixed(0)} ms</strong></span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* History Table */}
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Past Benchmark Runs</h4>
+            <span className="text-xs text-slate-500">{history.length} runs</span>
+          </div>
+          {history.length === 0 ? (
+            <div className="rounded-xl border border-edge bg-surface-2/30 p-8 text-center text-xs text-slate-400">
+              No benchmark runs recorded yet. Click "Run Benchmark" above to measure actual tokens/second.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-edge">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-edge bg-surface-2 text-[11px] font-semibold text-slate-400">
+                  <tr>
+                    <th className="px-3.5 py-2.5">Date & Time</th>
+                    <th className="px-3.5 py-2.5">Quant</th>
+                    <th className="px-3.5 py-2.5 text-right">Generation Speed</th>
+                    <th className="px-3.5 py-2.5 text-right">Prompt Speed</th>
+                    <th className="px-3.5 py-2.5 text-right">Latency</th>
+                    <th className="px-3.5 py-2.5 text-right">Prompts</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-edge/60 bg-surface-1">
+                  {history.map((h) => (
+                    <tr key={h.id} className="hover:bg-surface-2/40 transition-colors">
+                      <td className="px-3.5 py-2.5 text-slate-300">
+                        {new Date(h.timestamp * 1000).toLocaleString()}
+                      </td>
+                      <td className="px-3.5 py-2.5">
+                        <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] text-indigo-300">
+                          {h.quant || "native"}
+                        </span>
+                      </td>
+                      <td className="px-3.5 py-2.5 text-right font-mono font-bold text-emerald-400">
+                        {fmtTokPerSec(h.gen_tok_s)}
+                      </td>
+                      <td className="px-3.5 py-2.5 text-right font-mono text-cyan-300">
+                        {fmtTokPerSec(h.prompt_tok_s)}
+                      </td>
+                      <td className="px-3.5 py-2.5 text-right font-mono text-slate-400">
+                        {h.latency_ms.toFixed(0)} ms
+                      </td>
+                      <td className="px-3.5 py-2.5 text-right text-slate-400">
+                        {h.prompt_count}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>
