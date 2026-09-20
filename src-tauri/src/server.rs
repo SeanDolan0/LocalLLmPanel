@@ -48,6 +48,41 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Determine if a model is an already quantized checkpoint.
+/// Such models contain their own `quantization_config` in `config.json` which vLLM
+/// automatically resolves. Passing an explicit `--quantization` flag to them causes
+/// mismatch errors (e.g. compressed-tensors vs awq).
+fn is_prequantized_model(model_id: &str) -> bool {
+    let lower = model_id.to_ascii_lowercase();
+    if lower.contains("-awq")
+        || lower.contains("_awq")
+        || lower.contains("/awq")
+        || lower.contains("-gptq")
+        || lower.contains("_gptq")
+        || lower.contains("/gptq")
+        || lower.contains("-int4")
+        || lower.contains("_int4")
+        || lower.contains("-int8")
+        || lower.contains("_int8")
+        || lower.contains("-fp8")
+        || lower.contains("_fp8")
+        || lower.contains("-bnb")
+        || lower.contains("_bnb")
+        || lower.contains("compressed-tensors")
+    {
+        return true;
+    }
+    let p = std::path::Path::new(model_id);
+    if p.is_dir() {
+        if let Ok(content) = std::fs::read_to_string(p.join("config.json")) {
+            if content.contains("\"quantization_config\"") || content.contains("\"quant_method\"") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Build the `bash -lc` launcher. The script activates the venv, records the
 /// process PID (bash exec → vLLM keeps the same PID), then `exec`s vLLM so it
 /// runs in the foreground of the wsl.exe console (logs stream to the panel).
@@ -81,20 +116,16 @@ fn launch_script(
         args.push("--runner".into());
         args.push("pooling".into());
     }
-    match def.quant.to_ascii_lowercase().as_str() {
-        "fp8" => {
-            args.push("--quantization".into());
-            args.push("fp8".into());
-        }
-        "awq" => {
-            args.push("--quantization".into());
-            args.push("awq".into());
-        }
-        "gptq" => {
-            args.push("--quantization".into());
-            args.push("gptq".into());
-        }
-        _ => {}
+    // For pre-quantized models (AWQ, GPTQ, compressed-tensors, INT4, bitsandbytes,
+    // pre-quantized FP8 checkpoints, etc.), vLLM automatically reads `quant_method`
+    // from the model's `config.json`. Passing an explicit `--quantization` flag (such as
+    // `--quantization awq` for a compressed-tensors model) causes vLLM to reject the model
+    // with a ValidationError.
+    // We only pass `--quantization fp8` if an unquantized model is explicitly requested
+    // to be dynamically quantized to FP8 at runtime.
+    if def.quant.eq_ignore_ascii_case("fp8") && !is_prequantized_model(&def.model_id) {
+        args.push("--quantization".into());
+        args.push("fp8".into());
     }
     let max_len = def.max_model_len.unwrap_or(4096);
     args.push("--max-model-len".into());
@@ -1309,6 +1340,40 @@ mod tests {
             "command must include --cpu-offload-gb 4: {cmd}"
         );
         assert!(cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY=1"));
+    }
+
+    #[test]
+    fn test_launch_script_prequantized_awq_omits_quantization_flag() {
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def(
+                "TelperionAI/Huihui-Qwen3.8-27B-abliterated-INT4-AWQ-GPTQ",
+                "instruct",
+                8000,
+                "awq",
+                None,
+            ),
+            "",
+            &crate::state::AdvancedSettings::default(),
+        );
+        assert!(!script.contains("--quantization"));
+    }
+
+    #[test]
+    fn test_launch_script_prequantized_fp8_omits_quantization_flag() {
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def(
+                "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8",
+                "instruct",
+                8000,
+                "fp8",
+                None,
+            ),
+            "",
+            &crate::state::AdvancedSettings::default(),
+        );
+        assert!(!script.contains("--quantization"));
     }
 
     #[test]

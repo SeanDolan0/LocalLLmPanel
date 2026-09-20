@@ -43,6 +43,7 @@ pub fn wsl_command() -> Command {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    cmd.stdin(Stdio::null());
     cmd
 }
 
@@ -154,9 +155,9 @@ pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
-        cmd.args(["--", "cat", "/proc/meminfo"]);
+        cmd.args(["--exec", "cat", "/proc/meminfo"]);
     } else {
-        cmd.args(["-d", distro, "--", "cat", "/proc/meminfo"]);
+        cmd.args(["-d", distro, "--exec", "cat", "/proc/meminfo"]);
     }
     if let Ok(o) = cmd.output() {
         if o.status.success() {
@@ -189,7 +190,11 @@ impl RunOutput {
 pub fn run_script(distro: &str, script: &str) -> RunOutput {
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
-    cmd.args(["-d", distro, "--", "bash", "-lc", script]);
+    if distro.trim().is_empty() {
+        cmd.args(["--exec", "bash", "-lc", script]);
+    } else {
+        cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
+    }
     match cmd.output() {
         Ok(o) => RunOutput {
             ok: o.status.success(),
@@ -211,7 +216,11 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
 pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
-    cmd.args(["-d", distro, "--user", "root", "--", "bash", "-lc", script]);
+    if distro.trim().is_empty() {
+        cmd.args(["--user", "root", "--exec", "bash", "-lc", script]);
+    } else {
+        cmd.args(["-d", distro, "--user", "root", "--exec", "bash", "-lc", script]);
+    }
     match cmd.output() {
         Ok(o) => RunOutput {
             ok: o.status.success(),
@@ -230,9 +239,14 @@ pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
 
 /// Run a script synchronously, streaming each output line to `on_line`.
 pub fn run_script_stream(distro: &str, script: &str, mut on_line: impl FnMut(&str)) -> RunOutput {
-    let mut child = match wsl_command()
-        .env("WSL_UTF8", "1")
-        .args(["-d", distro, "--", "bash", "-lc", script])
+    let mut cmd = wsl_command();
+    cmd.env("WSL_UTF8", "1");
+    if distro.trim().is_empty() {
+        cmd.args(["--exec", "bash", "-lc", script]);
+    } else {
+        cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
+    }
+    let mut child = match cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -326,9 +340,14 @@ impl WslChild {
         script: &str,
         on_line: impl FnMut(String) + Send + 'static,
     ) -> Result<WslChild, String> {
-        let mut child = wsl_command()
-            .env("WSL_UTF8", "1")
-            .args(["-d", distro, "--", "bash", "-lc", script])
+        let mut cmd = wsl_command();
+        cmd.env("WSL_UTF8", "1");
+        if distro.trim().is_empty() {
+            cmd.args(["--exec", "bash", "-lc", script]);
+        } else {
+            cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
+        }
+        let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -456,6 +475,17 @@ mod tests {
         for d in &list {
             assert!(!d.contains('\u{0}'));
             assert!(!d.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_run_script_preserves_shell_variables() {
+        let distro = detect_default_distro().unwrap_or_else(|| "Ubuntu".to_string());
+        let out = run_script(&distro, "for v in A B C; do echo VAR=$v; done");
+        if out.ok {
+            assert!(out.stdout.contains("VAR=A"));
+            assert!(out.stdout.contains("VAR=B"));
+            assert!(out.stdout.contains("VAR=C"));
         }
     }
 

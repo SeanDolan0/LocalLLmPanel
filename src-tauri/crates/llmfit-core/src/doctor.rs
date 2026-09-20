@@ -15,7 +15,7 @@ const MAX_SECTION_BYTES: usize = 16 * 1024;
 /// Run `cmd args…` and return its combined stdout/stderr, or a note that the
 /// tool is unavailable. Never fails: missing tools are part of the diagnosis.
 fn capture(cmd: &str, args: &[&str]) -> String {
-    match std::process::Command::new(cmd).args(args).output() {
+    match crate::hardware::silent_cmd(cmd).args(args).output() {
         Ok(out) => {
             let mut text = String::new();
             let stdout = String::from_utf8_lossy(&out.stdout);

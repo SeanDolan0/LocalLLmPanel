@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -221,7 +221,40 @@ export default function Search() {
   const seq = useRef(0);
   const lastSearchedQuery = useRef<string>("");
 
+  const [installedModels, setInstalledModels] = useState<Set<string>>(new Set());
+
+  const refreshLibrary = useCallback(() => {
+    api
+      .libraryList()
+      .then((list) => {
+        const set = new Set<string>();
+        for (const entry of list) {
+          set.add(entry.model_id.toLowerCase());
+          if (entry.model_id.includes("/")) {
+            set.add(entry.model_id.split("/")[1].toLowerCase());
+          }
+        }
+        setInstalledModels(set);
+      })
+      .catch(() => {});
+  }, []);
+
+  const isModelInstalled = useCallback(
+    (modelId?: string | null) => {
+      if (!modelId) return false;
+      const lower = modelId.toLowerCase();
+      if (installedModels.has(lower)) return true;
+      if (lower.includes("/")) {
+        const nameOnly = lower.split("/")[1];
+        if (installedModels.has(nameOnly)) return true;
+      }
+      return false;
+    },
+    [installedModels]
+  );
+
   useEffect(() => {
+    refreshLibrary();
     api.envStatus().then(setEnv).catch(() => {});
     api.pullStatus().then((res) => {
       if (res?.pulling?.length) {
@@ -234,11 +267,14 @@ export default function Search() {
     }).catch(() => {});
     const unsub = events.pullProgress((p) => {
       setPulls((prev) => ({ ...prev, [p.model]: p }));
+      if (p.state === "complete") {
+        refreshLibrary();
+      }
     });
     return () => {
       unsub.then((f) => f());
     };
-  }, []);
+  }, [refreshLibrary]);
 
   // Fetch dynamic recommendations on component mount
   useEffect(() => {
@@ -307,6 +343,7 @@ export default function Search() {
   }, [debouncedQuery]);
 
   const pull = (repoId: string) => {
+    if (isModelInstalled(repoId)) return;
     api.pullModel(repoId).catch((e) => setSearchErr(String(e)));
   };
 
@@ -544,17 +581,21 @@ export default function Search() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredRecommendations.map((m) => (
-                <ModelCard
-                  key={m.id}
-                  model={m}
-                  onSelect={() => setSelectedModel(m)}
-                  onDeploy={deploy}
-                  onPull={pull}
-                  onCancelPull={cancelPull}
-                  pullState={pulls[getBestVariant(m)?.variant.repo_id || m.id] || pulls[m.id]}
-                />
-              ))}
+              {filteredRecommendations.map((m) => {
+                const bestRepoId = getBestVariant(m)?.variant.repo_id || m.id;
+                return (
+                  <ModelCard
+                    key={m.id}
+                    model={m}
+                    onSelect={() => setSelectedModel(m)}
+                    onDeploy={deploy}
+                    onPull={pull}
+                    onCancelPull={cancelPull}
+                    pullState={pulls[bestRepoId] || pulls[m.id]}
+                    isInstalled={isModelInstalled(bestRepoId) || isModelInstalled(m.id)}
+                  />
+                );
+              })}
             </div>
           )}
         </div>
@@ -586,17 +627,21 @@ export default function Search() {
             </div>
           ) : viewMode === "grid" ? (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredResults?.map((m) => (
-                <ModelCard
-                  key={m.id}
-                  model={m}
-                  onSelect={() => setSelectedModel(m)}
-                  onDeploy={deploy}
-                  onPull={pull}
-                  onCancelPull={cancelPull}
-                  pullState={pulls[getBestVariant(m)?.variant.repo_id || m.id] || pulls[m.id]}
-                />
-              ))}
+              {filteredResults?.map((m) => {
+                const bestRepoId = getBestVariant(m)?.variant.repo_id || m.id;
+                return (
+                  <ModelCard
+                    key={m.id}
+                    model={m}
+                    onSelect={() => setSelectedModel(m)}
+                    onDeploy={deploy}
+                    onPull={pull}
+                    onCancelPull={cancelPull}
+                    pullState={pulls[bestRepoId] || pulls[m.id]}
+                    isInstalled={isModelInstalled(bestRepoId) || isModelInstalled(m.id)}
+                  />
+                );
+              })}
             </div>
           ) : (
             <div className="overflow-x-auto rounded-xl border border-edge">
@@ -740,49 +785,61 @@ export default function Search() {
                             >
                               Deploy
                             </Button>
-                            {pullState ? (
-                              <div className="flex items-center gap-1.5">
-                                <Badge
-                                  color={
-                                    pullState.state === "complete"
-                                      ? "emerald"
-                                      : pullState.state === "failed"
-                                      ? "red"
-                                      : "indigo"
-                                  }
+                            {(() => {
+                              const targetId = variant?.repo_id || m.id;
+                              const isInstalled = isModelInstalled(targetId) || isModelInstalled(m.id);
+                              if (pullState && pullState.state !== "complete") {
+                                return (
+                                  <div className="flex items-center gap-1.5">
+                                    <Badge
+                                      color={
+                                        pullState.state === "failed"
+                                          ? "red"
+                                          : "indigo"
+                                      }
+                                    >
+                                      {pullState.state}
+                                    </Badge>
+                                    {pullState.state === "downloading" && (
+                                      <Button
+                                        variant="danger"
+                                        className="text-xs px-2 py-0.5"
+                                        onClick={() => cancelPull(targetId)}
+                                        title="Cancel download"
+                                      >
+                                        Cancel
+                                      </Button>
+                                    )}
+                                    {pullState.state === "failed" && (
+                                      <Button
+                                        variant="ghost"
+                                        className="text-xs px-2 py-0.5"
+                                        onClick={() => pull(targetId)}
+                                        title="Retry download"
+                                      >
+                                        Retry
+                                      </Button>
+                                    )}
+                                  </div>
+                                );
+                              }
+                              if (isInstalled || pullState?.state === "complete") {
+                                return (
+                                  <Badge color="emerald" title="Model is already downloaded in your library">
+                                    In Library
+                                  </Badge>
+                                );
+                              }
+                              return (
+                                <Button
+                                  variant="ghost"
+                                  className="text-xs px-2.5 py-1"
+                                  onClick={() => pull(targetId)}
                                 >
-                                  {pullState.state}
-                                </Badge>
-                                {pullState.state === "downloading" && (
-                                  <Button
-                                    variant="danger"
-                                    className="text-xs px-2 py-0.5"
-                                    onClick={() => cancelPull(variant?.repo_id || m.id)}
-                                    title="Cancel download"
-                                  >
-                                    Cancel
-                                  </Button>
-                                )}
-                                {pullState.state === "failed" && (
-                                  <Button
-                                    variant="ghost"
-                                    className="text-xs px-2 py-0.5"
-                                    onClick={() => pull(variant?.repo_id || m.id)}
-                                    title="Retry download"
-                                  >
-                                    Retry
-                                  </Button>
-                                )}
-                              </div>
-                            ) : (
-                              <Button
-                                variant="ghost"
-                                className="text-xs px-2.5 py-1"
-                                onClick={() => pull(variant?.repo_id || m.id)}
-                              >
-                                Pull
-                              </Button>
-                            )}
+                                  Pull
+                                </Button>
+                              );
+                            })()}
                           </div>
                         </td>
                       </tr>
@@ -867,6 +924,7 @@ export default function Search() {
           onCancelPull={cancelPull}
           onDeploy={deploy}
           totalVramMb={env?.gpu?.vram_total_mb ?? null}
+          isModelInstalled={isModelInstalled}
         />
       )}
     </div>
@@ -883,6 +941,7 @@ function ModelCard({
   onPull,
   onCancelPull,
   pullState,
+  isInstalled,
 }: {
   model: ModelWithFit;
   onSelect: () => void;
@@ -890,6 +949,7 @@ function ModelCard({
   onPull: (repoId: string) => void;
   onCancelPull?: (repoId: string) => void;
   pullState?: PullStatus;
+  isInstalled?: boolean;
 }) {
   const best = getBestVariant(model);
   const fit = best?.fit;
@@ -1144,13 +1204,11 @@ function ModelCard({
           >
             Deploy
           </Button>
-          {pullState ? (
+          {pullState && pullState.state !== "complete" ? (
             <div className="flex items-center gap-1.5">
               <Badge
                 color={
-                  pullState.state === "complete"
-                    ? "emerald"
-                    : pullState.state === "failed"
+                  pullState.state === "failed"
                     ? "red"
                     : "indigo"
                 }
@@ -1179,6 +1237,10 @@ function ModelCard({
                 </Button>
               )}
             </div>
+          ) : isInstalled || pullState?.state === "complete" ? (
+            <Badge color="emerald" title="Model is already downloaded in your library">
+              In Library
+            </Badge>
           ) : (
             <Button
               variant="ghost"
@@ -1205,6 +1267,7 @@ function ModelDetailModal({
   onCancelPull,
   onDeploy,
   totalVramMb,
+  isModelInstalled,
 }: {
   model: ModelWithFit;
   onClose: () => void;
@@ -1213,6 +1276,7 @@ function ModelDetailModal({
   onCancelPull?: (repoId: string) => void;
   onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
   totalVramMb: number | null;
+  isModelInstalled?: (modelId?: string | null) => boolean;
 }) {
   const sortedVariants = useMemo(() => {
     return [...model.variants].sort((a, b) => b.fit.score - a.fit.score);
@@ -1543,51 +1607,64 @@ function ModelDetailModal({
                         </div>
 
                         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                          {pullState ? (
-                            <div className="flex items-center gap-1.5">
-                              <Badge
-                                color={
-                                  pullState.state === "complete"
-                                    ? "emerald"
-                                    : pullState.state === "failed"
-                                    ? "red"
-                                    : "indigo"
-                                }
-                                title={pullState.file || undefined}
+                          {(() => {
+                            const isInstalled = isModelInstalled
+                              ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id)
+                              : false;
+                            if (pullState && pullState.state !== "complete") {
+                              return (
+                                <div className="flex items-center gap-1.5">
+                                  <Badge
+                                    color={
+                                      pullState.state === "failed"
+                                        ? "red"
+                                        : "indigo"
+                                    }
+                                    title={pullState.file || undefined}
+                                  >
+                                    {pullState.state}
+                                  </Badge>
+                                  {pullState.state === "downloading" && onCancelPull && (
+                                    <Button
+                                      variant="danger"
+                                      className="text-xs px-2.5 py-1"
+                                      onClick={() => onCancelPull(variant.repo_id)}
+                                      title="Cancel download"
+                                    >
+                                      Cancel
+                                    </Button>
+                                  )}
+                                  {pullState.state === "failed" && (
+                                    <Button
+                                      variant="ghost"
+                                      className="text-xs px-2.5 py-1"
+                                      onClick={() => onPull(variant.repo_id)}
+                                      title="Retry download"
+                                    >
+                                      Retry
+                                    </Button>
+                                  )}
+                                </div>
+                              );
+                            }
+                            if (isInstalled || pullState?.state === "complete") {
+                              return (
+                                <Badge color="emerald" title="Model is already downloaded in your library">
+                                  In Library
+                                </Badge>
+                              );
+                            }
+                            return (
+                              <Button
+                                variant="ghost"
+                                className="text-xs px-2.5 py-1"
+                                onClick={() => onPull(variant.repo_id)}
+                                title="Download to local cache"
                               >
-                                {pullState.state}
-                              </Badge>
-                              {pullState.state === "downloading" && onCancelPull && (
-                                <Button
-                                  variant="danger"
-                                  className="text-xs px-2.5 py-1"
-                                  onClick={() => onCancelPull(variant.repo_id)}
-                                  title="Cancel download"
-                                >
-                                  Cancel
-                                </Button>
-                              )}
-                              {pullState.state === "failed" && (
-                                <Button
-                                  variant="ghost"
-                                  className="text-xs px-2.5 py-1"
-                                  onClick={() => onPull(variant.repo_id)}
-                                  title="Retry download"
-                                >
-                                  Retry
-                                </Button>
-                              )}
-                            </div>
-                          ) : (
-                            <Button
-                              variant="ghost"
-                              className="text-xs px-2.5 py-1"
-                              onClick={() => onPull(variant.repo_id)}
-                              title="Download to local cache"
-                            >
-                              Pull
-                            </Button>
-                          )}
+                                Pull
+                              </Button>
+                            );
+                          })()}
                           <Button
                             variant="primary"
                             className="text-xs px-3 py-1"

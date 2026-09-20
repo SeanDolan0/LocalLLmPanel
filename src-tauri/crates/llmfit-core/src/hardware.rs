@@ -1,6 +1,17 @@
 use std::collections::BTreeMap;
 use sysinfo::System;
 
+#[allow(unused_mut)]
+pub(crate) fn silent_cmd(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
 /// The acceleration backend for inference speed estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum GpuBackend {
@@ -343,7 +354,7 @@ impl SystemSpecs {
         }
 
         // Fallback: standard 2-column query for older nvidia-smi versions
-        let output = match std::process::Command::new("nvidia-smi")
+        let output = match silent_cmd("nvidia-smi")
             .arg("--query-gpu=memory.total,name")
             .arg("--format=csv,noheader,nounits")
             .output()
@@ -364,7 +375,7 @@ impl SystemSpecs {
     /// query fails (e.g. older driver that doesn't support the field), so the
     /// caller can fall back to the standard query.
     fn try_nvidia_smi_with_addressing_mode() -> Option<Vec<GpuInfo>> {
-        let output = std::process::Command::new("nvidia-smi")
+        let output = silent_cmd("nvidia-smi")
             .arg("--query-gpu=addressing_mode,memory.total,name")
             .arg("--format=csv,noheader,nounits")
             .output()
@@ -1109,7 +1120,7 @@ impl SystemSpecs {
         }
 
         // Use PowerShell to query WMI — more reliable than wmic (deprecated)
-        if let Ok(output) = std::process::Command::new("powershell")
+        if let Ok(output) = silent_cmd("powershell")
             .arg("-NoProfile")
             .arg("-Command")
             .arg("Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ForEach-Object { $_.Name + '|' + $_.AdapterRAM }")
@@ -1292,7 +1303,7 @@ impl SystemSpecs {
 
     /// Fallback Windows GPU detection via wmic (works on older systems).
     fn detect_gpu_windows_wmic_list() -> Vec<GpuInfo> {
-        let output = match std::process::Command::new("wmic")
+        let output = match silent_cmd("wmic")
             .arg("path")
             .arg("win32_VideoController")
             .arg("get")
@@ -1847,12 +1858,12 @@ impl SystemSpecs {
             return Vec::new();
         }
 
-        let output = match std::process::Command::new("vulkaninfo")
+        let output = match silent_cmd("vulkaninfo")
             .arg("--summary")
             .output()
         {
             Ok(o) if o.status.success() => o,
-            _ => match std::process::Command::new("vulkaninfo").output() {
+            _ => match silent_cmd("vulkaninfo").output() {
                 Ok(o) if o.status.success() => o,
                 _ => return Vec::new(),
             },
@@ -2640,7 +2651,7 @@ fn detect_windows_physical_total_ram_gb() -> Option<f64> {
     if !cfg!(target_os = "windows") {
         return None;
     }
-    let output = std::process::Command::new("powershell")
+    let output = silent_cmd("powershell")
         .args([
             "-NoProfile",
             "-Command",
@@ -2712,7 +2723,7 @@ fn detect_windows_registry_vram() -> Vec<(String, u64)> {
     if !cfg!(target_os = "windows") {
         return Vec::new();
     }
-    let Ok(output) = std::process::Command::new("powershell")
+    let Ok(output) = silent_cmd("powershell")
         .args(["-NoProfile", "-Command", WINDOWS_REGISTRY_VRAM_PS_COMMAND])
         .output()
     else {

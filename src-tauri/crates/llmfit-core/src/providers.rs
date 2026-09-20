@@ -782,7 +782,7 @@ static MLX_PYTHON_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::ne
 
 fn check_mlx_python() -> bool {
     *MLX_PYTHON_AVAILABLE.get_or_init(|| {
-        std::process::Command::new("python3")
+        crate::hardware::silent_cmd("python3")
             .args(["-c", "import mlx_lm"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -985,7 +985,7 @@ impl ModelProvider for MlxProvider {
             // `--` terminates option parsing so a repo id beginning with `-`
             // (reachable via the unauthenticated localhost /api/v1/download
             // endpoint) cannot be misinterpreted as a flag like --local-dir.
-            let result = std::process::Command::new(&hf_bin)
+            let result = crate::hardware::silent_cmd(&hf_bin)
                 .args(["download", "--", &repo_for_thread])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -1925,7 +1925,7 @@ fn find_binary(name: &str) -> Option<String> {
 /// health endpoint. Returns `true` if the server responds.
 fn probe_llama_server(base_url: &str) -> bool {
     let url = format!("{}/health", base_url.trim_end_matches('/'));
-    std::process::Command::new("curl")
+    crate::hardware::silent_cmd("curl")
         .args(["-sf", "--max-time", "2", &url])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -2273,7 +2273,7 @@ impl ModelProvider for DockerModelRunnerProvider {
 
             // `--` terminates option parsing so a tag beginning with `-`
             // cannot inject docker CLI flags.
-            let result = std::process::Command::new("docker")
+            let result = crate::hardware::silent_cmd("docker")
                 .args(["model", "pull", "--", &tag])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -3511,7 +3511,7 @@ impl RamaLamaProvider {
     /// so detection works without a running server. Returns `None` when the
     /// `ramalama` binary is absent or the command fails.
     fn installed_from_store() -> Option<(HashSet<String>, usize)> {
-        let mut child = std::process::Command::new("ramalama")
+        let mut child = crate::hardware::silent_cmd("ramalama")
             .args(["ls", "--json"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

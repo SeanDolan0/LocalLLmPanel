@@ -801,6 +801,44 @@ pub fn pull_model(
     model_id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
+
+    // Check if the model is already in imported local models
+    if st
+        .config()
+        .imported_local_models
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(&model_id))
+    {
+        return Err(format!(
+            "Model \"{}\" is already in your library as an imported local folder",
+            model_id
+        ));
+    }
+
+    // Check if model already exists in HF hub cache
+    let distro = st.resolve_distro();
+    let hub_dir = if let Some(home) = &st.config().advanced_settings.hf_home {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            format!("{trimmed}/hub")
+        } else {
+            "~/.cache/huggingface/hub".to_string()
+        }
+    } else {
+        "~/.cache/huggingface/hub".to_string()
+    };
+    let dir_name = format!("models--{}", model_id.replace('/', "--"));
+    let check = crate::wsl::run_script(
+        &distro,
+        &format!("[ -d \"{hub_dir}/{dir_name}\" ] && echo exists"),
+    );
+    if check.stdout.contains("exists") {
+        return Err(format!(
+            "Model \"{}\" is already downloaded in your library",
+            model_id
+        ));
+    }
+
     hf::pull_model(&st, app, &model_id).map_err(|e| e.to_string())
 }
 
@@ -1243,7 +1281,10 @@ pub fn settings_set(
 pub fn autostart_get() -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("reg")
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("reg");
+        cmd.creation_flags(0x08000000);
+        let output = cmd
             .args([
                 "query",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -1265,10 +1306,13 @@ pub fn autostart_get() -> Result<bool, String> {
 pub fn autostart_set(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         if enabled {
             let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let exe_str = current_exe.to_string_lossy();
-            let status = std::process::Command::new("reg")
+            let mut cmd = std::process::Command::new("reg");
+            cmd.creation_flags(0x08000000);
+            let status = cmd
                 .args([
                     "add",
                     r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -1286,7 +1330,9 @@ pub fn autostart_set(enabled: bool) -> Result<(), String> {
                 return Err("Failed to update autostart in Windows registry".to_string());
             }
         } else {
-            let _ = std::process::Command::new("reg")
+            let mut cmd = std::process::Command::new("reg");
+            cmd.creation_flags(0x08000000);
+            let _ = cmd
                 .args([
                     "delete",
                     r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -1489,11 +1535,22 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
                 .collect()
         };
 
+        let hub_dir = if let Some(home) = &st.config().advanced_settings.hf_home {
+            let trimmed = home.trim();
+            if !trimmed.is_empty() {
+                format!("{trimmed}/hub")
+            } else {
+                "~/.cache/huggingface/hub".to_string()
+            }
+        } else {
+            "~/.cache/huggingface/hub".to_string()
+        };
+
         // Hub cache dirs are `models--owner--name` or `models--name`; replace the first `--` with `/`.
-        let out = crate::wsl::run_script(
-            &distro,
-            "for d in ~/.cache/huggingface/hub/models--*; do [ -d \"$d\" ] || continue; raw=${d##*/models--}; if [[ \"$raw\" == *--* ]]; then name=\"${raw/--//}\"; else name=\"$raw\"; fi; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done",
+        let script = format!(
+            "for d in {hub_dir}/models--*; do [ -d \"$d\" ] || continue; raw=${{d##*/models--}}; if [[ \"$raw\" == *--* ]]; then name=\"${{raw/--//}}\"; else name=\"$raw\"; fi; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done"
         );
+        let out = crate::wsl::run_script(&distro, &script);
         let mut out_v = Vec::new();
         for line in out.stdout.lines() {
             let mut it = line.split('|');
@@ -1710,21 +1767,22 @@ pub async fn library_import_local(
     .map_err(|e| e.to_string())?
 }
 
-pub fn compose_library_remove_script(model_id: &str) -> String {
+pub fn compose_library_remove_script(model_id: &str, hub_dir: Option<&str>) -> String {
     let dir_name = format!("models--{}", model_id.replace('/', "--"));
+    let hub = hub_dir.unwrap_or("$HOME/.cache/huggingface/hub");
     format!(
         r#"
-dir="$HOME/.cache/huggingface/hub/{dir_name}"
+dir="{hub}/{dir_name}"
 rm -rf "$dir"
 # Prune unreferenced blob files
-if [ -d "$HOME/.cache/huggingface/hub/blobs" ]; then
+if [ -d "{hub}/blobs" ]; then
     shopt -s nullglob
-    snaps=("$HOME/.cache/huggingface/hub/models--"*/snapshots)
+    snaps=("{hub}/models--"*/snapshots)
     if [ ${{#snaps[@]}} -eq 0 ]; then
-        rm -f "$HOME/.cache/huggingface/hub/blobs"/*
+        rm -f "{hub}/blobs"/*
     else
         ref=$(find "${{snaps[@]}}" -type l -exec readlink {{}} + 2>/dev/null | sed 's#.*/##' | sort -u)
-        for blob in "$HOME/.cache/huggingface/hub/blobs"/*; do
+        for blob in "{hub}/blobs"/*; do
             [ -f "$blob" ] || continue
             hash=$(basename "$blob")
             if ! echo "$ref" | grep -qx "$hash"; then
@@ -1734,8 +1792,7 @@ if [ -d "$HOME/.cache/huggingface/hub/blobs" ]; then
     fi
 fi
 echo ok
-"#,
-        dir_name = dir_name
+"#
     )
 }
 
@@ -1777,7 +1834,17 @@ pub async fn library_remove(
         }
 
         let distro = st.resolve_distro();
-        let script = compose_library_remove_script(&model_id);
+        let hub_dir = if let Some(home) = &st.config().advanced_settings.hf_home {
+            let trimmed = home.trim();
+            if !trimmed.is_empty() {
+                Some(format!("{trimmed}/hub"))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let script = compose_library_remove_script(&model_id, hub_dir.as_deref());
         let out = crate::wsl::run_script(&distro, &script);
         if !out.ok {
             return Err(format!("Failed to delete model directory: {}", out.stderr));
@@ -1793,9 +1860,19 @@ pub async fn library_disk_usage(state: State<'_, Arc<AppState>>) -> Result<u64, 
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let distro = st.resolve_distro();
+        let hub_dir = if let Some(home) = &st.config().advanced_settings.hf_home {
+            let trimmed = home.trim();
+            if !trimmed.is_empty() {
+                format!("{trimmed}/hub")
+            } else {
+                "~/.cache/huggingface/hub".to_string()
+            }
+        } else {
+            "~/.cache/huggingface/hub".to_string()
+        };
         let out = crate::wsl::run_script(
             &distro,
-            "du -sm ~/.cache/huggingface/hub 2>/dev/null | cut -f1",
+            &format!("du -sm {hub_dir} 2>/dev/null | cut -f1"),
         );
         let mb: u64 = out.stdout.trim().parse().unwrap_or(0);
         Ok(mb)
@@ -1883,8 +1960,10 @@ pub fn open_url(url: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", &url])
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("rundll32");
+        cmd.creation_flags(0x08000000);
+        cmd.args(["url.dll,FileProtocolHandler", &url])
             .spawn()
             .map_err(|e| format!("Failed to open URL in browser: {e}"))?;
         Ok(())
@@ -2432,11 +2511,18 @@ mod tests {
 
     #[test]
     fn test_cache_sweep_script_composition() {
-        let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B");
+        let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B", None);
         assert!(script.contains("models--Qwen--Qwen2.5-0.5B"));
         assert!(script.contains("hub/blobs"));
         assert!(script.contains("readlink"));
         assert!(script.contains("snaps"));
+    }
+
+    #[test]
+    fn test_cache_sweep_script_custom_hub() {
+        let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B", Some("/mnt/data/hf/hub"));
+        assert!(script.contains("dir=\"/mnt/data/hf/hub/models--Qwen--Qwen2.5-0.5B\""));
+        assert!(script.contains("/mnt/data/hf/hub/blobs"));
     }
 
     #[test]
