@@ -28,6 +28,16 @@ pub struct InstallStatus {
     pub gpu: Option<crate::state::GpuSnapshot>,
 }
 
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
 fn choose_assets(assets: &[Asset]) -> Result<(Asset, Option<Asset>)> {
     let mut candidates: Vec<&Asset> = assets
         .iter()
@@ -79,7 +89,7 @@ fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Resu
 
 fn expand_archive(zip: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir_all(destination)?;
-    let status = Command::new("powershell")
+    let status = hidden_command("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -154,7 +164,7 @@ pub fn install(
 }
 
 pub fn command_output(exe: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new(exe).args(args).output()?;
+    let output = hidden_command(exe).args(args).output()?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     if text.trim().is_empty() {
         text = String::from_utf8_lossy(&output.stderr).to_string();
@@ -171,10 +181,57 @@ pub fn executable_from_config(cfg: &crate::state::PersistedConfig) -> Option<Pat
         .map(PathBuf::from)
         .filter(|p| p.is_file())
         .or_else(|| find_file(Path::new(&cfg.llamacpp_dir), "llama-server.exe"))
+        .or_else(|| find_on_path("llama-server.exe"))
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::executable_from_config;
+    use crate::state::PersistedConfig;
+
+    #[test]
+    fn detects_llama_server_from_path_when_not_configured() {
+        let root = std::env::temp_dir().join(format!(
+            "local-llm-panel-llama-path-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("llama-server.exe");
+        std::fs::write(&executable, b"test executable").unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let path = format!(
+            "{};{}",
+            root.display(),
+            old_path.as_deref().unwrap_or_default().to_string_lossy()
+        );
+        std::env::set_var("PATH", path);
+
+        let mut cfg = PersistedConfig::default();
+        cfg.llamacpp_executable = None;
+        cfg.llamacpp_dir = root.join("not-configured").to_string_lossy().into_owned();
+
+        assert_eq!(executable_from_config(&cfg), Some(executable.clone()));
+
+        if let Some(old_path) = old_path {
+            std::env::set_var("PATH", old_path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 pub fn windows_gpu_snapshot() -> Option<crate::state::GpuSnapshot> {
-    let output = Command::new("nvidia-smi")
+    let output = hidden_command("nvidia-smi")
         .args([
             "--query-gpu=name,memory.total,memory.free,utilization.gpu",
             "--format=csv,noheader,nounits",

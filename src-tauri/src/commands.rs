@@ -120,9 +120,13 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
         let available_ram_gb = Some((llmfit_specs.available_ram_gb * 10.0).round() / 10.0);
         let ram_bandwidth_gbps = Some(117.0);
 
+        let cfg = st.config();
+        let native_llamacpp = crate::llamacpp_install::executable_from_config(&cfg);
         let mut providers_detected = Vec::new();
         let llamacpp = llmfit_core::providers::LlamaCppProvider::new();
-        if llmfit_core::providers::ModelProvider::is_available(&llamacpp) {
+        if native_llamacpp.is_some()
+            || llmfit_core::providers::ModelProvider::is_available(&llamacpp)
+        {
             providers_detected.push("llama.cpp".to_string());
         }
         let ollama = llmfit_core::providers::OllamaProvider::new();
@@ -154,17 +158,12 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             available_ram_gb,
             ram_bandwidth_gbps,
             providers_detected,
-            llamacpp_installed: crate::llamacpp_install::executable_from_config(&st.config())
-                .is_some(),
-            llamacpp_tag: st.config().llamacpp_installed_tag,
-            llamacpp_version: st.config().llamacpp_version,
-            llamacpp_executable: st
-                .config()
+            llamacpp_installed: native_llamacpp.is_some(),
+            llamacpp_tag: cfg.llamacpp_installed_tag,
+            llamacpp_version: cfg.llamacpp_version,
+            llamacpp_executable: cfg
                 .llamacpp_executable
-                .or_else(|| {
-                    crate::llamacpp_install::executable_from_config(&st.config())
-                        .map(|p| p.to_string_lossy().into_owned())
-                }),
+                .or_else(|| native_llamacpp.map(|p| p.to_string_lossy().into_owned())),
         }
     })
     .await

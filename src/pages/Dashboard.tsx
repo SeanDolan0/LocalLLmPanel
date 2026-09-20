@@ -102,9 +102,11 @@ export default function Dashboard() {
           <Button onClick={runProvision} disabled={provisioning}>
             {provisioning ? <Spinner label="Provisioning…" /> : "⚡ Provision WSL"}
           </Button>
-          <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
-            {installingLlamacpp ? <Spinner label="Installing…" /> : "Install llama.cpp"}
-          </Button>
+          {env && !env.llamacpp_installed && (
+            <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
+              {installingLlamacpp ? <Spinner label="Installing…" /> : "Install llama.cpp"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -142,6 +144,16 @@ export default function Dashboard() {
               </span>
             </div>
             <div className="text-xs text-slate-500">{env?.llamacpp_version ?? "Native Windows backend"}</div>
+            {env && !env.llamacpp_installed && (
+              <Button
+                variant="subtle"
+                onClick={installLlamacpp}
+                disabled={installingLlamacpp}
+                className="mt-2 w-full"
+              >
+                {installingLlamacpp ? <Spinner label="Installing…" /> : "Install llama.cpp"}
+              </Button>
+            )}
           </div>
         </Card>
         <Card>
