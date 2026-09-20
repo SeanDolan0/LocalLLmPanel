@@ -171,6 +171,10 @@ pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
     })
 }
 
+/// CORS headers emitted on every gateway response so browser-based
+/// coding clients (Continue web, etc.) can call the gateway directly.
+pub const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+
 pub fn is_head_terminated(buf: &[u8]) -> Option<usize> {
     if buf.len() < 4 {
         return None;
@@ -359,7 +363,7 @@ async fn write_response(
         _ => "OK",
     };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{CORS_HEADERS}Connection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -410,7 +414,7 @@ async fn proxy_post(
 
     if streaming {
         let head = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n{CORS_HEADERS}Connection: close\r\n\r\n"
         );
         stream
             .write_all(head.as_bytes())
@@ -761,5 +765,14 @@ mod tests {
         let buf = b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\nbody-here";
         assert_eq!(is_head_terminated(buf), Some(32));
         assert_eq!(is_head_terminated(b"GET /v1/models HTTP/1.1\r\n"), None);
+    }
+
+    #[test]
+    fn test_cors_headers_cover_browser_preflight() {
+        assert!(CORS_HEADERS.contains("Access-Control-Allow-Origin: *"));
+        assert!(CORS_HEADERS.contains("Access-Control-Allow-Methods"));
+        assert!(CORS_HEADERS.contains("GET, POST, OPTIONS"));
+        assert!(CORS_HEADERS.contains("Access-Control-Allow-Headers"));
+        assert!(CORS_HEADERS.contains("Authorization"));
     }
 }
