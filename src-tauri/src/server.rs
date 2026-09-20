@@ -445,9 +445,7 @@ pub fn build_llamacpp_args(def: &ServerDef) -> Vec<String> {
     {
         args.extend([
             "--override-kv".into(),
-            "qwen35moe.block_count=int:40".into(),
-            "--override-kv".into(),
-            "qwen35moe.nextn_predict_layers=int:0".into(),
+            "qwen35moe.block_count=int:40,qwen35moe.nextn_predict_layers=int:0".into(),
         ]);
     }
 
