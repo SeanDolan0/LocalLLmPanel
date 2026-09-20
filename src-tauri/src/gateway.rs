@@ -188,6 +188,33 @@ fn not_found_payload(model: &str) -> String {
     .to_string()
 }
 
+fn running_model_names(
+    servers: &BTreeMap<String, crate::state::LiveServer>,
+    task: &str,
+) -> Vec<String> {
+    servers
+        .values()
+        .filter(|ls| {
+            ls.status == crate::state::ServerStatus::Running && ls.def.task == task
+        })
+        .map(|ls| ls.def.effective_model_name())
+        .collect()
+}
+
+fn not_found_payload_with_hint(model: &str, kind: &str, running: &[String]) -> String {
+    serde_json::json!({
+        "error": {
+            "message": format!(
+                "no running {kind} server for model '{model}'. Running: [{}]",
+                running.join(", ")
+            ),
+            "type": "invalid_request_error",
+        },
+        "running": running,
+    })
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Connection serving
 // ---------------------------------------------------------------------------
@@ -608,6 +635,19 @@ mod tests {
             None
         );
         assert_eq!(find_server_port_for_embed(&servers, ""), None);
+    }
+
+    #[test]
+    fn test_not_found_payload_includes_running_hint() {
+        let payload = not_found_payload_with_hint(
+            "nope/model",
+            "instruction",
+            &["qwen-7b".to_string(), "llama-8b".to_string()],
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert!(v["error"]["message"].as_str().unwrap().contains("nope/model"));
+        assert_eq!(v["running"][0], "qwen-7b");
     }
 
     #[test]
