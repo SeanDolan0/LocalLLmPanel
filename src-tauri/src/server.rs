@@ -309,19 +309,30 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
 
     // Dynamically clamp GPU memory utilization based on currently available VRAM
     // to prevent vLLM startup ValueError when Windows/desktop processes occupy VRAM.
+    // When vLLM starts inside WSL2, PyTorch CUDA runtime context, primary context allocations,
+    // and NCCL distributed environment buffers take ~1,300-1,400 MB of VRAM BEFORE vLLM checks
+    // free memory against requested utilization (init_snapshot.free_memory >= total * util).
     let mut vram_notice: Option<String> = None;
     if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
         if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
-            let free_ratio = snap.vram_free_mb as f64 / snap.vram_total_mb as f64;
-            // Reserve 4% safety margin below actual free VRAM for PyTorch/CUDA init context & desktop fluctuation
-            let safe_max = (free_ratio - 0.04).clamp(0.10, 0.95);
+            let startup_overhead_mb = 1400.0;
+            let available_mb = (snap.vram_free_mb as f64 - startup_overhead_mb).max(0.0);
+            let safe_ratio = available_mb / snap.vram_total_mb as f64;
+            let cap = if snap.vram_total_mb >= 20000 {
+                0.92
+            } else if snap.vram_total_mb >= 15000 {
+                0.90
+            } else {
+                0.86
+            };
+            let safe_max = safe_ratio.clamp(0.10, cap);
             let safe_max_rounded = (safe_max * 100.0).floor() / 100.0;
             if def.gpu_mem_util > safe_max_rounded {
                 let orig = def.gpu_mem_util;
                 def.gpu_mem_util = safe_max_rounded;
                 vram_notice = Some(format!(
-                    "[LocalLLmPanel] Free VRAM is {} MB / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} to prevent startup crash.",
-                    snap.vram_free_mb, snap.vram_total_mb, free_ratio * 100.0, orig, def.gpu_mem_util
+                    "[LocalLLmPanel] Free VRAM is {} MB / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} (accounting for PyTorch/NCCL startup buffers) to prevent startup crash.",
+                    snap.vram_free_mb, snap.vram_total_mb, (snap.vram_free_mb as f64 / snap.vram_total_mb as f64) * 100.0, orig, def.gpu_mem_util
                 ));
             }
         }
