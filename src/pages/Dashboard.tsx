@@ -102,9 +102,9 @@ export default function Dashboard() {
           <Button onClick={runProvision} disabled={provisioning}>
             {provisioning ? <Spinner label="Provisioning…" /> : "⚡ Provision WSL"}
           </Button>
-          {env && !env.llamacpp_installed && (
+          {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
             <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
-              {installingLlamacpp ? <Spinner label="Installing…" /> : "Install llama.cpp"}
+              {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
             </Button>
           )}
         </div>
@@ -144,14 +144,18 @@ export default function Dashboard() {
               </span>
             </div>
             <div className="text-xs text-slate-500">{env?.llamacpp_version ?? "Native Windows backend"}</div>
-            {env && !env.llamacpp_installed && (
+            <div className="text-xs text-slate-400">
+              {env?.llamacpp_cuda_available ? "CUDA ready" : "CUDA device not detected"}
+              {env?.llamacpp_devices?.length ? ` · ${env.llamacpp_devices.map((d) => d.id).join(", ")}` : ""}
+            </div>
+            {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
               <Button
                 variant="subtle"
                 onClick={installLlamacpp}
                 disabled={installingLlamacpp}
                 className="mt-2 w-full"
               >
-                {installingLlamacpp ? <Spinner label="Installing…" /> : "Install llama.cpp"}
+                {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
               </Button>
             )}
           </div>

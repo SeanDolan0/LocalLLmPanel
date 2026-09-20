@@ -27,6 +27,7 @@ export default function Settings() {
   const [snippetCopied, setSnippetCopied] = useState<string | null>(null);
   const [gwInstruct, setGwInstruct] = useState<string | null>(null);
   const [gwEmbed, setGwEmbed] = useState<string | null>(null);
+  const [llamacppStatus, setLlamacppStatus] = useState<import("../types").LlamacppInstallStatus | null>(null);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -96,6 +97,7 @@ export default function Settings() {
       })
       .catch((e) => setErr(String(e)));
     api.getSystemMemory().then(setSysMem).catch(() => {});
+    api.llamacppStatus().then(setLlamacppStatus).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -697,6 +699,17 @@ export default function Settings() {
                   }
                 />
               </Field>
+              <div className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 text-xs text-slate-400">
+                <div className="flex items-center gap-2 text-sm text-slate-200">
+                  <span className={`h-2 w-2 rounded-full ${llamacppStatus?.cuda_available ? "bg-emerald-400" : "bg-amber-400"}`} />
+                  Native llama.cpp: {llamacppStatus?.installed ? (llamacppStatus.cuda_available ? "CUDA ready" : "installed, CUDA device unavailable") : "not installed"}
+                </div>
+                {llamacppStatus?.devices?.length ? (
+                  <div className="mt-1">Devices: {llamacppStatus.devices.map((d) => `${d.id} (${d.name})`).join(", ")}</div>
+                ) : (
+                  <div className="mt-1">Install a CUDA build; Vulkan/CPU archives are not selected by this app.</div>
+                )}
+              </div>
 
               <div className="sm:col-span-2">
                 <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">

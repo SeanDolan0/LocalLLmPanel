@@ -65,10 +65,10 @@ Requires ~5 GB disk + network. If `nvidia-smi` is unavailable inside WSL, the te
 1. Open **Dashboard** and use **Install / update llama.cpp**. The app selects the latest Windows CUDA release, verifies `llama-server.exe --version`, and records its help capabilities.
 2. In **Settings**, review the native llama.cpp and GGUF directories, or set a custom `llama-server.exe` path.
 3. Download a GGUF from **Search** or place an existing `.gguf` in the GGUF directory.
-4. In **Servers → New server**, select **llama.cpp (Windows)**, choose the first shard for split files, and use the **MoE with CPU expert offload** preset as a starting point. It enables `--jinja`, so OpenAI-compatible tool calling can be tested from the server row.
+4. In **Servers → New server**, select **llama.cpp (Windows)**, choose the first shard for split files, and choose either the **MoE auto-fit** or **MoE manual offload** preset. Automatic fit is enabled by default when the installed binary supports `--fit`; otherwise the configured `n_cpu_moe` value is used as the manual fallback.
 5. Point an external harness at the displayed `http://127.0.0.1:<port>/v1` URL. Native logs persist under `%APPDATA%\local-llm-panel\logs`.
 
-The llama.cpp backend binds to localhost only. `n_cpu_moe` is a starting tuning value: reduce GPU expert residency if VRAM is exhausted, and leave RAM headroom for the operating system and context/KV cache.
+The llama.cpp backend binds to localhost only. The installer selects a live Windows CUDA release asset (preferring CUDA 12.8 or newer) and its matching CUDA runtime archive; Vulkan and CPU-only archives are never silently substituted. Settings exposes the native CUDA/device probe, and each server can select device IDs, an API key, fit target (MiB), and log verbosity. `n_cpu_moe` is a manual fallback/tuning value: increase it if VRAM is exhausted, and leave RAM headroom for the operating system and context/KV cache. Use **Copy log** on a server's log pane when reporting startup failures.
 
 ## Notes & gotchas
 

@@ -116,6 +116,7 @@ pub fn run() {
             commands::env_status,
             commands::provision,
             commands::install_llamacpp,
+            commands::llamacpp_status,
             commands::search_models,
             commands::search_models_with_fit,
             commands::recommended_models,

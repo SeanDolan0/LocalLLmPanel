@@ -42,6 +42,8 @@ pub struct EnvStatus {
     pub llamacpp_tag: Option<String>,
     pub llamacpp_version: Option<String>,
     pub llamacpp_executable: Option<String>,
+    pub llamacpp_cuda_available: bool,
+    pub llamacpp_devices: Vec<crate::llamacpp_install::LlamaDevice>,
 }
 
 fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
@@ -141,6 +143,14 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             providers_detected.push("vLLM (WSL)".to_string());
         }
 
+        let llamacpp_devices = native_llamacpp
+            .as_deref()
+            .and_then(|exe| crate::llamacpp_install::list_devices(exe).ok())
+            .unwrap_or_default();
+        let llamacpp_cuda_available = llamacpp_devices
+            .iter()
+            .any(|device| device.backend.eq_ignore_ascii_case("cuda"));
+
         EnvStatus {
             wsl_ok,
             distro: distro_detected,
@@ -164,6 +174,8 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             llamacpp_executable: cfg
                 .llamacpp_executable
                 .or_else(|| native_llamacpp.map(|p| p.to_string_lossy().into_owned())),
+            llamacpp_cuda_available,
+            llamacpp_devices,
         }
     })
     .await
@@ -219,13 +231,46 @@ pub async fn install_llamacpp(
     cfg.llamacpp_help = Some(help);
     cfg.llamacpp_executable = Some(exe.to_string_lossy().into_owned());
     cfg.save().map_err(|e| e.to_string())?;
+    let devices = crate::llamacpp_install::list_devices(&exe).unwrap_or_default();
     Ok(crate::llamacpp_install::InstallStatus {
         installed: true,
         tag: cfg.llamacpp_installed_tag.clone(),
         version: cfg.llamacpp_version.clone(),
         executable: cfg.llamacpp_executable.clone(),
         gpu: crate::llamacpp_install::windows_gpu_snapshot(),
+        cuda_available: devices
+            .iter()
+            .any(|d| d.backend.eq_ignore_ascii_case("cuda")),
+        devices,
     })
+}
+
+#[tauri::command]
+pub async fn llamacpp_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::llamacpp_install::InstallStatus, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = st.config();
+        let executable = crate::llamacpp_install::executable_from_config(&cfg);
+        let devices = executable
+            .as_deref()
+            .and_then(|exe| crate::llamacpp_install::list_devices(exe).ok())
+            .unwrap_or_default();
+        Ok(crate::llamacpp_install::InstallStatus {
+            installed: executable.is_some(),
+            tag: cfg.llamacpp_installed_tag,
+            version: cfg.llamacpp_version,
+            executable: executable.map(|path| path.to_string_lossy().into_owned()),
+            gpu: crate::llamacpp_install::windows_gpu_snapshot(),
+            cuda_available: devices
+                .iter()
+                .any(|device| device.backend.eq_ignore_ascii_case("cuda")),
+            devices,
+        })
+    })
+    .await
+    .map_err(|e| format!("llamacpp status task error: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +988,11 @@ pub struct CreateServerInput {
     pub ctx_size: Option<usize>,
     pub n_gpu_layers: Option<usize>,
     pub n_cpu_moe: Option<usize>,
+    pub fit: Option<bool>,
+    pub fit_target: Option<usize>,
+    pub device: Option<String>,
+    pub api_key: Option<String>,
+    pub log_verbosity: Option<u8>,
     pub flash_attn: Option<bool>,
     pub cache_type_k: Option<String>,
     pub cache_type_v: Option<String>,
@@ -1064,8 +1114,13 @@ pub async fn servers_create(
         model_path: input.model_path,
         mmproj_path: input.mmproj_path,
         ctx_size: input.ctx_size,
-        n_gpu_layers: input.n_gpu_layers.unwrap_or(99),
+        n_gpu_layers: input.n_gpu_layers,
         n_cpu_moe: input.n_cpu_moe,
+        fit: input.fit.unwrap_or(true),
+        fit_target: input.fit_target,
+        device: input.device.filter(|v| !v.trim().is_empty()),
+        api_key: input.api_key.filter(|v| !v.trim().is_empty()),
+        log_verbosity: input.log_verbosity,
         flash_attn: input.flash_attn.unwrap_or(true),
         cache_type_k: input.cache_type_k.unwrap_or_else(|| "q8_0".into()),
         cache_type_v: input.cache_type_v.unwrap_or_else(|| "q8_0".into()),

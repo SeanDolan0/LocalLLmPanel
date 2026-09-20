@@ -171,10 +171,28 @@ pub struct ServerDef {
     pub mmproj_path: Option<String>,
     #[serde(default)]
     pub ctx_size: Option<usize>,
-    #[serde(default = "default_n_gpu_layers")]
-    pub n_gpu_layers: usize,
+    /// Maximum GPU layers. `None` lets llama.cpp/`--fit` choose automatically.
+    /// Older configurations commonly persisted `99`; serde keeps that value
+    /// as `Some(99)` so those recipes retain their explicit behavior.
+    #[serde(default)]
+    pub n_gpu_layers: Option<usize>,
     #[serde(default)]
     pub n_cpu_moe: Option<usize>,
+    /// Enable llama.cpp automatic device-memory fitting when supported.
+    #[serde(default = "default_true")]
+    pub fit: bool,
+    /// Per-device memory margin passed to llama.cpp `--fit-target` (MiB).
+    #[serde(default)]
+    pub fit_target: Option<usize>,
+    /// Comma-separated native llama.cpp device identifiers.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// Per-server OpenAI-compatible API key for native llama.cpp.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Native llama.cpp log verbosity (0..5).
+    #[serde(default)]
+    pub log_verbosity: Option<u8>,
     #[serde(default = "default_true")]
     pub flash_attn: bool,
     #[serde(default = "default_cache_type")]
@@ -201,10 +219,6 @@ pub struct ServerDef {
 
 fn default_backend() -> String {
     "vllm".to_string()
-}
-
-fn default_n_gpu_layers() -> usize {
-    99
 }
 
 fn default_cache_type() -> String {
@@ -882,8 +896,13 @@ mod tests {
             model_path: None,
             mmproj_path: None,
             ctx_size: None,
-            n_gpu_layers: 99,
+            n_gpu_layers: Some(99),
             n_cpu_moe: None,
+            fit: true,
+            fit_target: None,
+            device: None,
+            api_key: None,
+            log_verbosity: None,
             flash_attn: true,
             cache_type_k: "q8_0".into(),
             cache_type_v: "q8_0".into(),
@@ -932,17 +951,28 @@ mod tests {
                 "max_model_len": 4096,
                 "quant": "fp16",
                 "served_model_name": null,
-                "params_b": null
+                "params_b": null,
+                "n_gpu_layers": 99
             }],
             "measured": {}
         }"#;
         let cfg: PersistedConfig = serde_json::from_str(old).unwrap();
         assert_eq!(cfg.servers[0].backend, "vllm");
-        assert_eq!(cfg.servers[0].n_gpu_layers, 99);
+        assert_eq!(cfg.servers[0].n_gpu_layers, Some(99));
         assert_eq!(cfg.servers[0].cache_type_k, "q8_0");
         assert!(cfg.servers[0].jinja);
         assert!(!cfg.llamacpp_dir.is_empty());
         assert!(!cfg.gguf_dir.is_empty());
+    }
+
+    #[test]
+    fn missing_gpu_layer_setting_defaults_to_auto_fit() {
+        let cfg: PersistedConfig = serde_json::from_str(
+            r#"{"servers":[{"id":"s","name":"s","model_id":"m","task":"instruct","port":8000,"gpu_mem_util":0.8,"quant":"fp16"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.servers[0].n_gpu_layers, None);
+        assert!(cfg.servers[0].fit);
     }
 
     #[test]
@@ -1200,8 +1230,13 @@ mod tests {
             model_path: None,
             mmproj_path: None,
             ctx_size: None,
-            n_gpu_layers: 99,
+            n_gpu_layers: Some(99),
             n_cpu_moe: None,
+            fit: true,
+            fit_target: None,
+            device: None,
+            api_key: None,
+            log_verbosity: None,
             flash_attn: true,
             cache_type_k: "q8_0".into(),
             cache_type_v: "q8_0".into(),
@@ -1244,8 +1279,13 @@ mod tests {
             model_path: None,
             mmproj_path: None,
             ctx_size: None,
-            n_gpu_layers: 99,
+            n_gpu_layers: Some(99),
             n_cpu_moe: None,
+            fit: true,
+            fit_target: None,
+            device: None,
+            api_key: None,
+            log_verbosity: None,
             flash_attn: true,
             cache_type_k: "q8_0".into(),
             cache_type_v: "q8_0".into(),
@@ -1283,7 +1323,9 @@ mod tests {
         let mut cfg = PersistedConfig::default();
         cfg.hf_token = "hf_super_secret_test_token_9988".to_string();
 
-        let tmp_dir = std::env::temp_dir().join("localllm_dpapi_test");
+        let tmp_dir = std::env::current_dir()
+            .unwrap()
+            .join(".localllm_dpapi_test");
         let _ = std::fs::create_dir_all(&tmp_dir);
         let tmp_file = tmp_dir.join("test_config.json");
 
@@ -1311,5 +1353,6 @@ mod tests {
 
         assert_eq!(loaded.hf_token, "hf_super_secret_test_token_9988");
         let _ = std::fs::remove_file(&tmp_file);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

@@ -7,6 +7,16 @@ export interface GpuSnapshot {
   util_percent: number;
 }
 
+export interface LlamacppInstallStatus {
+  installed: boolean;
+  tag: string | null;
+  version: string | null;
+  executable: string | null;
+  gpu: GpuSnapshot | null;
+  cuda_available: boolean;
+  devices: LlamaDevice[];
+}
+
 export interface ProvisionReport {
   phases_completed: string[];
   distro: string;
@@ -39,6 +49,14 @@ export interface EnvStatus {
   llamacpp_tag?: string | null;
   llamacpp_version?: string | null;
   llamacpp_executable?: string | null;
+  llamacpp_cuda_available?: boolean;
+  llamacpp_devices?: LlamaDevice[];
+}
+
+export interface LlamaDevice {
+  id: string;
+  name: string;
+  backend: string;
 }
 
 export interface ModelWithStats {
@@ -111,8 +129,13 @@ export interface ServerDef {
   model_path?: string | null;
   mmproj_path?: string | null;
   ctx_size?: number | null;
-  n_gpu_layers: number;
+  n_gpu_layers?: number | null;
   n_cpu_moe?: number | null;
+  fit?: boolean;
+  fit_target?: number | null;
+  device?: string | null;
+  api_key?: string | null;
+  log_verbosity?: number | null;
   flash_attn: boolean;
   cache_type_k: string;
   cache_type_v: string;
@@ -229,8 +252,13 @@ export interface CreateServerInput {
   model_path?: string;
   mmproj_path?: string;
   ctx_size?: number;
-  n_gpu_layers?: number;
+  n_gpu_layers?: number | null;
   n_cpu_moe?: number;
+  fit?: boolean;
+  fit_target?: number;
+  device?: string;
+  api_key?: string;
+  log_verbosity?: number;
   flash_attn?: boolean;
   cache_type_k?: string;
   cache_type_v?: string;

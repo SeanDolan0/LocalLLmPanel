@@ -386,11 +386,19 @@ pub fn resolve_gguf_model_path(
 /// Capability filtering is applied by the installer/runtime layer; this
 /// function intentionally maps the persisted configuration deterministically.
 pub fn build_llamacpp_args(def: &ServerDef) -> Vec<String> {
+    build_llamacpp_args_with_help(def, "")
+}
+
+/// Build native llama-server arguments, enabling automatic fitting only when
+/// the installed binary advertises the corresponding capability.
+pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String> {
     let mut args = Vec::new();
+    let mut structured_flags = Vec::new();
     let model = def.model_path.as_deref().unwrap_or(&def.model_id);
     args.extend(["-m".into(), model.into()]);
     if let Some(mmproj) = def.mmproj_path.as_deref().filter(|p| !p.is_empty()) {
         args.extend(["--mmproj".into(), mmproj.into()]);
+        structured_flags.push("--mmproj");
     }
     args.extend([
         "--host".into(),
@@ -398,58 +406,157 @@ pub fn build_llamacpp_args(def: &ServerDef) -> Vec<String> {
         "--port".into(),
         def.port.to_string(),
     ]);
+    structured_flags.extend(["-m", "--model", "--host", "--port"]);
     if let Some(ctx) = def.ctx_size.filter(|v| *v > 0) {
         args.extend(["-c".into(), ctx.to_string()]);
+        structured_flags.extend(["-c", "--ctx-size"]);
     }
-    args.extend(["-ngl".into(), def.n_gpu_layers.to_string()]);
+    if let Some(n_gpu_layers) = def.n_gpu_layers {
+        args.extend(["-ngl".into(), n_gpu_layers.to_string()]);
+        structured_flags.push("-ngl");
+    }
     if let Some(n) = def.n_cpu_moe {
         args.extend(["--n-cpu-moe".into(), n.to_string()]);
+        structured_flags.push("--n-cpu-moe");
+        structured_flags.push("-ncmoe");
+    }
+    if !help.is_empty() && help.contains("--fit") {
+        args.extend(["--fit".into(), if def.fit { "on" } else { "off" }.into()]);
+        structured_flags.push("--fit");
+        structured_flags.push("-fit");
+        if let Some(target) = def.fit_target.filter(|v| *v > 0) {
+            args.extend(["--fit-target".into(), target.to_string()]);
+            structured_flags.push("--fit-target");
+            structured_flags.push("-fitt");
+        }
+    }
+    if let Some(device) = def.device.as_deref().filter(|v| !v.trim().is_empty()) {
+        args.extend(["--device".into(), device.trim().into()]);
+        structured_flags.push("--device");
+        structured_flags.push("-dev");
+    }
+    if let Some(api_key) = def.api_key.as_deref().filter(|v| !v.trim().is_empty()) {
+        args.extend(["--api-key".into(), api_key.to_string()]);
+        structured_flags.push("--api-key");
     }
     if def.flash_attn {
         args.extend(["-fa".into(), "on".into()]);
+        structured_flags.extend(["-fa", "--flash-attn"]);
     }
     if !def.cache_type_k.is_empty() {
         args.extend(["--cache-type-k".into(), def.cache_type_k.clone()]);
+        structured_flags.extend(["--cache-type-k", "-ctk"]);
     }
     if !def.cache_type_v.is_empty() {
         args.extend(["--cache-type-v".into(), def.cache_type_v.clone()]);
+        structured_flags.extend(["--cache-type-v", "-ctv"]);
     }
     if let Some(threads) = def.threads.filter(|v| *v > 0) {
         args.extend(["-t".into(), threads.to_string()]);
+        structured_flags.extend(["-t", "--threads"]);
     }
     if let Some(batch) = def.batch_size.filter(|v| *v > 0) {
         args.extend(["-b".into(), batch.to_string()]);
+        structured_flags.extend(["-b", "--batch-size"]);
     }
     if let Some(ubatch) = def.ubatch_size.filter(|v| *v > 0) {
         args.extend(["-ub".into(), ubatch.to_string()]);
+        structured_flags.extend(["-ub", "--ubatch-size"]);
     }
     if def.parallel > 0 {
         args.extend(["-np".into(), def.parallel.to_string()]);
+        structured_flags.extend(["-np", "--parallel"]);
     }
     if def.jinja {
         args.push("--jinja".into());
+        structured_flags.push("--jinja");
     }
     if def.no_kv_offload {
         args.push("--no-kv-offload".into());
+        structured_flags.extend(["--no-kv-offload", "-nkvo"]);
     }
     if def.metrics {
         args.push("--metrics".into());
+        structured_flags.push("--metrics");
+    }
+    if let Some(verbosity) = def.log_verbosity.filter(|v| *v <= 5) {
+        args.extend(["--log-verbosity".into(), verbosity.to_string()]);
+        structured_flags.push("--log-verbosity");
+        structured_flags.push("-lv");
     }
 
-    // Workaround for upstream metadata bug in Qwen AgentWorld / qwen35moe models
-    // where block_count is reported as 41 (due to nextn_predict_layers=1) but the
-    // weights only contain 40 blocks (0..39), causing llama.cpp to crash looking for blk.40.
+    // Workaround for upstream metadata bug in Qwen AgentWorld / qwen35moe models.
+    // Keep it structured so it can be merged with user override-kv entries.
     let model_lower = model.to_lowercase();
-    if (model_lower.contains("agentworld") || model_lower.contains("qwen35moe"))
-        && !def.extra_args.iter().any(|a| a.contains("block_count"))
-    {
-        args.extend([
-            "--override-kv".into(),
-            "qwen35moe.block_count=int:40,qwen35moe.nextn_predict_layers=int:0".into(),
+    let mut overrides = Vec::new();
+    if model_lower.contains("agentworld") || model_lower.contains("qwen35moe") {
+        overrides.extend([
+            "qwen35moe.block_count=int:40".to_string(),
+            "qwen35moe.nextn_predict_layers=int:0".to_string(),
         ]);
     }
-
-    args.extend(def.extra_args.iter().cloned());
+    let mut extra = def.extra_args.clone();
+    let mut extra_overrides = Vec::new();
+    let mut i = 0;
+    while i < extra.len() {
+        if extra[i] == "--override-kv" {
+            if let Some(value) = extra.get(i + 1) {
+                extra_overrides.extend(value.split(',').filter(|v| !v.trim().is_empty()).map(str::to_string));
+                i += 2;
+                continue;
+            }
+        } else if let Some(value) = extra[i].strip_prefix("--override-kv=") {
+            extra_overrides.extend(
+                value
+                    .split(',')
+                    .filter(|v| !v.trim().is_empty())
+                    .map(str::to_string),
+            );
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    extra.retain(|arg| arg != "--override-kv" && !arg.starts_with("--override-kv="));
+    // Structured settings win over arbitrary extra args for the same option.
+    let mut filtered_extra = Vec::with_capacity(extra.len());
+    let mut i = 0;
+    while i < extra.len() {
+        let arg = &extra[i];
+        if structured_flags.contains(&arg.as_str()) {
+            i += 1;
+            if matches!(
+                arg.as_str(),
+                "-m" | "--model" | "--host" | "--port" | "-c" | "--ctx-size"
+                    | "-ngl" | "--n-gpu-layers" | "--gpu-layers" | "--n-cpu-moe" | "-ncmoe"
+                    | "--fit" | "-fit" | "--fit-target" | "-fitt" | "--device" | "-dev"
+                    | "--api-key"
+                    | "--log-verbosity" | "-lv" | "-fa" | "--flash-attn"
+                    | "--cache-type-k" | "-ctk" | "--cache-type-v" | "-ctv"
+                    | "-t" | "--threads" | "-b" | "--batch-size" | "-ub"
+                    | "--ubatch-size" | "-np" | "--parallel"
+            ) {
+                i += 1;
+            }
+            continue;
+        }
+        filtered_extra.push(arg.clone());
+        i += 1;
+    }
+    overrides.extend(extra_overrides);
+    if !overrides.is_empty() {
+        let mut merged: Vec<(String, String)> = Vec::new();
+        for item in overrides {
+            if let Some((key, value)) = item.split_once('=') {
+                merged.retain(|(old, _)| old != key.trim());
+                merged.push((key.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        if !merged.is_empty() {
+            args.extend(["--override-kv".into(), merged.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")]);
+        }
+    }
+    args.extend(filtered_extra);
     args
 }
 
@@ -471,8 +578,22 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             i += 1;
             continue;
         }
+        if arg == "--device" && !supports("--device") && supports("--dev") {
+            filtered.push("--dev".into());
+            if let Some(value) = args.get(i + 1) {
+                filtered.push(value.clone());
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
         let supported = match arg.as_str() {
             "--n-cpu-moe" => supports("--n-cpu-moe"),
+            "--fit" => supports("--fit"),
+            "--fit-target" => supports("--fit-target"),
+            "--device" => supports("--device") || supports("--dev"),
+            "--api-key" => supports("--api-key"),
+            "--log-verbosity" => supports("--log-verbosity"),
             "--mmproj" => supports("--mmproj"),
             "-fa" => supports("-fa") || supports("--flash-attn"),
             "--cache-type-k" | "--cache-type-v" => supports(arg),
@@ -484,6 +605,11 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             if matches!(
                 arg.as_str(),
                 "--n-cpu-moe"
+                    | "--fit"
+                    | "--fit-target"
+                    | "--device"
+                    | "--log-verbosity"
+                    | "--api-key"
                     | "--mmproj"
                     | "-fa"
                     | "--cache-type-k"
@@ -507,6 +633,11 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
         } else if matches!(
             arg.as_str(),
             "--n-cpu-moe"
+                | "--fit"
+                | "--fit-target"
+                | "--device"
+                | "--api-key"
+                | "--log-verbosity"
                 | "--mmproj"
                 | "-fa"
                 | "--cache-type-k"
@@ -517,7 +648,16 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
         ) {
             if matches!(
                 arg.as_str(),
-                "--n-cpu-moe" | "--mmproj" | "-fa" | "--cache-type-k" | "--cache-type-v"
+                "--n-cpu-moe"
+                    | "--fit"
+                    | "--fit-target"
+                    | "--device"
+                    | "--api-key"
+                    | "--log-verbosity"
+                    | "--mmproj"
+                    | "-fa"
+                    | "--cache-type-k"
+                    | "--cache-type-v"
             ) {
                 i += 1;
             }
@@ -660,9 +800,11 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 cfg.gguf_dir
             );
         }
+        let help = crate::llamacpp_install::command_output(&exe, &["--help"])
+            .unwrap_or_else(|_| cfg.llamacpp_help.clone().unwrap_or_default());
         let args = filter_llamacpp_args(
-            build_llamacpp_args(&def),
-            cfg.llamacpp_help.as_deref().unwrap_or_default(),
+            build_llamacpp_args_with_help(&def, &help),
+            &help,
         );
         let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
             .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
@@ -748,12 +890,13 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     })
             };
             if let Some(exit) = exited {
-                emit_status(
-                    app.as_ref(),
+                let error = process_failure(
+                    &state_task,
                     &id_task,
-                    ServerStatus::Error,
-                    Some(format!("{backend_for_monitor} process exited ({exit})")),
+                    &backend_for_monitor,
+                    &exit.to_string(),
                 );
+                emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
                 update_status(&state_task, &id_task, ServerStatus::Error);
                 return;
             }
@@ -766,11 +909,17 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             tokio::time::sleep(HEALTH_POLL).await;
         }
         if !ok {
+            let error = process_failure(
+                &state_task,
+                &id_task,
+                &backend_for_monitor,
+                "health check timeout",
+            );
             emit_status(
                 app.as_ref(),
                 &id_task,
                 ServerStatus::Error,
-                Some("health check timed out".into()),
+                Some(error),
             );
             update_status(&state_task, &id_task, ServerStatus::Error);
             return;
@@ -840,12 +989,13 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                         return;
                     }
 
-                    emit_status(
-                        app.as_ref(),
+                    let error = process_failure(
+                        &state_task,
                         &id_task,
-                        ServerStatus::Error,
-                        Some(format!("{backend_for_monitor} process exited ({exit})")),
+                        &backend_for_monitor,
+                        &exit.to_string(),
                     );
+                    emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
                     update_status(&state_task, &id_task, ServerStatus::Error);
                 } else {
                     update_status(&state_task, &id_task, ServerStatus::Stopped);
@@ -934,6 +1084,56 @@ fn update_status(state: &Arc<AppState>, id: &str, status: ServerStatus) {
     if let Some(ls) = servers.get_mut(id) {
         ls.status = status;
     }
+
+}
+
+/// Turn an early backend exit into an actionable error instead of only
+/// reporting an opaque exit code.
+pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String {
+    let lower = log_tail.to_ascii_lowercase();
+    let hint = if lower.contains("erroroutofdevicememory")
+        || lower.contains("unable to allocate")
+        || lower.contains("failed to allocate")
+        || lower.contains("failed to fit params")
+        || lower.contains("out of memory")
+        || lower.contains("cuda error")
+        || lower.contains("insufficient memory")
+    {
+        "Remove explicit -ngl, enable automatic fit, lower the context size, or increase --n-cpu-moe."
+    } else if lower.contains("unknown argument")
+        || lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+    {
+        "The installed binary does not support one of the configured flags; reinstall/update llama.cpp or remove the unsupported extra argument."
+    } else if lower.contains("no such file")
+        || lower.contains("cannot open")
+        || lower.contains("failed to load model")
+    {
+        "Check that the GGUF path exists and that all split shards and the optional mmproj file are available."
+    } else if lower.contains("address already in use") {
+        "Choose another port or stop the process currently listening on this port."
+    } else {
+        "Open the server log for the backend's full diagnostic output."
+    };
+    let tail = log_tail
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if tail.is_empty() {
+        format!("{backend} process exited ({exit}). {hint}")
+    } else {
+        format!("{backend} process exited ({exit}). {hint}\n\nRecent log:\n{tail}")
+    }
+}
+
+fn process_failure(state: &Arc<AppState>, id: &str, backend: &str, exit: &str) -> String {
+    let tail = server_logs(state, id, 0);
+    startup_failure_hint(backend, exit, &tail)
 }
 
 /// Stop a server: SIGTERM to the WSL-side PID via pidfile, then wait; on
@@ -1170,7 +1370,7 @@ pub async fn chat_with_tools(
         (
             ls.def.port,
             ls.def.effective_model_name(),
-            state.config().advanced_settings.api_key,
+            server_api_key(state, &ls.def),
         )
     };
     let body = serde_json::json!({
@@ -1249,9 +1449,16 @@ pub fn apply_vllm_auth(
     api_key: Option<&str>,
 ) -> reqwest::RequestBuilder {
     if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
-        req = req.header("Authorization", format!("Bearer {key}"));
+        req = req.bearer_auth(key);
     }
     req
+}
+
+fn server_api_key(state: &Arc<AppState>, def: &ServerDef) -> Option<String> {
+    def.api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| state.config().advanced_settings.api_key.clone())
 }
 
 /// Issue a chat completion against an instruct server (server-side, no CORS).
@@ -1274,7 +1481,7 @@ pub async fn chat(
         "messages": messages,
         "stream": false,
     });
-    let api_key = state.config().advanced_settings.api_key.clone();
+    let api_key = server_api_key(&state, &def);
     let req = state.http.post(&url).json(&body);
     let resp = apply_vllm_auth(req, api_key.as_deref())
         .send()
@@ -1376,7 +1583,7 @@ pub async fn chat_stream(
             body["temperature"] = serde_json::json!(temp);
         }
 
-        let api_key = state.config().advanced_settings.api_key.clone();
+        let api_key = server_api_key(&state, &def);
         let req = state.http.post(&url).json(&body);
         let mut resp = apply_vllm_auth(req, api_key.as_deref())
             .send()
@@ -1549,7 +1756,7 @@ pub async fn run_benchmark(app: Option<tauri::AppHandle>, state: Arc<AppState>, 
             });
 
             let t0 = Instant::now();
-            let api_key = state.config().advanced_settings.api_key.clone();
+            let api_key = server_api_key(&state, &def);
             let req = state.http.post(&url).json(&body);
             let send_future = apply_vllm_auth(req, api_key.as_deref()).send();
 
@@ -1727,8 +1934,13 @@ mod tests {
             model_path: None,
             mmproj_path: None,
             ctx_size: None,
-            n_gpu_layers: 99,
+            n_gpu_layers: Some(99),
             n_cpu_moe: None,
+            fit: true,
+            fit_target: None,
+            device: None,
+            api_key: None,
+            log_verbosity: None,
             flash_attn: true,
             cache_type_k: "q8_0".into(),
             cache_type_v: "q8_0".into(),
@@ -1811,6 +2023,50 @@ mod tests {
         assert!(!args.contains(&"--n-cpu-moe".into()));
         assert!(args.contains(&"-fa".into()));
         assert!(args.contains(&"--metrics".into()));
+    }
+
+    #[test]
+    fn llamacpp_fit_is_capability_gated_and_targeted() {
+        let mut d = def("qwen35moe-agentworld.gguf", "instruct", 8123, "gguf", None);
+        d.backend = "llamacpp".into();
+        d.n_gpu_layers = None;
+        d.n_cpu_moe = Some(24);
+        d.fit_target = Some(1536);
+        d.extra_args = vec![
+            "--override-kv".into(),
+            "qwen35moe.block_count=int:41,custom.foo=bool:true".into(),
+        ];
+        let args = build_llamacpp_args_with_help(&d, "--fit on --fit-target MiB --device");
+        assert!(!args.contains(&"-ngl".into()));
+        assert!(args.windows(2).any(|w| w == ["--fit", "on"]));
+        assert!(args.windows(2).any(|w| w == ["--fit-target", "1536"]));
+        let override_value = args
+            .windows(2)
+            .find(|w| w[0] == "--override-kv")
+            .map(|w| w[1].clone())
+            .unwrap();
+        assert!(override_value.contains("qwen35moe.block_count=int:41"));
+        assert!(!override_value.contains("int:40"));
+        assert_eq!(override_value.matches("qwen35moe.block_count=").count(), 1);
+
+        let no_fit = build_llamacpp_args_with_help(&d, "--device --metrics");
+        assert!(!no_fit.contains(&"--fit".into()));
+        assert!(no_fit.windows(2).any(|w| w == ["--n-cpu-moe", "24"]));
+    }
+
+    #[test]
+    fn startup_failure_hint_explains_common_cuda_failure() {
+        let hint = startup_failure_hint(
+            "llamacpp",
+            "exit code: 1",
+            "W common_fit_params: failed to fit params to free device memory\n\
+             ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory\n\
+             E alloc_tensor_range: failed to allocate Vulkan1 buffer\n\
+             E llama_model_load: error loading model: unable to allocate Vulkan1 buffer",
+        );
+        assert!(hint.contains("automatic fit"));
+        assert!(hint.contains("n-cpu-moe"));
+        assert!(hint.contains("llamacpp process exited"));
     }
 
     #[test]

@@ -32,6 +32,7 @@ import type {
   BenchmarkStepPayload,
   BenchmarkCancelPayload,
   BenchmarkErrorPayload,
+  LlamacppInstallStatus,
 } from "./types";
 
 export type {
@@ -51,12 +52,8 @@ export type {
 export const api = {
   envStatus: () => invoke<EnvStatus>("env_status"),
   provision: () => invoke<ProvisionReport>("provision"),
-  installLlamacpp: () => invoke<{
-    installed: boolean;
-    tag: string | null;
-    version: string | null;
-    executable: string | null;
-  }>("install_llamacpp"),
+  installLlamacpp: () => invoke<LlamacppInstallStatus>("install_llamacpp"),
+  llamacppStatus: () => invoke<LlamacppInstallStatus>("llamacpp_status"),
   searchModels: (query: string, quant?: string) =>
     invoke<ModelWithStats[]>("search_models", { query, quant: quant ?? null }),
   searchModelsWithFit: (query: string) =>

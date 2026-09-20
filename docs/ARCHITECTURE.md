@@ -89,6 +89,8 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `metrics(id)` — GET `:port/metrics`, parse Prometheus counters `vllm:generation_tokens_total`, `vllm:prompt_tokens_total`, `vllm:num_requests_running`; delta between polls → measured tok/s (prompt+generation split), persisted to `state.rs`.
 - `chat(id, messages)` — POST `:port/v1/chat/completions` (instruct servers only) from Rust (avoids webview CORS).
 - `build_llamacpp_args` — pure mapping of persisted llama.cpp settings to `llama-server` flags; the runtime filters flags against the installed `--help` output.
+- Native launch fitting is capability-gated: `--fit on/off` and `--fit-target` are emitted only when supported, while `n_cpu_moe` remains the manual fallback. Structured settings take precedence over arbitrary extra flags, and all `--override-kv` entries (including the AgentWorld metadata workaround) are merged into one last-wins list.
+- `llamacpp_install.rs` selects live Windows CUDA release assets, installs the matching runtime archive, and probes `--list-devices`; Vulkan/CPU archives are not fallback builds. Native server requests use per-server API keys when configured.
 - Native servers use `NativeChild`, localhost health polling, persisted Windows logs, Prometheus metrics, and `servers_test_tool_call` for a small OpenAI tool-call smoke test.
 
 ### `state.rs`
@@ -98,7 +100,7 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 
 ## Tauri commands (public surface)
 `env_status`, `provision`, `search_models`, `search_models_with_fit`, `recommended_models`,
-`model_stats`, `pull_model`, `pull_status`, `install_llamacpp`, `gguf_files`, `download_gguf`,
+`model_stats`, `pull_model`, `pull_status`, `install_llamacpp`, `llamacpp_status`, `gguf_files`, `download_gguf`,
 `servers_list`, `servers_create`, `servers_delete`,
 `servers_start`, `servers_stop`, `servers_restart`, `servers_logs`, `servers_metrics`,
 `servers_chat`, `settings_get`, `settings_set`, `measured_stats`.

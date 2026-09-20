@@ -5,13 +5,14 @@ import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../a
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import { effectiveModelName } from "../types";
-import type { ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot } from "../types";
+import type { ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice } from "../types";
 
 export default function Servers() {
   const location = useLocation();
   const [rows, setRows] = useState<ServerListRow[]>([]);
   const [serverSeries, setServerSeries] = useState<Record<string, ServerMetricPoint[]>>({});
   const [gpu, setGpu] = useState<GpuSnapshot | null>(null);
+  const [llamaDevices, setLlamaDevices] = useState<LlamaDevice[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [prefillModel, setPrefillModel] = useState<string | null>(null);
   const [prefillBackend, setPrefillBackend] = useState<"vllm" | "llamacpp" | undefined>(undefined);
@@ -151,6 +152,7 @@ export default function Servers() {
   }, []);
 
   useEffect(() => {
+    api.llamacppStatus().then((status) => setLlamaDevices(status.devices ?? [])).catch(() => {});
     refresh();
     const t = setInterval(refresh, 4000);
     const unsubs = [
@@ -285,6 +287,7 @@ export default function Servers() {
       {showNew && (
         <NewServerForm
           freeGb={freeGb}
+          devices={llamaDevices}
           initialModelId={prefillModel ?? ""}
           initialBackend={prefillBackend}
           initialModelPath={prefillModelPath}
@@ -456,6 +459,16 @@ export default function Servers() {
               right={
                 <div className="flex gap-2">
                   <span className={`${statusColor(selectedRow.status)} text-sm font-medium`}>{selectedRow.status}</span>
+                  <Button
+                    variant="ghost"
+                    onClick={async () => {
+                      await navigator.clipboard.writeText(selectedLog);
+                      setCopiedId(selectedRow.def.id);
+                      setTimeout(() => setCopiedId(null), 1500);
+                    }}
+                  >
+                    {copiedId === selectedRow.def.id ? "Log copied" : "Copy log"}
+                  </Button>
                   {selectedRow.status === "running" && selectedRow.def.task === "instruct" && (
                     <>
                       <ChatButton serverId={selectedRow.def.id} port={selectedRow.def.port} model={effectiveModelName(selectedRow.def)} />
@@ -470,7 +483,24 @@ export default function Servers() {
             <div className="h-80 overflow-y-auto rounded-md bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-slate-300">
               {selectedLog ? (
                 <>
-                  <pre className="whitespace-pre-wrap">{selectedLog}</pre>
+                  <pre className="whitespace-pre-wrap">
+                    {selectedLog.split("\n").map((line, index) => {
+                      const trimmed = line.trimStart();
+                      const isError = /^E(?:\s|:)/.test(trimmed) || /\b(?:error|failed|unable to allocate)\b/i.test(trimmed);
+                      const isWarning = /^W(?:\s|:)/.test(trimmed);
+                      const isCors = /cors is set to allow all origins|no api key is set/i.test(line);
+                      return (
+                        <span
+                          key={index}
+                          className={isError && !isCors ? "text-red-300" : isCors || isWarning ? "text-amber-300/80" : /^I(?:\s|:)/.test(trimmed) ? "text-slate-500" : "text-slate-300"}
+                          title={isCors ? "Informational: this only matters if the localhost port is reachable from another machine." : undefined}
+                        >
+                          {line}
+                          {"\n"}
+                        </span>
+                      );
+                    })}
+                  </pre>
                   <div ref={(el) => { if (selected) logEndRefs.current[selected] = el; }} />
                 </>
               ) : (
@@ -527,6 +557,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function NewServerForm({
   freeGb,
+  devices = [],
   initialModelId = "",
   initialBackend,
   initialModelPath,
@@ -543,6 +574,7 @@ function NewServerForm({
   onErr,
 }: {
   freeGb?: number | null;
+  devices?: LlamaDevice[];
   initialModelId?: string;
   initialBackend?: "vllm" | "llamacpp";
   initialModelPath?: string;
@@ -587,8 +619,15 @@ function NewServerForm({
   const [modelPath, setModelPath] = useState(initialModelPath || "");
   const [mmprojPath, setMmprojPath] = useState("");
   const [ctxSize, setCtxSize] = useState("");
-  const [nGpuLayers, setNGpuLayers] = useState("99");
+  const [nGpuLayers, setNGpuLayers] = useState("");
   const [nCpuMoe, setNCpuMoe] = useState("");
+  const [fit, setFit] = useState(true);
+  const [fitTarget, setFitTarget] = useState("");
+  const [device, setDevice] = useState(
+    () => devices.find((candidate) => candidate.backend.toLowerCase() === "cuda")?.id ?? ""
+  );
+  const [apiKey, setApiKey] = useState("");
+  const [logVerbosity, setLogVerbosity] = useState("");
   const [flashAttn, setFlashAttn] = useState(true);
   const [jinja, setJinja] = useState(true);
   const [moePresetApplied, setMoePresetApplied] = useState(false);
@@ -666,16 +705,21 @@ function NewServerForm({
         name: name.trim() || chosenModelId.split("/").pop() || "server",
         task,
         quant,
-        gpu_mem_util: parseFloat(gpuUtil) || 0.85,
-        max_model_len: maxLen ? parseInt(maxLen, 10) : undefined,
-        swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
-        cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
-        served_model_name: served.trim() || undefined,
+        gpu_mem_util: backend === "vllm" ? parseFloat(gpuUtil) || 0.85 : undefined,
+        max_model_len: backend === "vllm" && maxLen ? parseInt(maxLen, 10) : undefined,
+        swap_space_gb: backend === "vllm" && parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
+        cpu_offload_gb: backend === "vllm" && parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
+        served_model_name: backend === "vllm" ? served.trim() || undefined : undefined,
         model_path: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : undefined,
         mmproj_path: backend === "llamacpp" ? (mmprojPath.trim() || undefined) : undefined,
         ctx_size: backend === "llamacpp" ? parseInt(ctxSize, 10) || undefined : undefined,
-        n_gpu_layers: backend === "llamacpp" ? parseInt(nGpuLayers, 10) || 99 : undefined,
+        n_gpu_layers: backend === "llamacpp" && nGpuLayers.trim() ? parseInt(nGpuLayers, 10) : undefined,
         n_cpu_moe: backend === "llamacpp" ? parseInt(nCpuMoe, 10) || undefined : undefined,
+        fit: backend === "llamacpp" ? fit : undefined,
+        fit_target: backend === "llamacpp" && fitTarget.trim() ? parseInt(fitTarget, 10) : undefined,
+        device: backend === "llamacpp" ? (device.trim() || undefined) : undefined,
+        api_key: backend === "llamacpp" ? (apiKey.trim() || undefined) : undefined,
+        log_verbosity: backend === "llamacpp" && logVerbosity.trim() ? parseInt(logVerbosity, 10) : undefined,
         flash_attn: backend === "llamacpp" ? flashAttn : undefined,
         jinja: backend === "llamacpp" ? jinja : undefined,
       });
@@ -690,7 +734,7 @@ function NewServerForm({
   return (
     <Card className="border-indigo-500/30">
       <CardTitle>Define new server</CardTitle>
-      {freeGb !== null && freeGb !== undefined && freeGb < 1.0 && (
+      {backend === "vllm" && freeGb !== null && freeGb !== undefined && freeGb < 1.0 && (
         <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
           ⚠️ <strong>VRAM Pressure:</strong> Current free VRAM is only {freeGb.toFixed(1)} GB. Consider configuring Swap Space or CPU Offload below to avoid OOM errors.
         </div>
@@ -771,35 +815,85 @@ function NewServerForm({
         </Field>}
         {backend === "llamacpp" && (
           <>
+            {nGpuLayers.trim() && fit && (
+              <div className="sm:col-span-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                Explicit <code>-ngl</code> disables llama.cpp automatic fitting. Clear GPU layers to let fit choose automatically.
+              </div>
+            )}
             {!moePresetApplied && (
               <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-                <div>
-                  <div className="text-sm font-medium text-indigo-200">MoE with CPU expert offload</div>
-                  <div className="text-xs text-slate-400">Starting point for large GGUF MoE models on limited VRAM.</div>
+              <div>
+                <div className="text-sm font-medium text-indigo-200">MoE presets</div>
+                <div className="text-xs text-slate-400">Choose automatic fitting or tune manual CPU expert offload.</div>
+              </div>
+              <div className="flex gap-2">
+              <Button
+                variant="subtle"
+                onClick={() => {
+                  setNGpuLayers("");
+                  setNCpuMoe("");
+                  setCtxSize("32768");
+                  setFit(true);
+                  setFitTarget("1024");
+                  setFlashAttn(true);
+                  setJinja(true);
+                  setMoePresetApplied(true);
+                }}
+              >
+                MoE auto-fit
+              </Button>
+              <Button
+                variant="subtle"
+                onClick={() => {
+                  setNGpuLayers("99");
+                  setNCpuMoe("24");
+                  setCtxSize("32768");
+                  setFlashAttn(true);
+                  setJinja(true);
+                  setMoePresetApplied(true);
+                }}
+              >
+                MoE manual offload
+              </Button>
                 </div>
-                <Button
-                  variant="subtle"
-                  onClick={() => {
-                    setNGpuLayers("99");
-                    setNCpuMoe("24");
-                    setCtxSize("32768");
-                    setFlashAttn(true);
-                    setJinja(true);
-                    setMoePresetApplied(true);
-                  }}
-                >
-                  Apply preset
-                </Button>
               </div>
             )}
             <Field label="Context size">
               <input className={inputCls} value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} />
             </Field>
             <Field label="GPU layers (-ngl)">
-              <input className={inputCls} value={nGpuLayers} onChange={(e) => setNGpuLayers(e.target.value)} />
+              <input className={inputCls} placeholder="auto" value={nGpuLayers} onChange={(e) => setNGpuLayers(e.target.value)} />
             </Field>
             <Field label="CPU MoE layers">
               <input className={inputCls} value={nCpuMoe} onChange={(e) => setNCpuMoe(e.target.value)} />
+            </Field>
+            <Field label="Device(s)" hint="Optional llama.cpp device ids, e.g. CUDA0 or CUDA0,CUDA1.">
+              <input className={inputCls} list="llamacpp-devices" placeholder="auto" value={device} onChange={(e) => setDevice(e.target.value)} />
+              <datalist id="llamacpp-devices">
+                {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </datalist>
+            </Field>
+            <Field label="Fit target (MiB)" hint="Memory margin per device when --fit is supported.">
+              <input className={inputCls} placeholder="1024" value={fitTarget} onChange={(e) => setFitTarget(e.target.value)} />
+            </Field>
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={fit} onChange={(e) => setFit(e.target.checked)} /> Automatic memory fit (when supported)
+            </label>
+            <Field label="API key (optional)" hint="Used for requests sent to this native endpoint.">
+              <div className="flex gap-1.5">
+                <input type="password" className={inputCls} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+                <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => setApiKey(crypto.randomUUID().replaceAll("-", ""))}>
+                  Generate
+                </Button>
+                {apiKey && (
+                  <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => navigator.clipboard.writeText(apiKey)}>
+                    Copy
+                  </Button>
+                )}
+              </div>
+            </Field>
+            <Field label="Log verbosity (0–5)" hint="llama.cpp: 0 generic, 1 error, 2 warning, 3 info, 4 trace, 5 debug.">
+              <input className={inputCls} placeholder="3" value={logVerbosity} onChange={(e) => setLogVerbosity(e.target.value)} />
             </Field>
             <Field label="mmproj path (optional)">
               <input className={inputCls} value={mmprojPath} onChange={(e) => setMmprojPath(e.target.value)} />
@@ -812,84 +906,65 @@ function NewServerForm({
             </label>
           </>
         )}
-        <Field
-          label="Max model len (blank = auto)"
-          hint={
-            (vramContextLimit ?? 0) > 0
-              ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit!)} tokens | RAM Swap: > ${fmtNum(vramContextLimit!)} tokens`
-              : "Context ceiling in tokens. If exceeding VRAM, RAM swap space will be used."
-          }
-        >
-          <input
-            className={inputCls}
-            placeholder={
-              (vramContextLimit ?? 0) > 0
-                ? (initialMaxLen && initialMaxLen > vramContextLimit!
-                    ? `auto (~${fmtNum(vramContextLimit!)} VRAM ➔ ~${fmtNum(initialMaxLen)} RAM)`
-                    : `auto (~${fmtNum(vramContextLimit!)} VRAM)`)
-                : "auto (context ∩ VRAM fit)"
-            }
-            value={maxLen}
-            onChange={(e) => setMaxLen(e.target.value)}
-          />
-          {(vramContextLimit ?? 0) > 0 && (
-            <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-              <span className="inline-flex items-center gap-1 text-emerald-400">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                VRAM: ≤{fmtNum(vramContextLimit!)}
-              </span>
-              <span className="text-slate-600">➔</span>
-              <span className="inline-flex items-center gap-1 text-cyan-400">
-                <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-                RAM Swap: {initialMaxLen && initialMaxLen > vramContextLimit! ? `up to ~${fmtNum(initialMaxLen)} tokens` : `>${fmtNum(vramContextLimit!)}`}
-              </span>
-              {maxLen && parseInt(maxLen, 10) > vramContextLimit! && (
-                <span className="text-[11px] font-semibold text-cyan-300 ml-auto">
-                  (Uses RAM swap)
-                </span>
+        {backend === "vllm" && (
+          <>
+            <Field
+              label="Max model len (blank = auto)"
+              hint={
+                (vramContextLimit ?? 0) > 0
+                  ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit!)} tokens | RAM Swap: > ${fmtNum(vramContextLimit!)} tokens`
+                  : "Context ceiling in tokens. If exceeding VRAM, RAM swap space will be used."
+              }
+            >
+              <input
+                className={inputCls}
+                placeholder={
+                  (vramContextLimit ?? 0) > 0
+                    ? initialMaxLen && initialMaxLen > vramContextLimit!
+                      ? `auto (~${fmtNum(vramContextLimit!)} VRAM ➔ ~${fmtNum(initialMaxLen)} RAM)`
+                      : `auto (~${fmtNum(vramContextLimit!)} VRAM)`
+                    : "auto (context ∩ VRAM fit)"
+                }
+                value={maxLen}
+                onChange={(e) => setMaxLen(e.target.value)}
+              />
+              {(vramContextLimit ?? 0) > 0 && (
+                <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+                  <span className="inline-flex items-center gap-1 text-emerald-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    VRAM: ≤{fmtNum(vramContextLimit!)}
+                  </span>
+                  <span className="text-slate-600">➔</span>
+                  <span className="inline-flex items-center gap-1 text-cyan-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                    RAM Swap: {initialMaxLen && initialMaxLen > vramContextLimit! ? `up to ~${fmtNum(initialMaxLen)} tokens` : `>${fmtNum(vramContextLimit!)}`
+                    }
+                  </span>
+                  {maxLen && parseInt(maxLen, 10) > vramContextLimit! && (
+                    <span className="text-[11px] font-semibold text-cyan-300 ml-auto">(Uses RAM swap)</span>
+                  )}
+                </div>
               )}
-            </div>
-          )}
-          {(vramContextLimit ?? 0) === 0 && (initialMaxLen ?? 0) > 0 && (
-            <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-              <span className="inline-flex items-center gap-1 text-amber-400">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                RAM Context: up to ~{fmtNum(initialMaxLen!)} tokens (CPU Offload)
-              </span>
-            </div>
-          )}
-        </Field>
-        <Field
-          label="RAM Swap Space (GB)"
-          hint="vLLM RAM offload (--kv-offloading-size). Allocates system RAM for spilled KV cache blocks."
-        >
-          <input
-            type="number"
-            step="1"
-            min="0"
-            className={inputCls}
-            placeholder="0 (e.g. 16, 32)"
-            value={swapSpaceGb}
-            onChange={(e) => setSwapSpaceGb(e.target.value)}
-          />
-        </Field>
-        <Field
-          label="CPU Weight Offload (GB)"
-          hint="vLLM --cpu-offload-gb. Offloads model parameter weights to CPU RAM."
-        >
-          <input
-            type="number"
-            step="1"
-            min="0"
-            className={inputCls}
-            placeholder="0 (e.g. 8)"
-            value={cpuOffloadGb}
-            onChange={(e) => setCpuOffloadGb(e.target.value)}
-          />
-        </Field>
-        <Field label="Served model name (optional)">
-          <input className={inputCls} placeholder="blank = model id" value={served} onChange={(e) => setServed(e.target.value)} />
-        </Field>
+              {(vramContextLimit ?? 0) === 0 && (initialMaxLen ?? 0) > 0 && (
+                <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+                  <span className="inline-flex items-center gap-1 text-amber-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    RAM Context: up to ~{fmtNum(initialMaxLen!)} tokens (CPU Offload)
+                  </span>
+                </div>
+              )}
+            </Field>
+            <Field label="RAM Swap Space (GB)" hint="vLLM RAM offload (--kv-offloading-size). Allocates system RAM for spilled KV cache blocks.">
+              <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 16, 32)" value={swapSpaceGb} onChange={(e) => setSwapSpaceGb(e.target.value)} />
+            </Field>
+            <Field label="CPU Weight Offload (GB)" hint="vLLM --cpu-offload-gb. Offloads model parameter weights to CPU RAM.">
+              <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 8)" value={cpuOffloadGb} onChange={(e) => setCpuOffloadGb(e.target.value)} />
+            </Field>
+            <Field label="Served model name (optional)">
+              <input className={inputCls} placeholder="blank = model id" value={served} onChange={(e) => setServed(e.target.value)} />
+            </Field>
+          </>
+        )}
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
