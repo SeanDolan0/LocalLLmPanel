@@ -1343,13 +1343,22 @@ pub fn compose_library_remove_script(model_id: &str) -> String {
 dir="$HOME/.cache/huggingface/hub/{dir_name}"
 rm -rf "$dir"
 # Prune unreferenced blob files
-find "$HOME/.cache/huggingface/hub/blobs" -type f 2>/dev/null | while read -r blob; do
-    # If no symlink in hub targets this blob hash, delete it
-    hash=$(basename "$blob")
-    if ! grep -rq "$hash" "$HOME/.cache/huggingface/hub/models--"*/snapshots 2>/dev/null; then
-        rm -f "$blob"
+if [ -d "$HOME/.cache/huggingface/hub/blobs" ]; then
+    shopt -s nullglob
+    snaps=("$HOME/.cache/huggingface/hub/models--"*/snapshots)
+    if [ ${{#snaps[@]}} -eq 0 ]; then
+        rm -f "$HOME/.cache/huggingface/hub/blobs"/*
+    else
+        ref=$(find "${{snaps[@]}}" -type l -exec readlink {{}} + 2>/dev/null | sed 's#.*/##' | sort -u)
+        for blob in "$HOME/.cache/huggingface/hub/blobs"/*; do
+            [ -f "$blob" ] || continue
+            hash=$(basename "$blob")
+            if ! echo "$ref" | grep -qx "$hash"; then
+                rm -f "$blob"
+            fi
+        done
     fi
-done
+fi
 echo ok
 "#,
         dir_name = dir_name
@@ -2025,5 +2034,7 @@ mod tests {
         let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B");
         assert!(script.contains("models--Qwen--Qwen2.5-0.5B"));
         assert!(script.contains("hub/blobs"));
+        assert!(script.contains("readlink"));
+        assert!(script.contains("snaps"));
     }
 }
