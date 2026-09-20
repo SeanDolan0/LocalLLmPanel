@@ -46,14 +46,22 @@ pub fn run() {
                             }
                         }
                         "stop_all" => {
-                            let state: tauri::State<Arc<AppState>> = app.state();
-                            let server_ids: Vec<String> = {
-                                let srvs = state.servers.lock().unwrap();
-                                srvs.keys().cloned().collect()
-                            };
-                            for id in server_ids {
-                                let _ = crate::server::stop_server(&state, Some(app), &id);
-                            }
+                            let app_handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let state: tauri::State<Arc<AppState>> = app_handle.state();
+                                let server_ids: Vec<String> = {
+                                    let srvs = state.servers.lock().unwrap();
+                                    srvs.keys().cloned().collect()
+                                };
+                                for id in server_ids {
+                                    let st = Arc::clone(&state);
+                                    let handle = app_handle.clone();
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        crate::server::stop_server(&st, Some(&handle), &id)
+                                    })
+                                    .await;
+                                }
+                            });
                         }
                         _ => {}
                     })
