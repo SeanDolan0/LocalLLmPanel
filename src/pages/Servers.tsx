@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
@@ -13,6 +14,8 @@ export default function Servers() {
   const [gpu, setGpu] = useState<GpuSnapshot | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [prefillModel, setPrefillModel] = useState<string | null>(null);
+  const [prefillBackend, setPrefillBackend] = useState<"vllm" | "llamacpp" | undefined>(undefined);
+  const [prefillModelPath, setPrefillModelPath] = useState<string | undefined>(undefined);
   const [prefillQuant, setPrefillQuant] = useState<string | null>(null);
   const [prefillSwapSpace, setPrefillSwapSpace] = useState<number | undefined>(undefined);
   const [prefillCpuOffload, setPrefillCpuOffload] = useState<number | undefined>(undefined);
@@ -38,6 +41,8 @@ export default function Servers() {
 
   const clearPrefills = () => {
     setPrefillModel(null);
+    setPrefillBackend(undefined);
+    setPrefillModelPath(undefined);
     setPrefillQuant(null);
     setPrefillSwapSpace(undefined);
     setPrefillCpuOffload(undefined);
@@ -84,6 +89,8 @@ export default function Servers() {
   useEffect(() => {
     const state = location.state as {
       prefillModel?: string;
+      prefillBackend?: "vllm" | "llamacpp";
+      prefillModelPath?: string;
       prefillQuant?: string;
       prefillSwapSpace?: number;
       prefillCpuOffload?: number;
@@ -92,6 +99,12 @@ export default function Servers() {
     } | null;
     if (state?.prefillModel) {
       setPrefillModel(state.prefillModel);
+      if (state.prefillBackend) {
+        setPrefillBackend(state.prefillBackend);
+      }
+      if (state.prefillModelPath) {
+        setPrefillModelPath(state.prefillModelPath);
+      }
       if (state.prefillQuant) {
         setPrefillQuant(state.prefillQuant);
       }
@@ -273,6 +286,8 @@ export default function Servers() {
         <NewServerForm
           freeGb={freeGb}
           initialModelId={prefillModel ?? ""}
+          initialBackend={prefillBackend}
+          initialModelPath={prefillModelPath}
           initialQuant={prefillQuant ?? undefined}
           initialSwapSpace={prefillSwapSpace}
           initialCpuOffload={prefillCpuOffload}
@@ -513,6 +528,8 @@ function Stat({ label, value }: { label: string; value: string }) {
 function NewServerForm({
   freeGb,
   initialModelId = "",
+  initialBackend,
+  initialModelPath,
   initialQuant,
   initialSwapSpace,
   initialCpuOffload,
@@ -527,6 +544,8 @@ function NewServerForm({
 }: {
   freeGb?: number | null;
   initialModelId?: string;
+  initialBackend?: "vllm" | "llamacpp";
+  initialModelPath?: string;
   initialQuant?: string;
   initialSwapSpace?: number;
   initialCpuOffload?: number;
@@ -539,10 +558,20 @@ function NewServerForm({
   onCancel: () => void;
   onErr: (e: string) => void;
 }) {
+  const isInitialGguf =
+    initialBackend === "llamacpp" ||
+    initialQuant?.toUpperCase() === "GGUF" ||
+    (initialModelId
+      ? initialModelId.toUpperCase().includes("GGUF") || initialModelId.toLowerCase().endsWith(".gguf")
+      : false) ||
+    Boolean(initialModelPath);
+
   const [modelId, setModelId] = useState(initialModelId);
   const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
   const [task, setTask] = useState<"instruct" | "embed">(initialTask || "instruct");
-  const [backend, setBackend] = useState<"vllm" | "llamacpp">("vllm");
+  const [backend, setBackend] = useState<"vllm" | "llamacpp">(
+    initialBackend || (isInitialGguf ? "llamacpp" : "vllm")
+  );
   const [quant, setQuant] = useState(initialQuant || "fp16");
   const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.85");
   const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
@@ -555,7 +584,7 @@ function NewServerForm({
   const [vramContextLimit, setVramContextLimit] = useState<number | undefined>(initialVramContext);
   const [served, setServed] = useState(initialServed || "");
   const [creating, setCreating] = useState(false);
-  const [modelPath, setModelPath] = useState("");
+  const [modelPath, setModelPath] = useState(initialModelPath || "");
   const [mmprojPath, setMmprojPath] = useState("");
   const [ctxSize, setCtxSize] = useState("");
   const [nGpuLayers, setNGpuLayers] = useState("99");
@@ -568,6 +597,14 @@ function NewServerForm({
     if (initialModelId) {
       setModelId(initialModelId);
       setName(initialModelId.split("/").pop() || "");
+    }
+    if (initialBackend) {
+      setBackend(initialBackend);
+    } else if (isInitialGguf) {
+      setBackend("llamacpp");
+    }
+    if (initialModelPath) {
+      setModelPath(initialModelPath);
     }
     if (initialQuant) {
       setQuant(initialQuant);
@@ -595,6 +632,9 @@ function NewServerForm({
     }
   }, [
     initialModelId,
+    initialBackend,
+    initialModelPath,
+    isInitialGguf,
     initialQuant,
     initialSwapSpace,
     initialCpuOffload,
@@ -606,15 +646,24 @@ function NewServerForm({
   ]);
 
   const submit = async () => {
-    if (!modelId.trim()) return;
+    const chosenModelId = modelId.trim();
+    const chosenModelPath = modelPath.trim();
+    if (backend === "llamacpp") {
+      if (!chosenModelPath && !chosenModelId.toLowerCase().endsWith(".gguf")) {
+        onErr("Please select or provide a path to a .gguf model file for llama.cpp.");
+        return;
+      }
+    } else {
+      if (!chosenModelId) return;
+    }
     setCreating(true);
     try {
       const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
       const s = await api.serversCreate({
         backend,
-        model_id: modelId.trim(),
-        name: name.trim() || modelId.split("/").pop() || "server",
+        model_id: chosenModelId || chosenModelPath,
+        name: name.trim() || chosenModelId.split("/").pop() || "server",
         task,
         quant,
         gpu_mem_util: parseFloat(gpuUtil) || 0.85,
@@ -622,7 +671,7 @@ function NewServerForm({
         swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
         cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
         served_model_name: served.trim() || undefined,
-        model_path: backend === "llamacpp" ? (modelPath.trim() || modelId.trim()) : undefined,
+        model_path: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : undefined,
         mmproj_path: backend === "llamacpp" ? (mmprojPath.trim() || undefined) : undefined,
         ctx_size: backend === "llamacpp" ? parseInt(ctxSize, 10) || undefined : undefined,
         n_gpu_layers: backend === "llamacpp" ? parseInt(nGpuLayers, 10) || 99 : undefined,
@@ -654,14 +703,51 @@ function NewServerForm({
           </select>
         </Field>
         <Field label={backend === "llamacpp" ? "GGUF model path" : "Model id (HF)"}>
-          <input className={inputCls} placeholder={backend === "llamacpp" ? "C:\\models\\model-Q4_K_M.gguf" : "Qwen/Qwen2.5-0.5B-Instruct"} value={backend === "llamacpp" ? modelPath : modelId} onChange={(e) => {
-            if (backend === "llamacpp") {
-              setModelPath(e.target.value);
-              setModelId(e.target.value);
-            } else {
-              setModelId(e.target.value);
-            }
-          }} />
+          {backend === "llamacpp" ? (
+            <div className="flex gap-1.5">
+              <input
+                className={inputCls}
+                placeholder="C:\models\model-Q4_K_M.gguf"
+                value={modelPath}
+                onChange={(e) => {
+                  setModelPath(e.target.value);
+                  if (!name) {
+                    setName(e.target.value.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
+                  }
+                }}
+              />
+              <Button
+                variant="ghost"
+                className="shrink-0 px-3 text-xs"
+                onClick={async () => {
+                  try {
+                    const selected = await open({
+                      title: "Select GGUF model file",
+                      filters: [{ name: "GGUF models", extensions: ["gguf"] }],
+                    });
+                    if (selected && typeof selected === "string") {
+                      setModelPath(selected);
+                      if (!modelId) setModelId(selected);
+                      if (!name) {
+                        setName(selected.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
+                      }
+                    }
+                  } catch (err) {
+                    console.error("Failed to open file dialog", err);
+                  }
+                }}
+              >
+                Browse…
+              </Button>
+            </div>
+          ) : (
+            <input
+              className={inputCls}
+              placeholder="Qwen/Qwen2.5-0.5B-Instruct"
+              value={modelId}
+              onChange={(e) => setModelId(e.target.value)}
+            />
+          )}
         </Field>
         <Field label="Name (optional)">
           <input className={inputCls} placeholder="coder-0.5b" value={name} onChange={(e) => setName(e.target.value)} />

@@ -260,6 +260,7 @@ export interface LibraryEntry {
   in_use_server?: string | null;
   task?: string | null;
   is_local?: boolean;
+  model_path?: string | null;
 }
 
 export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";

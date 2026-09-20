@@ -252,6 +252,135 @@ pub fn build_start_command_with_advanced(
     launch_script("~/llm-lp/.venv", def, hf_token, adv)
 }
 
+/// Resolve a user-supplied model identifier or path to an existing GGUF file.
+/// Checks:
+/// 1. Direct file path on disk
+/// 2. Files inside `gguf_dir` directly or in subdirectories
+/// 3. Matching downloaded repositories inside the WSL Hugging Face cache
+pub fn resolve_gguf_model_path(
+    model_raw: &str,
+    gguf_dir: &str,
+    distro: &str,
+) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(model_raw);
+    if p.is_file() {
+        return Some(p.to_path_buf());
+    }
+
+    let gguf_root = std::path::Path::new(gguf_dir);
+    if gguf_root.is_dir() {
+        let direct = gguf_root.join(model_raw);
+        if direct.is_file() {
+            return Some(direct);
+        }
+
+        let leaf_name = model_raw.rsplit('/').next().unwrap_or(model_raw);
+        let repo_dir = gguf_root.join(leaf_name);
+        if repo_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&repo_dir) {
+                let mut ggufs: Vec<_> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension()
+                            .and_then(|x| x.to_str())
+                            .map(|x| x.eq_ignore_ascii_case("gguf"))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                ggufs.sort();
+                if let Some(first) = ggufs.into_iter().next() {
+                    return Some(first);
+                }
+            }
+        }
+
+        if let Ok(entries) = std::fs::read_dir(gguf_root) {
+            for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+                let dir_name = entry.file_name().to_string_lossy().to_lowercase();
+                let leaf_lower = leaf_name.to_lowercase();
+                if dir_name.contains(&leaf_lower) || leaf_lower.contains(&dir_name) {
+                    if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
+                        let mut ggufs: Vec<_> = sub_entries
+                            .flatten()
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.extension()
+                                    .and_then(|x| x.to_str())
+                                    .map(|x| x.eq_ignore_ascii_case("gguf"))
+                                    .unwrap_or(false)
+                            })
+                            .collect();
+                        ggufs.sort();
+                        if let Some(first) = ggufs.into_iter().next() {
+                            return Some(first);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check WSL Hugging Face cache (UNC path)
+    if !distro.is_empty() {
+        let hf_folder_name = format!("models--{}", model_raw.replace('/', "--"));
+        let wsl_unc_base = format!(r"\\wsl.localhost\{distro}");
+        let wsl_home = std::path::PathBuf::from(&wsl_unc_base).join("home");
+        if let Ok(users) = std::fs::read_dir(&wsl_home) {
+            for user in users.flatten().filter(|e| e.path().is_dir()) {
+                let model_hub = user
+                    .path()
+                    .join(".cache")
+                    .join("huggingface")
+                    .join("hub")
+                    .join(&hf_folder_name);
+                if model_hub.is_dir() {
+                    let blobs_dir = model_hub.join("blobs");
+                    let snapshots_dir = model_hub.join("snapshots");
+                    if snapshots_dir.is_dir() {
+                        if let Ok(snaps) = std::fs::read_dir(&snapshots_dir) {
+                            for snap in snaps.flatten().filter(|e| e.path().is_dir()) {
+                                if let Ok(snap_files) = std::fs::read_dir(snap.path()) {
+                                    for sf in snap_files.flatten() {
+                                        let sf_name =
+                                            sf.file_name().to_string_lossy().to_lowercase();
+                                        if sf_name.ends_with(".gguf") {
+                                            if let Ok(target) = std::fs::read_link(sf.path()) {
+                                                let full_target = snap.path().join(target);
+                                                if full_target.is_file() {
+                                                    return Some(full_target);
+                                                }
+                                            }
+                                            if blobs_dir.is_dir() {
+                                                if let Ok(blobs) = std::fs::read_dir(&blobs_dir) {
+                                                    let mut sorted_blobs: Vec<_> = blobs
+                                                        .flatten()
+                                                        .map(|b| b.path())
+                                                        .collect();
+                                                    sorted_blobs.sort_by_key(|p| {
+                                                        p.metadata().map(|m| m.len()).unwrap_or(0)
+                                                    });
+                                                    if let Some(biggest) =
+                                                        sorted_blobs.into_iter().next_back()
+                                                    {
+                                                        return Some(biggest);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Build native llama-server arguments without shell quoting.
 ///
 /// Capability filtering is applied by the installer/runtime layer; this
@@ -306,6 +435,22 @@ pub fn build_llamacpp_args(def: &ServerDef) -> Vec<String> {
     if def.metrics {
         args.push("--metrics".into());
     }
+
+    // Workaround for upstream metadata bug in Qwen AgentWorld / qwen35moe models
+    // where block_count is reported as 41 (due to nextn_predict_layers=1) but the
+    // weights only contain 40 blocks (0..39), causing llama.cpp to crash looking for blk.40.
+    let model_lower = model.to_lowercase();
+    if (model_lower.contains("agentworld") || model_lower.contains("qwen35moe"))
+        && !def.extra_args.iter().any(|a| a.contains("block_count"))
+    {
+        args.extend([
+            "--override-kv".into(),
+            "qwen35moe.block_count=int:40".into(),
+            "--override-kv".into(),
+            "qwen35moe.nextn_predict_layers=int:0".into(),
+        ]);
+    }
+
     args.extend(def.extra_args.iter().cloned());
     args
 }
@@ -354,6 +499,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "-b"
                     | "-ub"
                     | "-np"
+                    | "--override-kv"
             ) {
                 if let Some(value) = args.get(i + 1) {
                     filtered.push(value.clone());
@@ -506,6 +652,16 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     let (wsl_child, native_child, wsl_pid) = if def.backend == "llamacpp" {
         let exe = crate::llamacpp_install::executable_from_config(&cfg)
             .ok_or_else(|| anyhow!("llama-server.exe is not installed or configured"))?;
+        let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
+        let mut def = def.clone();
+        if let Some(resolved) = resolve_gguf_model_path(raw_model, &cfg.gguf_dir, &distro) {
+            def.model_path = Some(resolved.to_string_lossy().into_owned());
+        } else if !std::path::Path::new(raw_model).is_file() {
+            bail!(
+                "GGUF model file not found for '{raw_model}'. Please provide a valid path to a .gguf file or ensure the model is downloaded to your GGUF directory ({}).",
+                cfg.gguf_dir
+            );
+        }
         let args = filter_llamacpp_args(
             build_llamacpp_args(&def),
             cfg.llamacpp_help.as_deref().unwrap_or_default(),

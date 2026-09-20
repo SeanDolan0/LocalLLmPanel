@@ -1627,6 +1627,9 @@ pub struct LibraryEntry {
     /// than a HuggingFace hub cache download.
     #[serde(default)]
     pub is_local: bool,
+    /// Absolute Windows file path for native GGUF models.
+    #[serde(default)]
+    pub model_path: Option<String>,
 }
 
 /// List models present in the WSL HF cache (~/.cache/huggingface/hub).
@@ -1718,6 +1721,7 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
                 in_use_server,
                 task,
                 is_local: false,
+                model_path: None,
             });
         }
         let mut local =
@@ -1743,7 +1747,7 @@ fn scan_native_gguf_library(
         return entries;
     };
     for repo in repos.flatten().filter(|e| e.path().is_dir()) {
-        let files: Vec<_> = std::fs::read_dir(repo.path())
+        let mut files: Vec<_> = std::fs::read_dir(repo.path())
             .into_iter()
             .flatten()
             .flatten()
@@ -1752,6 +1756,8 @@ fn scan_native_gguf_library(
         if files.is_empty() {
             continue;
         }
+        files.sort_by_key(|f| f.path());
+        let main_file = files.first().map(|f| f.path().to_string_lossy().into_owned());
         let size_mb = files
             .iter()
             .filter_map(|e| e.metadata().ok())
@@ -1774,6 +1780,7 @@ fn scan_native_gguf_library(
             in_use_server,
             task: Some("instruct".into()),
             is_local: true,
+            model_path: main_file,
         });
     }
     entries
@@ -1927,6 +1934,7 @@ done
             in_use_server,
             task: Some("instruct".into()),
             is_local: true,
+            model_path: None,
         });
     }
     entries
@@ -1965,6 +1973,7 @@ pub async fn library_import_local(
                 in_use_server: None,
                 task: Some("instruct".into()),
                 is_local: true,
+                model_path: Some(target.to_string_lossy().into_owned()),
             });
         }
         let wsl_path = crate::wsl::windows_to_wsl_path(&path);
@@ -2040,6 +2049,7 @@ pub async fn library_import_local(
             in_use_server,
             task: Some("instruct".into()),
             is_local: true,
+            model_path: None,
         })
     })
     .await
@@ -2714,6 +2724,7 @@ mod tests {
             in_use_server: None,
             task: Some("instruct".to_string()),
             is_local: false,
+            model_path: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: LibraryEntry = serde_json::from_str(&json).unwrap();

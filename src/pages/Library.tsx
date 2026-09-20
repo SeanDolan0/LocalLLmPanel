@@ -366,7 +366,19 @@ export default function Library() {
                     variant="ghost"
                     className="text-xs"
                     disabled={pull?.state === "downloading"}
-                    onClick={() => navigate("/servers", { state: { prefillModel: e.model_id } })}
+                    onClick={() =>
+                      navigate("/servers", {
+                        state: {
+                          prefillModel: e.model_id,
+                          prefillBackend:
+                            e.quant?.toUpperCase() === "GGUF" || e.model_id.toUpperCase().includes("GGUF")
+                              ? "llamacpp"
+                              : undefined,
+                          prefillModelPath: e.model_path || undefined,
+                          prefillQuant: e.quant || undefined,
+                        },
+                      })
+                    }
                   >
                     Deploy →
                   </Button>
