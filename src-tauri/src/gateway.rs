@@ -178,16 +178,6 @@ pub fn is_head_terminated(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn not_found_payload(model: &str) -> String {
-    serde_json::json!({
-        "error": {
-            "message": format!("no running instruction server for model '{model}'"),
-            "type": "invalid_request_error",
-        }
-    })
-    .to_string()
-}
-
 fn running_model_names(
     servers: &BTreeMap<String, crate::state::LiveServer>,
     task: &str,
@@ -263,6 +253,9 @@ async fn route(
     head: &RequestHead,
     body: &[u8],
 ) -> Result<(), String> {
+    if head.method.as_str() == "OPTIONS" {
+        return write_response(stream, 204, "text/plain", b"").await;
+    }
     match (head.method.as_str(), head.target.as_str()) {
         ("GET", "/v1/models") => {
             let text = {
@@ -271,6 +264,9 @@ async fn route(
                 payload.to_string()
             };
             write_response(stream, 200, "application/json", text.as_bytes()).await
+        }
+        ("GET", "/health") => {
+            write_response(stream, 200, "application/json", b"{\"status\":\"ok\"}").await
         }
         ("POST", "/v1/chat/completions") => {
             let model = model_from_body(body)
@@ -282,11 +278,60 @@ async fn route(
             match port {
                 Some(port) => proxy_chat(stream, state, port, body).await,
                 None => {
+                    let running =
+                        running_model_names(&state.servers.lock().unwrap(), "instruct");
                     write_response(
                         stream,
                         404,
                         "application/json",
-                        not_found_payload(&model).as_bytes(),
+                        not_found_payload_with_hint(&model, "instruction", &running)
+                            .as_bytes(),
+                    )
+                    .await
+                }
+            }
+        }
+        ("POST", "/v1/completions") => {
+            let model = model_from_body(body)
+                .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
+            let port = {
+                let servers = state.servers.lock().unwrap();
+                find_server_port_for_model(&servers, &model)
+            };
+            match port {
+                Some(port) => proxy_post(stream, state, port, "/v1/completions", body).await,
+                None => {
+                    let running =
+                        running_model_names(&state.servers.lock().unwrap(), "instruct");
+                    write_response(
+                        stream,
+                        404,
+                        "application/json",
+                        not_found_payload_with_hint(&model, "instruction", &running)
+                            .as_bytes(),
+                    )
+                    .await
+                }
+            }
+        }
+        ("POST", "/v1/embeddings") => {
+            let model = model_from_body(body)
+                .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
+            let port = {
+                let servers = state.servers.lock().unwrap();
+                find_server_port_for_embed(&servers, &model)
+            };
+            match port {
+                Some(port) => proxy_post(stream, state, port, "/v1/embeddings", body).await,
+                None => {
+                    let running =
+                        running_model_names(&state.servers.lock().unwrap(), "embed");
+                    write_response(
+                        stream,
+                        404,
+                        "application/json",
+                        not_found_payload_with_hint(&model, "embedding", &running)
+                            .as_bytes(),
                     )
                     .await
                 }
@@ -307,6 +352,7 @@ async fn write_response(
 ) -> Result<(), String> {
     let reason = match status {
         200 => "OK",
+        204 => "No Content",
         404 => "Not Found",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
@@ -680,6 +726,14 @@ mod tests {
         assert_eq!(model_from_body(body).as_deref(), Some("qwen-7b"));
         assert_eq!(model_from_body(br#"{"msg":"no model"}"#), None);
         assert_eq!(model_from_body(b"not json at all"), None);
+    }
+
+    #[test]
+    fn test_model_from_body_preserves_fim_suffix() {
+        let body = br#"{"model":"qwen-7b","prompt":"def f(","suffix":"):\n pass","stream":false}"#;
+        assert_eq!(model_from_body(body).as_deref(), Some("qwen-7b"));
+        let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(v["suffix"], "):\n pass");
     }
 
     #[test]
