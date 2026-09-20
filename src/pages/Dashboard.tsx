@@ -11,6 +11,8 @@ export default function Dashboard() {
   const [provisioning, setProvisioning] = useState(false);
   const [provisionErr, setProvisionErr] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [installingLlamacpp, setInstallingLlamacpp] = useState(false);
+  const [llamacppErr, setLlamacppErr] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -70,6 +72,19 @@ export default function Dashboard() {
     }
   };
 
+  const installLlamacpp = async () => {
+    setInstallingLlamacpp(true);
+    setLlamacppErr(null);
+    try {
+      await api.installLlamacpp();
+      refresh();
+    } catch (e) {
+      setLlamacppErr(String(e));
+    } finally {
+      setInstallingLlamacpp(false);
+    }
+  };
+
   const rep: ProvisionReport | null = env?.report ?? null;
   const gpu = env?.gpu ?? null;
   const vramPct = gpu && gpu.vram_total_mb > 0 ? Math.round((1 - gpu.vram_free_mb / gpu.vram_total_mb) * 100) : 0;
@@ -87,11 +102,17 @@ export default function Dashboard() {
           <Button onClick={runProvision} disabled={provisioning}>
             {provisioning ? <Spinner label="Provisioning…" /> : "⚡ Provision WSL"}
           </Button>
+          <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
+            {installingLlamacpp ? <Spinner label="Installing…" /> : "Install llama.cpp"}
+          </Button>
         </div>
       </div>
 
       {provisionErr && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{provisionErr}</div>
+      )}
+      {llamacppErr && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{llamacppErr}</div>
       )}
 
       {/* VRAM Pressure Alert */}
@@ -111,6 +132,18 @@ export default function Dashboard() {
 
       {/* Health row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardTitle>llama.cpp</CardTitle>
+          <div className="space-y-1.5 text-sm">
+            <div className="flex items-center gap-2">
+              <span className={`h-2 w-2 rounded-full ${env?.llamacpp_installed ? "bg-emerald-400" : "bg-amber-400"}`} />
+              <span className="font-medium text-slate-200">
+                {env?.llamacpp_installed ? "installed" : "not installed"}
+              </span>
+            </div>
+            <div className="text-xs text-slate-500">{env?.llamacpp_version ?? "Native Windows backend"}</div>
+          </div>
+        </Card>
         <Card>
           <CardTitle>WSL</CardTitle>
           {env ? (

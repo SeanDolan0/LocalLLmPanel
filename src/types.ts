@@ -35,6 +35,10 @@ export interface EnvStatus {
   available_ram_gb?: number | null;
   ram_bandwidth_gbps?: number | null;
   providers_detected?: string[];
+  llamacpp_installed?: boolean;
+  llamacpp_tag?: string | null;
+  llamacpp_version?: string | null;
+  llamacpp_executable?: string | null;
 }
 
 export interface ModelWithStats {
@@ -89,6 +93,7 @@ export interface MeasuredStats {
 }
 
 export interface ServerDef {
+  backend: "vllm" | "llamacpp";
   id: string;
   name: string;
   model_id: string;
@@ -103,6 +108,22 @@ export interface ServerDef {
   swap_space_gb?: number | null;
   cpu_offload_gb?: number | null;
   was_running?: boolean;
+  model_path?: string | null;
+  mmproj_path?: string | null;
+  ctx_size?: number | null;
+  n_gpu_layers: number;
+  n_cpu_moe?: number | null;
+  flash_attn: boolean;
+  cache_type_k: string;
+  cache_type_v: string;
+  threads?: number | null;
+  batch_size?: number | null;
+  ubatch_size?: number | null;
+  parallel: number;
+  jinja: boolean;
+  no_kv_offload: boolean;
+  metrics: boolean;
+  extra_args: string[];
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -152,6 +173,11 @@ export interface Settings {
   distro: string;
   llm_dir: string;
   venv_dir: string;
+  llamacpp_dir: string;
+  gguf_dir: string;
+  llamacpp_executable?: string | null;
+  llamacpp_installed_tag?: string | null;
+  llamacpp_version?: string | null;
   hf_token: string;
   default_quant: string;
   servers: ServerDef[];
@@ -187,6 +213,7 @@ export interface ServerLogEvent {
 }
 
 export interface CreateServerInput {
+  backend?: "vllm" | "llamacpp";
   name: string;
   model_id: string;
   task?: string;
@@ -198,6 +225,22 @@ export interface CreateServerInput {
   enforce_eager?: boolean;
   swap_space_gb?: number | null;
   cpu_offload_gb?: number | null;
+  model_path?: string;
+  mmproj_path?: string;
+  ctx_size?: number;
+  n_gpu_layers?: number;
+  n_cpu_moe?: number;
+  flash_attn?: boolean;
+  cache_type_k?: string;
+  cache_type_v?: string;
+  threads?: number;
+  batch_size?: number;
+  ubatch_size?: number;
+  parallel?: number;
+  jinja?: boolean;
+  no_kv_offload?: boolean;
+  metrics?: boolean;
+  extra_args?: string[];
 }
 
 export interface WslConfigInfo {

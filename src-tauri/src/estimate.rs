@@ -108,7 +108,21 @@ pub fn tokens_per_sec(bandwidth_gbs: f64, params_b: f64, quant: &str) -> f64 {
     if bytes_per_token <= 0.0 {
         return 0.0;
     }
+
     bandwidth_gbs * 1e9 * 0.5 / bytes_per_token
+}
+
+/// Rough decode estimate for GGUF MoE expert offload. Expert traffic is
+/// constrained by host memory bandwidth rather than GPU bandwidth.
+pub fn llamacpp_moe_tokens_per_sec(
+    ram_bandwidth_gbs: f64,
+    active_params_b: f64,
+    total_file_gb: f64,
+) -> f64 {
+    if ram_bandwidth_gbs <= 0.0 || active_params_b <= 0.0 || total_file_gb <= 0.0 {
+        return 0.0;
+    }
+    ram_bandwidth_gbs * 1e9 * 0.35 / (active_params_b * 1e9).max(total_file_gb * 1e9 * 0.05)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -567,6 +581,12 @@ pub fn parse_params_from_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moe_cpu_offload_estimate_is_ram_bandwidth_bound() {
+        assert!(llamacpp_moe_tokens_per_sec(117.0, 3.0, 21.0) > 0.0);
+        assert_eq!(llamacpp_moe_tokens_per_sec(0.0, 3.0, 21.0), 0.0);
+    }
     use serde_json::json;
 
     #[test]

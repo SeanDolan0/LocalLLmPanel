@@ -144,6 +144,9 @@ export default function Settings() {
         distro: s.distro,
         llm_dir: s.llm_dir,
         venv_dir: s.venv_dir,
+        llamacpp_dir: s.llamacpp_dir,
+        gguf_dir: s.gguf_dir,
+        llamacpp_executable: s.llamacpp_executable,
         hf_token: s.hf_token,
         default_quant: s.default_quant,
         advanced_settings: s.advanced_settings,
@@ -653,6 +656,45 @@ export default function Settings() {
                   className={inputCls}
                   value={s.venv_dir}
                   onChange={(e) => setS({ ...s, venv_dir: e.target.value })}
+                />
+              </Field>
+
+              <Field
+                label="llama.cpp Directory"
+                hint="Windows folder containing the installed CUDA llama-server build."
+              >
+                <input
+                  className={inputCls}
+                  value={s.llamacpp_dir}
+                  onChange={(e) => setS({ ...s, llamacpp_dir: e.target.value })}
+                />
+              </Field>
+
+              <Field
+                label="GGUF Model Directory"
+                hint="Windows folder used by native GGUF downloads and library scanning."
+              >
+                <input
+                  className={inputCls}
+                  value={s.gguf_dir}
+                  onChange={(e) => setS({ ...s, gguf_dir: e.target.value })}
+                />
+              </Field>
+
+              <Field
+                label="Custom llama-server.exe"
+                hint="Optional absolute path; leave blank to use the installed build."
+              >
+                <input
+                  className={inputCls}
+                  placeholder="C:\\path\\to\\llama-server.exe"
+                  value={s.llamacpp_executable ?? ""}
+                  onChange={(e) =>
+                    setS({
+                      ...s,
+                      llamacpp_executable: e.target.value.trim() || null,
+                    })
+                  }
                 />
               </Field>
 

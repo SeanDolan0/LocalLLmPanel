@@ -3,6 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -251,6 +252,137 @@ pub fn build_start_command_with_advanced(
     launch_script("~/llm-lp/.venv", def, hf_token, adv)
 }
 
+/// Build native llama-server arguments without shell quoting.
+///
+/// Capability filtering is applied by the installer/runtime layer; this
+/// function intentionally maps the persisted configuration deterministically.
+pub fn build_llamacpp_args(def: &ServerDef) -> Vec<String> {
+    let mut args = Vec::new();
+    let model = def.model_path.as_deref().unwrap_or(&def.model_id);
+    args.extend(["-m".into(), model.into()]);
+    if let Some(mmproj) = def.mmproj_path.as_deref().filter(|p| !p.is_empty()) {
+        args.extend(["--mmproj".into(), mmproj.into()]);
+    }
+    args.extend([
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        def.port.to_string(),
+    ]);
+    if let Some(ctx) = def.ctx_size.filter(|v| *v > 0) {
+        args.extend(["-c".into(), ctx.to_string()]);
+    }
+    args.extend(["-ngl".into(), def.n_gpu_layers.to_string()]);
+    if let Some(n) = def.n_cpu_moe {
+        args.extend(["--n-cpu-moe".into(), n.to_string()]);
+    }
+    if def.flash_attn {
+        args.extend(["-fa".into(), "on".into()]);
+    }
+    if !def.cache_type_k.is_empty() {
+        args.extend(["--cache-type-k".into(), def.cache_type_k.clone()]);
+    }
+    if !def.cache_type_v.is_empty() {
+        args.extend(["--cache-type-v".into(), def.cache_type_v.clone()]);
+    }
+    if let Some(threads) = def.threads.filter(|v| *v > 0) {
+        args.extend(["-t".into(), threads.to_string()]);
+    }
+    if let Some(batch) = def.batch_size.filter(|v| *v > 0) {
+        args.extend(["-b".into(), batch.to_string()]);
+    }
+    if let Some(ubatch) = def.ubatch_size.filter(|v| *v > 0) {
+        args.extend(["-ub".into(), ubatch.to_string()]);
+    }
+    if def.parallel > 0 {
+        args.extend(["-np".into(), def.parallel.to_string()]);
+    }
+    if def.jinja {
+        args.push("--jinja".into());
+    }
+    if def.no_kv_offload {
+        args.push("--no-kv-offload".into());
+    }
+    if def.metrics {
+        args.push("--metrics".into());
+    }
+    args.extend(def.extra_args.iter().cloned());
+    args
+}
+
+/// Remove options that are not present in the installed llama-server build.
+/// llama.cpp changes option spellings between releases, so persisted configs
+/// must not make an older binary fail before it can print a useful error.
+pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
+    let supports = |flag: &str| help.contains(flag);
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-fa" && !supports("-fa") && supports("--flash-attn") {
+            filtered.push("--flash-attn".into());
+            if let Some(value) = args.get(i + 1) {
+                filtered.push(value.clone());
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        let supported = match arg.as_str() {
+            "--n-cpu-moe" => supports("--n-cpu-moe"),
+            "--mmproj" => supports("--mmproj"),
+            "-fa" => supports("-fa") || supports("--flash-attn"),
+            "--cache-type-k" | "--cache-type-v" => supports(arg),
+            "--no-kv-offload" | "--metrics" | "--jinja" => supports(arg),
+            _ => true,
+        };
+        if supported {
+            filtered.push(arg.clone());
+            if matches!(
+                arg.as_str(),
+                "--n-cpu-moe"
+                    | "--mmproj"
+                    | "-fa"
+                    | "--cache-type-k"
+                    | "--cache-type-v"
+                    | "-m"
+                    | "--host"
+                    | "--port"
+                    | "-c"
+                    | "-ngl"
+                    | "-t"
+                    | "-b"
+                    | "-ub"
+                    | "-np"
+            ) {
+                if let Some(value) = args.get(i + 1) {
+                    filtered.push(value.clone());
+                    i += 1;
+                }
+            }
+        } else if matches!(
+            arg.as_str(),
+            "--n-cpu-moe"
+                | "--mmproj"
+                | "-fa"
+                | "--cache-type-k"
+                | "--cache-type-v"
+                | "--no-kv-offload"
+                | "--metrics"
+                | "--jinja"
+        ) {
+            if matches!(
+                arg.as_str(),
+                "--n-cpu-moe" | "--mmproj" | "-fa" | "--cache-type-k" | "--cache-type-v"
+            ) {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    filtered
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -313,7 +445,8 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     // and NCCL distributed environment buffers take ~1,300-1,400 MB of VRAM BEFORE vLLM checks
     // free memory against requested utilization (init_snapshot.free_memory >= total * util).
     let mut vram_notice: Option<String> = None;
-    if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
+    if def.backend == "vllm" {
+        if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
         if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
             let startup_overhead_mb = 1400.0;
             let available_mb = (snap.vram_free_mb as f64 - startup_overhead_mb).max(0.0);
@@ -334,15 +467,29 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     "[LocalLLmPanel] Free VRAM is {} MB / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} (accounting for PyTorch/NCCL startup buffers) to prevent startup crash.",
                     snap.vram_free_mb, snap.vram_total_mb, (snap.vram_free_mb as f64 / snap.vram_total_mb as f64) * 100.0, orig, def.gpu_mem_util
                 ));
+                }
             }
         }
     }
 
-    let script = launch_script(&cfg.venv_dir, &def, &cfg.hf_token, &cfg.advanced_settings);
     let id_log = id.to_string();
     let state_log = Arc::clone(state);
     let app_ev = app.map(|a| (*a).clone());
+    let log_path = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("local-llm-panel")
+        .join("logs")
+        .join(format!("{id}.log"));
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or_else(|| Path::new(".")));
     let log_cb = move |line: String| {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
         if let Some(ls) = state_log.servers.lock().unwrap().get_mut(&id_log) {
             ls.log_ring.lock().unwrap().push(line.clone());
         }
@@ -356,9 +503,23 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             );
         }
     };
-    let child = wsl::WslChild::spawn(&distro, &script, log_cb)
-        .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
-    let wsl_pid = child.pid();
+    let (wsl_child, native_child, wsl_pid) = if def.backend == "llamacpp" {
+        let exe = crate::llamacpp_install::executable_from_config(&cfg)
+            .ok_or_else(|| anyhow!("llama-server.exe is not installed or configured"))?;
+        let args = filter_llamacpp_args(
+            build_llamacpp_args(&def),
+            cfg.llamacpp_help.as_deref().unwrap_or_default(),
+        );
+        let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
+            .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
+        (None, Some(child), None)
+    } else {
+        let script = launch_script(&cfg.venv_dir, &def, &cfg.hf_token, &cfg.advanced_settings);
+        let child = wsl::WslChild::spawn(&distro, &script, log_cb)
+            .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
+        let pid = child.pid();
+        (Some(child), None, Some(pid))
+    };
 
     let existing_retry = {
         let servers = state.servers.lock().unwrap();
@@ -386,8 +547,9 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 def: def.clone(),
                 status: ServerStatus::Starting,
                 error: None,
-                wsl_child: Some(child),
-                wsl_pid: Some(wsl_pid),
+                wsl_child,
+                native_child,
+                wsl_pid,
                 log_ring: std::sync::Mutex::new(log_ring),
                 last_metrics: None,
                 stopping: false,
@@ -410,6 +572,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     let state_task = Arc::clone(state);
     let id_task = id.to_string();
     let model_for_metrics = def.model_id.clone();
+    let backend_for_monitor = def.backend.clone();
     tauri::async_runtime::spawn(async move {
         let url = format!("http://127.0.0.1:{}/health", def.port);
         let mut ok = false;
@@ -419,15 +582,23 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 let mut servers = state_task.servers.lock().unwrap();
                 servers
                     .get_mut(&id_task)
-                    .and_then(|ls| ls.wsl_child.as_mut())
-                    .and_then(|c| c.try_wait().ok().flatten())
+                    .and_then(|ls| {
+                        ls.wsl_child
+                            .as_mut()
+                            .and_then(|c| c.try_wait().ok().flatten())
+                            .or_else(|| {
+                                ls.native_child
+                                    .as_mut()
+                                    .and_then(|c| c.try_wait().ok().flatten())
+                            })
+                    })
             };
             if let Some(exit) = exited {
                 emit_status(
                     app.as_ref(),
                     &id_task,
                     ServerStatus::Error,
-                    Some(format!("vLLM process exited ({exit})")),
+                    Some(format!("{backend_for_monitor} process exited ({exit})")),
                 );
                 update_status(&state_task, &id_task, ServerStatus::Error);
                 return;
@@ -472,8 +643,16 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 let mut ls = servers.get_mut(&id_task);
                 let exit = ls
                     .as_mut()
-                    .and_then(|ls| ls.wsl_child.as_mut())
-                    .and_then(|c| c.try_wait().ok().flatten());
+                    .and_then(|ls| {
+                        ls.wsl_child
+                            .as_mut()
+                            .and_then(|c| c.try_wait().ok().flatten())
+                            .or_else(|| {
+                                ls.native_child
+                                    .as_mut()
+                                    .and_then(|c| c.try_wait().ok().flatten())
+                            })
+                    });
                 let stopping = ls.map(|ls| ls.stopping).unwrap_or(false);
                 (exit, stopping)
             };
@@ -511,7 +690,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                         app.as_ref(),
                         &id_task,
                         ServerStatus::Error,
-                        Some(format!("vLLM process exited ({exit})")),
+                        Some(format!("{backend_for_monitor} process exited ({exit})")),
                     );
                     update_status(&state_task, &id_task, ServerStatus::Error);
                 } else {
@@ -608,34 +787,36 @@ fn update_status(state: &Arc<AppState>, id: &str, status: ServerStatus) {
 pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
     let distro = state.resolve_distro();
-    let mut child = {
+    let (mut wsl_child, mut native_child) = {
         let mut servers = state.servers.lock().unwrap();
         match servers.get_mut(id) {
             Some(ls) if ls.status != ServerStatus::Stopped => {
                 ls.stopping = true;
-                ls.wsl_child.take()
+                (ls.wsl_child.take(), ls.native_child.take())
             }
             // Already stopped — idempotent no-op.
-            _ => None,
+            _ => (None, None),
         }
     };
 
-    // 1) SIGTERM on the WSL side (graceful: vLLM drains in-flight requests).
-    let pid_from_file = wsl::run_script(
-        &distro,
-        &format!("cat {}/../run/{id}.pid 2>/dev/null || true", cfg.venv_dir),
-    );
+    // 1) Ask the backend process to terminate gracefully.
     let mut term_ok = false;
-    if let Some(pid) = pid_from_file.stdout.trim().parse::<u32>().ok() {
-        let kill = wsl::run_script(
+    if wsl_child.is_some() {
+        let pid_from_file = wsl::run_script(
             &distro,
-            &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"),
+            &format!("cat {}/../run/{id}.pid 2>/dev/null || true", cfg.venv_dir),
         );
-        term_ok = kill.stdout.contains("killed");
+        if let Some(pid) = pid_from_file.stdout.trim().parse::<u32>().ok() {
+            let kill = wsl::run_script(
+                &distro,
+                &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"),
+            );
+            term_ok = kill.stdout.contains("killed");
+        }
     }
 
     // 2) Wait up to 30s for the child to exit on its own.
-    if let Some(c) = child.as_mut() {
+    if let Some(c) = wsl_child.as_mut() {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if let Ok(Some(_)) = c.try_wait() {
@@ -656,8 +837,23 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
                 .args(["/T", "/F", "/PID", &c.pid().to_string()])
                 .status();
         }
-        if let Some(c) = child.take() {
+        if let Some(c) = wsl_child.take() {
             let mut c = c;
+            c.join();
+        }
+    }
+    if let Some(c) = native_child.as_mut() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = c.try_wait() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        if c.try_wait().map(|r| r.is_none()).unwrap_or(false) {
+            let _ = c.kill();
+        }
+        if let Some(mut c) = native_child.take() {
             c.join();
         }
     }
@@ -668,6 +864,7 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
         if let Some(ls) = servers.get_mut(id) {
             ls.status = ServerStatus::Stopped;
             ls.wsl_child = None;
+            ls.native_child = None;
             ls.wsl_pid = None;
             ls.error = None;
             ls.last_metrics = None;
@@ -744,6 +941,7 @@ pub fn parse_metrics(text: &str) -> Option<Metrics> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+
         let Some((name, value)) = line.split_once(' ') else {
             continue;
         };
@@ -751,7 +949,10 @@ pub fn parse_metrics(text: &str) -> Option<Metrics> {
             continue;
         };
         match name {
-            "vllm:num_requests_running" | "vllm:num_requests_running_gauge" => {
+            "vllm:num_requests_running"
+            | "vllm:num_requests_running_gauge"
+            | "llama_requests_processing"
+            | "llamacpp_requests_processing" => {
                 m.running = val as u64;
                 saw = true;
             }
@@ -759,11 +960,22 @@ pub fn parse_metrics(text: &str) -> Option<Metrics> {
                 m.waiting = val as u64;
                 saw = true;
             }
-            "vllm:prompt_tokens_total" | "vllm:prompt_tokens_succeeded_total" => {
+            "vllm:prompt_tokens_total"
+            | "vllm:prompt_tokens_succeeded_total"
+            | "llama_prompt_tokens_total"
+            | "llama_prompt_tokens"
+            | "llamacpp_prompt_tokens_total"
+            | "llamacpp_prompt_tokens" => {
                 m.total_prompt_tokens = val as u64;
                 saw = true;
             }
-            "vllm:generation_tokens_total" | "vllm:generation_tokens_succeeded_total" => {
+            "vllm:generation_tokens_total"
+            | "vllm:generation_tokens_succeeded_total"
+            | "llama_generation_tokens_total"
+            | "llama_tokens_predicted_total"
+            | "llama_generation_tokens"
+            | "llamacpp_tokens_predicted_total"
+            | "llamacpp_generation_tokens_total" => {
                 m.total_generation_tokens = val as u64;
                 saw = true;
             }
@@ -771,18 +983,68 @@ pub fn parse_metrics(text: &str) -> Option<Metrics> {
                 m.total_generation_tokens += val as u64;
                 saw = true;
             }
-            "vllm:request_success_total" | "vllm:requests_succeeded_total" => {
+            "vllm:request_success_total"
+            | "vllm:requests_succeeded_total"
+            | "llama_requests_total"
+            | "llama_requests_completed_total"
+            | "llamacpp_requests_total"
+            | "llamacpp_requests_completed_total" => {
                 m.requests = val as u64;
                 saw = true;
             }
             _ => {}
         }
     }
+
     if saw {
         Some(m)
     } else {
         None
     }
+}
+
+pub async fn chat_with_tools(
+    state: &Arc<AppState>,
+    server_id: &str,
+    messages: Vec<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let (port, model, api_key) = {
+        let servers = state.servers.lock().unwrap();
+        let ls = servers
+            .get(server_id)
+            .ok_or_else(|| anyhow!("unknown server {server_id}"))?;
+        (
+            ls.def.port,
+            ls.def.effective_model_name(),
+            state.config().advanced_settings.api_key,
+        )
+    };
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": 64,
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"]
+                }
+            }
+        }],
+        "tool_choice": "auto"
+    });
+    let mut request = state
+        .http
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&body);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    Ok(request.send().await?.error_for_status()?.json().await?)
 }
 
 fn now_ms() -> u64 {
@@ -1293,6 +1555,7 @@ mod tests {
 
     fn def(model: &str, task: &str, port: u16, quant: &str, served: Option<&str>) -> ServerDef {
         ServerDef {
+            backend: "vllm".into(),
             id: "s1".into(),
             name: "test".into(),
             model_id: model.into(),
@@ -1307,6 +1570,22 @@ mod tests {
             swap_space_gb: None,
             cpu_offload_gb: None,
             was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: 99,
+            n_cpu_moe: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
         }
     }
 
@@ -1327,6 +1606,73 @@ mod tests {
         assert!(!script.contains("--runner pooling"));
         assert!(!script.contains("--quantization"));
         assert!(!script.contains("export HF_TOKEN="));
+    }
+
+    #[test]
+    fn llamacpp_args_include_defaults_and_optionals() {
+        let mut d = def("model.gguf", "instruct", 8123, "gguf", None);
+        d.backend = "llamacpp".into();
+        d.model_path = Some("C:\\models\\model.gguf".into());
+        d.mmproj_path = Some("C:\\models\\mmproj.gguf".into());
+        d.ctx_size = Some(32768);
+        d.n_cpu_moe = Some(24);
+        d.threads = Some(12);
+        d.batch_size = Some(512);
+        d.ubatch_size = Some(128);
+        d.extra_args = vec!["--no-mmap".into(), "--verbose".into()];
+        let args = build_llamacpp_args(&d);
+        assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "C:\\models\\model.gguf"));
+        assert!(args.windows(2).any(|w| w[0] == "--mmproj" && w[1] == "C:\\models\\mmproj.gguf"));
+        assert!(args.windows(2).any(|w| w[0] == "--n-cpu-moe" && w[1] == "24"));
+        assert!(args.windows(2).any(|w| w[0] == "-fa" && w[1] == "on"));
+        assert!(args.ends_with(&["--no-mmap".into(), "--verbose".into()]));
+    }
+
+    #[test]
+    fn llamacpp_args_omit_unset_optional_values() {
+        let mut d = def("model.gguf", "instruct", 8123, "gguf", None);
+        d.backend = "llamacpp".into();
+        d.flash_attn = false;
+        d.jinja = false;
+        d.metrics = false;
+        d.parallel = 0;
+        d.cache_type_k.clear();
+        d.cache_type_v.clear();
+        let args = build_llamacpp_args(&d);
+        assert!(!args.contains(&"-fa".into()));
+        assert!(!args.contains(&"--jinja".into()));
+        assert!(!args.contains(&"--metrics".into()));
+        assert!(!args.contains(&"-np".into()));
+    }
+
+    #[test]
+    fn llamacpp_args_follow_installed_help_capabilities() {
+        let mut d = def("model.gguf", "instruct", 8123, "gguf", None);
+        d.backend = "llamacpp".into();
+        d.n_cpu_moe = Some(24);
+        let args = filter_llamacpp_args(
+            build_llamacpp_args(&d),
+            "  -m FNAME  --host HOST  --port PORT  -ngl N  -c N\n  -fa on\n  --metrics\n  --jinja\n",
+        );
+        assert!(!args.contains(&"--n-cpu-moe".into()));
+        assert!(args.contains(&"-fa".into()));
+        assert!(args.contains(&"--metrics".into()));
+    }
+
+    #[test]
+    fn llamacpp_metrics_sample_is_parsed() {
+        let sample = r#"
+# HELP llama_tokens_predicted_total Tokens generated
+llama_tokens_predicted_total 42
+llama_prompt_tokens 18
+llama_requests_completed_total 2
+llama_requests_processing 1
+"#;
+        let metrics = parse_metrics(sample).expect("llama metrics should be recognized");
+        assert_eq!(metrics.total_generation_tokens, 42);
+        assert_eq!(metrics.total_prompt_tokens, 18);
+        assert_eq!(metrics.requests, 2);
+        assert_eq!(metrics.running, 1);
     }
 
     #[test]

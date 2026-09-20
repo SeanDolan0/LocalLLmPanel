@@ -19,6 +19,76 @@ use crate::wsl;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[test]
+#[ignore]
+fn llamacpp_it() {
+    if std::env::var("LLM_TEST_LLAMACPP").is_err() {
+        eprintln!("skipped: LLM_TEST_LLAMACPP not set");
+        return;
+    }
+    let exe = std::env::var("LLM_TEST_LLAMACPP_EXE")
+        .expect("LLM_TEST_LLAMACPP_EXE must point to llama-server.exe");
+    let model = std::env::var("LLM_TEST_LLAMACPP_MODEL")
+        .expect("LLM_TEST_LLAMACPP_MODEL must point to a tiny GGUF");
+    let port = 8199u16;
+    let def = ServerDef {
+        backend: "llamacpp".into(),
+        id: "it-llamacpp".into(),
+        name: "llama.cpp integration".into(),
+        model_id: model.clone(),
+        task: "instruct".into(),
+        port,
+        gpu_mem_util: 0.8,
+        max_model_len: None,
+        quant: "GGUF".into(),
+        served_model_name: None,
+        enforce_eager: false,
+        params_b: None,
+        swap_space_gb: None,
+        cpu_offload_gb: None,
+        was_running: false,
+        model_path: Some(model.clone()),
+        mmproj_path: None,
+        ctx_size: Some(512),
+        n_gpu_layers: 99,
+        n_cpu_moe: None,
+        flash_attn: true,
+        cache_type_k: "q8_0".into(),
+        cache_type_v: "q8_0".into(),
+        threads: Some(4),
+        batch_size: Some(128),
+        ubatch_size: Some(64),
+        parallel: 1,
+        jinja: true,
+        no_kv_offload: false,
+        metrics: true,
+        extra_args: Vec::new(),
+    };
+    let mut child = crate::wsl::NativeChild::spawn(
+        std::path::Path::new(&exe),
+        &server::build_llamacpp_args(&def),
+        |_| {},
+    )
+    .expect("spawn llama-server");
+    let client = http();
+    wait_health(&client, port, 300);
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello briefly."}],
+            "max_tokens": 8
+        }))
+        .send()
+        .expect("chat request")
+        .error_for_status()
+        .expect("chat response");
+    assert!(response.json::<serde_json::Value>().is_ok());
+    child.kill().expect("kill llama-server");
+    child.join();
+    assert!(child.try_wait().expect("wait llama-server").is_some());
+}
+
 /// Must match the WSL distro the user picks in Settings (here: the default).
 const DISTRO: &str = "Ubuntu-22.04";
 const VENV_DIR: &str = "~/llm-lp/.venv";
@@ -85,6 +155,7 @@ fn wsl_it() {
         cfg.venv_dir = VENV_DIR.to_string();
         cfg.servers.clear();
         cfg.servers.push(ServerDef {
+            backend: "vllm".into(),
             id: "it-qwen".into(),
             name: "qwen-0.5b".into(),
             model_id: "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -99,8 +170,25 @@ fn wsl_it() {
             swap_space_gb: None,
             cpu_offload_gb: None,
             was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: 99,
+            n_cpu_moe: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
         });
         cfg.servers.push(ServerDef {
+            backend: "vllm".into(),
             id: "it-bge".into(),
             name: "bge-small".into(),
             model_id: "BAAI/bge-small-en-v1.5".into(),
@@ -115,6 +203,22 @@ fn wsl_it() {
             swap_space_gb: None,
             cpu_offload_gb: None,
             was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: 99,
+            n_cpu_moe: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
         });
         cfg.save().expect("save config");
     }

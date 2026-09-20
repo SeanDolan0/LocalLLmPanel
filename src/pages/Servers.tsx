@@ -23,9 +23,11 @@ export default function Servers() {
   const [prefillTask, setPrefillTask] = useState<"instruct" | "embed" | undefined>(undefined);
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
   const [showImportRecipe, setShowImportRecipe] = useState(false);
   const [recipeInput, setRecipeInput] = useState("");
   const [recipeErr, setRecipeErr] = useState<string | null>(null);
+  const [toolResults, setToolResults] = useState<Record<string, string>>({});
 
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
@@ -320,6 +322,7 @@ export default function Servers() {
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-slate-500 group-hover:text-slate-400">
                     <span>{r.def.model_id}</span>
+                    <span className="text-indigo-300">{r.def.backend === "llamacpp" ? "llama.cpp · Windows" : "vLLM · WSL2"}</span>
                     <span>·</span>
                     <span>port {r.def.port}</span>
                     <span>·</span>
@@ -359,8 +362,27 @@ export default function Servers() {
                   {r.status === "running" && r.def.task === "instruct" && (
                     <>
                       <ChatButton serverId={r.def.id} port={r.def.port} model={effectiveModelName(r.def)} />
+                      <Button variant="subtle" onClick={async () => {
+                        try {
+                          const result = await api.serversTestToolCall(r.def.id);
+                          setToolResults((prev) => ({ ...prev, [r.def.id]: result.passed ? "Tool call passed" : `Failed: ${result.hint}\n${JSON.stringify(result.response)}` }));
+                        } catch (e) {
+                          setToolResults((prev) => ({ ...prev, [r.def.id]: `Tool call error: ${String(e)}` }));
+                        }
+                      }}>
+                        Test tool calling
+                      </Button>
                       <BenchmarkButton serverId={r.def.id} model={effectiveModelName(r.def)} />
                     </>
+                  )}
+                  {r.status === "running" && (
+                    <Button variant="ghost" onClick={async () => {
+                      await navigator.clipboard.writeText(`http://127.0.0.1:${r.def.port}/v1`);
+                      setCopiedUrlId(r.def.id);
+                      setTimeout(() => setCopiedUrlId(null), 2000);
+                    }}>
+                      {copiedUrlId === r.def.id ? "URL copied" : "Copy API URL"}
+                    </Button>
                   )}
                   {r.status === "running" && (
                     <Button variant="ghost" disabled={busy === r.def.id} onClick={() => act(r.def.id, () => api.serversRestart(r.def.id))}>
@@ -382,6 +404,9 @@ export default function Servers() {
                 </div>
               </div>
               {r.error && <div className="mt-2 text-xs text-red-300">{r.error}</div>}
+              {toolResults[r.def.id] && (
+                <pre className="mt-2 whitespace-pre-wrap rounded-md border border-edge bg-surface p-2 text-[11px] text-slate-300">{toolResults[r.def.id]}</pre>
+              )}
               {r.metrics && r.status === "running" && (
                 <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500 sm:grid-cols-4">
                   <div>gen tok: <span className="text-slate-300">{fmtNum(r.metrics.total_generation_tokens)}</span></div>
@@ -517,6 +542,7 @@ function NewServerForm({
   const [modelId, setModelId] = useState(initialModelId);
   const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
   const [task, setTask] = useState<"instruct" | "embed">(initialTask || "instruct");
+  const [backend, setBackend] = useState<"vllm" | "llamacpp">("vllm");
   const [quant, setQuant] = useState(initialQuant || "fp16");
   const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.85");
   const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
@@ -529,6 +555,13 @@ function NewServerForm({
   const [vramContextLimit, setVramContextLimit] = useState<number | undefined>(initialVramContext);
   const [served, setServed] = useState(initialServed || "");
   const [creating, setCreating] = useState(false);
+  const [modelPath, setModelPath] = useState("");
+  const [mmprojPath, setMmprojPath] = useState("");
+  const [ctxSize, setCtxSize] = useState("32768");
+  const [nGpuLayers, setNGpuLayers] = useState("99");
+  const [nCpuMoe, setNCpuMoe] = useState("24");
+  const [flashAttn, setFlashAttn] = useState(true);
+  const [jinja, setJinja] = useState(true);
 
   useEffect(() => {
     if (initialModelId) {
@@ -578,6 +611,7 @@ function NewServerForm({
       const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
       const s = await api.serversCreate({
+        backend,
         model_id: modelId.trim(),
         name: name.trim() || modelId.split("/").pop() || "server",
         task,
@@ -587,6 +621,13 @@ function NewServerForm({
         swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
         cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
         served_model_name: served.trim() || undefined,
+        model_path: backend === "llamacpp" ? (modelPath.trim() || modelId.trim()) : undefined,
+        mmproj_path: backend === "llamacpp" ? (mmprojPath.trim() || undefined) : undefined,
+        ctx_size: backend === "llamacpp" ? parseInt(ctxSize, 10) || undefined : undefined,
+        n_gpu_layers: backend === "llamacpp" ? parseInt(nGpuLayers, 10) || 99 : undefined,
+        n_cpu_moe: backend === "llamacpp" ? parseInt(nCpuMoe, 10) || undefined : undefined,
+        flash_attn: backend === "llamacpp" ? flashAttn : undefined,
+        jinja: backend === "llamacpp" ? jinja : undefined,
       });
       onDone(s);
     } catch (e) {
@@ -605,29 +646,73 @@ function NewServerForm({
         </div>
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Model id (HF)">
-          <input className={inputCls} placeholder="Qwen/Qwen2.5-0.5B-Instruct" value={modelId} onChange={(e) => setModelId(e.target.value)} />
+        <Field label="Backend">
+          <select className={inputCls} value={backend} onChange={(e) => setBackend(e.target.value as "vllm" | "llamacpp")}>
+            <option value="vllm">vLLM (WSL2)</option>
+            <option value="llamacpp">llama.cpp (Windows)</option>
+          </select>
+        </Field>
+        <Field label={backend === "llamacpp" ? "GGUF model path" : "Model id (HF)"}>
+          <input className={inputCls} placeholder={backend === "llamacpp" ? "C:\\models\\model-Q4_K_M.gguf" : "Qwen/Qwen2.5-0.5B-Instruct"} value={backend === "llamacpp" ? modelPath : modelId} onChange={(e) => {
+            if (backend === "llamacpp") {
+              setModelPath(e.target.value);
+              setModelId(e.target.value);
+            } else {
+              setModelId(e.target.value);
+            }
+          }} />
         </Field>
         <Field label="Name (optional)">
           <input className={inputCls} placeholder="coder-0.5b" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Task">
+        {backend === "vllm" && <Field label="Task">
           <select className={inputCls} value={task} onChange={(e) => setTask(e.target.value as "instruct" | "embed")}>
             <option value="instruct">instruct (chat)</option>
             <option value="embed">embed (embeddings)</option>
           </select>
-        </Field>
-        <Field label="Quantization">
+        </Field>}
+        {backend === "vllm" && <Field label="Quantization">
           <select className={inputCls} value={quant} onChange={(e) => setQuant(e.target.value)}>
             <option value="fp16">FP16</option>
             <option value="fp8">FP8</option>
             <option value="awq">AWQ</option>
             <option value="gptq">GPTQ</option>
           </select>
-        </Field>
-        <Field label="GPU memory utilization (0–1)">
+        </Field>}
+        {backend === "vllm" && <Field label="GPU memory utilization (0–1)">
           <input className={inputCls} value={gpuUtil} onChange={(e) => setGpuUtil(e.target.value)} />
-        </Field>
+        </Field>}
+        {backend === "llamacpp" && (
+          <>
+            <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+              <div>
+                <div className="text-sm font-medium text-indigo-200">MoE with CPU expert offload</div>
+                <div className="text-xs text-slate-400">Starting point for large GGUF MoE models on limited VRAM.</div>
+              </div>
+              <Button variant="subtle" onClick={() => { setNGpuLayers("99"); setNCpuMoe("24"); setCtxSize("32768"); setFlashAttn(true); setJinja(true); }}>
+                Apply preset
+              </Button>
+            </div>
+            <Field label="Context size">
+              <input className={inputCls} value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} />
+            </Field>
+            <Field label="GPU layers (-ngl)">
+              <input className={inputCls} value={nGpuLayers} onChange={(e) => setNGpuLayers(e.target.value)} />
+            </Field>
+            <Field label="CPU MoE layers">
+              <input className={inputCls} value={nCpuMoe} onChange={(e) => setNCpuMoe(e.target.value)} />
+            </Field>
+            <Field label="mmproj path (optional)">
+              <input className={inputCls} value={mmprojPath} onChange={(e) => setMmprojPath(e.target.value)} />
+            </Field>
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} /> Flash attention
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={jinja} onChange={(e) => setJinja(e.target.checked)} /> Jinja tool-calling templates
+            </label>
+          </>
+        )}
         <Field
           label="Max model len (blank = auto)"
           hint={

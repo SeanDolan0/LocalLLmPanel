@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum } from "../api";
 import { Badge, Button, Card, CardTitle, Spinner, inputCls } from "../ui";
 import type { LibraryEntry, PullStatus } from "../types";
@@ -72,11 +73,19 @@ export default function Library() {
   };
 
   const handleImport = async () => {
-    if (!importPath.trim()) return;
+    const selected = importPath.trim()
+      ? importPath.trim()
+      : await open({
+          multiple: false,
+          directory: false,
+          filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+        });
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path || typeof path !== "string") return;
     setImportBusy(true);
     setImportError(null);
     try {
-      await api.libraryImportLocal(importPath.trim());
+      await api.libraryImportLocal(path);
       setImportOpen(false);
       setImportPath("");
       refresh();
@@ -128,7 +137,7 @@ export default function Library() {
         </div>
         <div className="flex items-center gap-3">
           <Button variant="ghost" onClick={refresh}>↻ Refresh</Button>
-          <Button variant="primary" onClick={() => setImportOpen(true)}>📂 Import Local Folder</Button>
+          <Button variant="primary" onClick={() => setImportOpen(true)}>📂 Import Local GGUF</Button>
         </div>
       </div>
 
@@ -354,7 +363,7 @@ export default function Library() {
         </div>
       )}
 
-      {/* Import Local Folder Modal */}
+      {/* Import Local GGUF Modal */}
       {importOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4">
           <div className="w-full max-w-md rounded-xl border border-indigo-500/30 bg-surface-2 p-6 shadow-2xl space-y-4">
@@ -363,19 +372,19 @@ export default function Library() {
                 📂
               </div>
               <div>
-                <h3 className="text-base font-semibold text-slate-100">Import Local Model Folder</h3>
-                <p className="text-xs text-slate-400">Add an existing model directory and deploy it directly</p>
+                <h3 className="text-base font-semibold text-slate-100">Import Local GGUF</h3>
+                <p className="text-xs text-slate-400">Choose an existing .gguf file or enter its path</p>
               </div>
             </div>
 
             <div className="text-sm text-slate-300 space-y-2">
               <label className="block text-xs font-medium text-slate-400" htmlFor="import-path">
-                Model directory path
+                GGUF file path (optional)
               </label>
               <input
                 id="import-path"
                 className={inputCls}
-                placeholder="D:\AI\qwen  or  /mnt/d/AI/qwen  or  ~/models/qwen"
+                placeholder="C:\models\model-Q4_K_M.gguf"
                 value={importPath}
                 onChange={(e) => setImportPath(e.target.value)}
                 onKeyDown={(e) => {
@@ -393,7 +402,7 @@ export default function Library() {
                   <span className="font-mono">/mnt/d/AI/qwen</span>
                 </div>
                 <p className="pt-1 text-slate-500">
-                  The folder must contain a <code className="font-mono">config.json</code> so vLLM can load it.
+                  The selected file is added to the native llama.cpp library.
                 </p>
               </div>
               {importError && (
@@ -415,8 +424,8 @@ export default function Library() {
               >
                 Cancel
               </Button>
-              <Button variant="primary" onClick={handleImport} disabled={importBusy || !importPath.trim()}>
-                {importBusy ? <Spinner label="Checking…" /> : "Import & Add to Library"}
+              <Button variant="primary" onClick={handleImport} disabled={importBusy}>
+                {importBusy ? <Spinner label="Checking…" /> : "Choose / Import GGUF"}
               </Button>
             </div>
           </div>

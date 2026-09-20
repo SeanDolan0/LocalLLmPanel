@@ -333,6 +333,94 @@ pub struct WslChild {
     handles: Vec<std::thread::JoinHandle<()>>,
 }
 
+/// Native Windows child used by llama-server. Output is streamed using the
+/// same callback shape as WSL children, while termination uses the Windows
+/// process tree so descendants cannot outlive the app.
+pub struct NativeChild {
+    pub child: Child,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl NativeChild {
+    pub fn spawn(
+        executable: &std::path::Path,
+        args: &[String],
+        on_line: impl FnMut(String) + Send + 'static,
+    ) -> Result<Self, String> {
+        let mut cmd = Command::new(executable);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn {}: {e}", executable.display()))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let callback = std::sync::Arc::new(std::sync::Mutex::new(on_line));
+        let mut handles = Vec::new();
+        for stream in [
+            stdout.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            stderr.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let cb = callback.clone();
+            handles.push(std::thread::spawn(move || {
+                for line in BufReader::new(stream).lines().flatten() {
+                    if let Ok(mut cb) = cb.lock() {
+                        cb(line);
+                    }
+                }
+            }));
+        }
+        Ok(Self { child, handles })
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            let pid = self.child.id().to_string();
+            let status = Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid])
+                .status()?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+        self.child.kill()
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn join(&mut self) {
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for NativeChild {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.kill();
+        }
+        self.join();
+    }
+}
+
 impl WslChild {
     /// Spawn `bash -lc <script>` in `<distro>`; stream output lines to `on_line`.
     /// `script` typically ends with `exec python ...` so the child lives for the

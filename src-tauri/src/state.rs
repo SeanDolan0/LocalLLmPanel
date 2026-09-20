@@ -139,6 +139,8 @@ pub struct CachedQuants {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServerDef {
+    #[serde(default = "default_backend")]
+    pub backend: String,
     pub id: String,
     pub name: String,
     pub model_id: String,
@@ -163,6 +165,54 @@ pub struct ServerDef {
     pub cpu_offload_gb: Option<usize>,
     #[serde(default)]
     pub was_running: bool,
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default)]
+    pub mmproj_path: Option<String>,
+    #[serde(default)]
+    pub ctx_size: Option<usize>,
+    #[serde(default = "default_n_gpu_layers")]
+    pub n_gpu_layers: usize,
+    #[serde(default)]
+    pub n_cpu_moe: Option<usize>,
+    #[serde(default = "default_true")]
+    pub flash_attn: bool,
+    #[serde(default = "default_cache_type")]
+    pub cache_type_k: String,
+    #[serde(default = "default_cache_type")]
+    pub cache_type_v: String,
+    #[serde(default)]
+    pub threads: Option<usize>,
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    #[serde(default)]
+    pub ubatch_size: Option<usize>,
+    #[serde(default = "default_parallel")]
+    pub parallel: usize,
+    #[serde(default = "default_true")]
+    pub jinja: bool,
+    #[serde(default)]
+    pub no_kv_offload: bool,
+    #[serde(default = "default_true")]
+    pub metrics: bool,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+fn default_backend() -> String {
+    "vllm".to_string()
+}
+
+fn default_n_gpu_layers() -> usize {
+    99
+}
+
+fn default_cache_type() -> String {
+    "q8_0".to_string()
+}
+
+fn default_parallel() -> usize {
+    1
 }
 
 fn default_true() -> bool {
@@ -332,6 +382,16 @@ pub struct PersistedConfig {
     pub distro: String,
     pub llm_dir: String,
     pub venv_dir: String,
+    pub llamacpp_dir: String,
+    pub gguf_dir: String,
+    #[serde(default)]
+    pub llamacpp_executable: Option<String>,
+    #[serde(default)]
+    pub llamacpp_installed_tag: Option<String>,
+    #[serde(default)]
+    pub llamacpp_version: Option<String>,
+    #[serde(default)]
+    pub llamacpp_help: Option<String>,
     pub hf_token: String,
     pub default_quant: String,
     pub servers: Vec<ServerDef>,
@@ -362,6 +422,22 @@ impl Default for PersistedConfig {
             distro,
             llm_dir: "~/llm-lp".to_string(),
             venv_dir: "~/llm-lp/.venv".to_string(),
+            llamacpp_dir: dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(CONFIG_DIR_NAME)
+                .join("llama.cpp")
+                .to_string_lossy()
+                .into_owned(),
+            gguf_dir: dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(CONFIG_DIR_NAME)
+                .join("gguf")
+                .to_string_lossy()
+                .into_owned(),
+            llamacpp_executable: None,
+            llamacpp_installed_tag: None,
+            llamacpp_version: None,
+            llamacpp_help: None,
             hf_token: String::new(),
             default_quant: "fp16".to_string(),
             servers: Vec::new(),
@@ -565,6 +641,7 @@ pub struct LiveServer {
     pub status: ServerStatus,
     pub error: Option<String>,
     pub wsl_child: Option<crate::wsl::WslChild>,
+    pub native_child: Option<crate::wsl::NativeChild>,
     /// WSL-side PID from the pidfile.
     pub wsl_pid: Option<u32>,
     pub log_ring: Mutex<VecDequeLog>,
@@ -787,6 +864,7 @@ mod tests {
         cfg.distro = "Ubuntu-22.04".to_string();
         cfg.hf_token = "hf_secret".to_string();
         cfg.servers.push(ServerDef {
+            backend: "vllm".into(),
             id: "srv-1".into(),
             name: "coder".into(),
             model_id: "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -801,6 +879,22 @@ mod tests {
             swap_space_gb: None,
             cpu_offload_gb: None,
             was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: 99,
+            n_cpu_moe: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -818,6 +912,37 @@ mod tests {
             back.measured["Qwen/Qwen2.5-0.5B-Instruct"].tokens_per_sec,
             Some(123.4)
         );
+    }
+
+    #[test]
+    fn old_config_deserializes_with_llamacpp_defaults() {
+        let old = r#"{
+            "distro": "Ubuntu-22.04",
+            "llm_dir": "~/llm-lp",
+            "venv_dir": "~/llm-lp/.venv",
+            "hf_token": "",
+            "default_quant": "fp16",
+            "servers": [{
+                "id": "old",
+                "name": "old server",
+                "model_id": "org/model",
+                "task": "instruct",
+                "port": 8000,
+                "gpu_mem_util": 0.92,
+                "max_model_len": 4096,
+                "quant": "fp16",
+                "served_model_name": null,
+                "params_b": null
+            }],
+            "measured": {}
+        }"#;
+        let cfg: PersistedConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.servers[0].backend, "vllm");
+        assert_eq!(cfg.servers[0].n_gpu_layers, 99);
+        assert_eq!(cfg.servers[0].cache_type_k, "q8_0");
+        assert!(cfg.servers[0].jinja);
+        assert!(!cfg.llamacpp_dir.is_empty());
+        assert!(!cfg.gguf_dir.is_empty());
     }
 
     #[test]
@@ -1057,6 +1182,7 @@ mod tests {
         cfg.minimize_to_tray = false;
         cfg.launch_at_login = true;
         cfg.servers.push(ServerDef {
+            backend: "vllm".into(),
             id: "s1".into(),
             name: "test".into(),
             model_id: "m1".into(),
@@ -1071,6 +1197,22 @@ mod tests {
             swap_space_gb: None,
             cpu_offload_gb: None,
             was_running: true,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: 99,
+            n_cpu_moe: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
         });
 
         let text = serde_json::to_string(&cfg).unwrap();
@@ -1084,6 +1226,7 @@ mod tests {
     fn test_server_recipe_and_config_export_roundtrip() {
         use super::{ConfigExportPackage, ServerDef, ServerRecipe};
         let def = ServerDef {
+            backend: "vllm".into(),
             id: "recipe-test".into(),
             name: "Qwen 7B".into(),
             model_id: "Qwen/Qwen2.5-7B-Instruct".into(),
@@ -1098,6 +1241,22 @@ mod tests {
             swap_space_gb: Some(4),
             cpu_offload_gb: Some(2),
             was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: 99,
+            n_cpu_moe: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
         };
 
         let recipe = ServerRecipe::from_server_def(&def);

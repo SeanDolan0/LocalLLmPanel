@@ -6,6 +6,7 @@ pub mod fit;
 pub mod gateway;
 pub mod hf;
 pub mod llmfit_adapter;
+pub mod llamacpp_install;
 pub mod provision;
 pub mod security;
 pub mod server;
@@ -24,6 +25,7 @@ mod it;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(AppState::new()))
         .setup(|app| {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -113,6 +115,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::env_status,
             commands::provision,
+            commands::install_llamacpp,
             commands::search_models,
             commands::search_models_with_fit,
             commands::recommended_models,
@@ -129,6 +132,7 @@ pub fn run() {
             commands::servers_logs,
             commands::servers_metrics,
             commands::servers_chat,
+            commands::servers_test_tool_call,
             commands::servers_chat_stream,
             commands::servers_chat_cancel,
             commands::conversations_list,
@@ -138,6 +142,8 @@ pub fn run() {
             commands::benchmarks_cancel,
             commands::benchmarks_history,
             commands::library_list,
+            commands::gguf_files,
+            commands::download_gguf,
             commands::library_remove,
             commands::library_disk_usage,
             commands::library_import_local,

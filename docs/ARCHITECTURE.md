@@ -5,7 +5,7 @@
 ```
 ┌──────────────────────────── Windows ────────────────────────────┐
 │  Tauri 2 app (Rust core) ── React/TS UI (WebView2)              │
-│    ├─ wsl.rs      distro detect + Command runner               │
+│    ├─ wsl.rs      distro detect + WSL/native child runners      │
 │    ├─ provision.rs  idempotent WSL2 provisioning               │
 │    ├─ server.rs   multi-instance lifecycle, logs, metrics      │
 │    ├─ hf.rs       HF search / quant discovery / pull           │
@@ -24,6 +24,19 @@
 │  HF cache: ~/.cache/huggingface                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+llama.cpp uses a separate native Windows process boundary:
+
+```
+Tauri Rust core ── llama-server.exe (NativeChild)
+       │             ├─ --host 127.0.0.1
+       │             ├─ GGUF weights from gguf_dir
+       │             └─ Windows CUDA runtime / nvidia-smi
+       └─ %APPDATA%\local-llm-panel\logs\<id>.log
+```
+
+WSL/vLLM provisioning and native llama.cpp installation are independent. The app never
+changes `.wslconfig`; llama.cpp remains usable when WSL has not been provisioned.
 
 ## Rust core modules
 
@@ -61,6 +74,12 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `discover_quant_variants(client, base_model_id, semaphore) -> Vec<QuantVariant>` — discovers AWQ/GPTQ/FP8/BNB repos by naming convention and known publishers; discovers GGUF variants by parsing repo siblings.
 - `parse_gguf_quant_label(filename) -> Option<String>` — extracts quant label from GGUF filenames.
 - `pull_model(id, token)` — background thread runs `HF_TOKEN=… hf download <id>` in venv, lines parsed (`Fetching`, `Downloading`, % progress with filenames) → `pull-progress` events; `pull_status()` returns current in-flight state.
+- `list_gguf_repo_files` and `group_gguf_files` — discover GGUF files, combine split shards, and separate optional `mmproj` companions.
+- `download_gguf` — native Windows, bearer-authenticated, resumable shard download into `gguf_dir`, emitting `pull-progress`.
+
+### `llamacpp_install.rs`
+- Queries the latest `ggml-org/llama.cpp` release, selects a Windows CUDA archive, extracts optional CUDA runtime assets, and probes `--version`/`--help`.
+- Stores the installed tag, version, executable override, and help text in the persisted config. Windows `nvidia-smi` is used as a native GPU fallback.
 
 ### `server.rs`
 - `alloc_port()` — starting 8000 (+ existing server defs excluded), bind `127.0.0.1:port` to prove free.
@@ -69,6 +88,8 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `logs(id)` — streaming: child stdout/stderr chunks accumulated in an in-memory ring buffer (per server) AND appended to `~/llm-lp/logs/<id>.log` in WSL (via `tee` in launcher) for restart-persistence.
 - `metrics(id)` — GET `:port/metrics`, parse Prometheus counters `vllm:generation_tokens_total`, `vllm:prompt_tokens_total`, `vllm:num_requests_running`; delta between polls → measured tok/s (prompt+generation split), persisted to `state.rs`.
 - `chat(id, messages)` — POST `:port/v1/chat/completions` (instruct servers only) from Rust (avoids webview CORS).
+- `build_llamacpp_args` — pure mapping of persisted llama.cpp settings to `llama-server` flags; the runtime filters flags against the installed `--help` output.
+- Native servers use `NativeChild`, localhost health polling, persisted Windows logs, Prometheus metrics, and `servers_test_tool_call` for a small OpenAI tool-call smoke test.
 
 ### `state.rs`
 - `AppState { config: Mutex<PersistedConfig>, servers: Mutex<BTreeMap<Id, LiveServer>>, http: Client, pulling: Arc<Mutex<HashMap<model_id, bool>>>, gpu: Mutex<Option<GpuSnapshot>>, enrichment_cache: Mutex<HashMap<model_id, CachedEnrichment>>, rec_cache: Mutex<Option<(Vec<ModelWithFit>, Instant)>> }`.
@@ -77,11 +98,13 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 
 ## Tauri commands (public surface)
 `env_status`, `provision`, `search_models`, `search_models_with_fit`, `recommended_models`,
-`model_stats`, `pull_model`, `pull_status`, `servers_list`, `servers_create`, `servers_delete`,
+`model_stats`, `pull_model`, `pull_status`, `install_llamacpp`, `gguf_files`, `download_gguf`,
+`servers_list`, `servers_create`, `servers_delete`,
 `servers_start`, `servers_stop`, `servers_restart`, `servers_logs`, `servers_metrics`,
 `servers_chat`, `settings_get`, `settings_set`, `measured_stats`.
 
-Events: `wsl-log {phase,line}`, `server-status {id,status,error?}`, `server-log {id,line}`,
+Events: `wsl-log {phase,line}`, `llamacpp-install-progress {file,done,total?}`,
+`server-status {id,status,error?}`, `server-log {id,line}`,
 `pull-progress {model,state,file?,percent?}`.
 
 ## Frontend (`src/`)

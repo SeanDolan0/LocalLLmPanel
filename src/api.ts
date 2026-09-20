@@ -51,6 +51,12 @@ export type {
 export const api = {
   envStatus: () => invoke<EnvStatus>("env_status"),
   provision: () => invoke<ProvisionReport>("provision"),
+  installLlamacpp: () => invoke<{
+    installed: boolean;
+    tag: string | null;
+    version: string | null;
+    executable: string | null;
+  }>("install_llamacpp"),
   searchModels: (query: string, quant?: string) =>
     invoke<ModelWithStats[]>("search_models", { query, quant: quant ?? null }),
   searchModelsWithFit: (query: string) =>
@@ -72,6 +78,8 @@ export const api = {
   serversMetrics: (id: string) => invoke<MetricsSnapshot | null>("servers_metrics", { id }),
   serversChat: (id: string, messages: ChatMessage[]) =>
     invoke<Record<string, unknown>>("servers_chat", { id, messages }),
+  serversTestToolCall: (id: string) =>
+    invoke<{ passed: boolean; response: Record<string, unknown>; hint: string }>("servers_test_tool_call", { id }),
   serversChatStream: (
     requestId: string,
     serverId: string,
@@ -112,6 +120,9 @@ export const api = {
         | "distro"
         | "llm_dir"
         | "venv_dir"
+        | "llamacpp_dir"
+        | "gguf_dir"
+        | "llamacpp_executable"
         | "hf_token"
         | "default_quant"
         | "advanced_settings"
@@ -183,6 +194,8 @@ export const events = {
     listen<BenchmarkCancelPayload>("benchmark-cancel", (e) => cb(e.payload)),
   benchmarkError: (cb: (e: BenchmarkErrorPayload) => void) =>
     listen<BenchmarkErrorPayload>("benchmark-error", (e) => cb(e.payload)),
+  llamacppInstallProgress: (cb: (e: { file: string; done: number; total?: number }) => void) =>
+    listen("llamacpp-install-progress", (e) => cb(e.payload as { file: string; done: number; total?: number })),
 };
 
 // ---------------------------------------------------------------------------

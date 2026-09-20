@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
@@ -37,6 +38,10 @@ pub struct EnvStatus {
     pub available_ram_gb: Option<f64>,
     pub ram_bandwidth_gbps: Option<f64>,
     pub providers_detected: Vec<String>,
+    pub llamacpp_installed: bool,
+    pub llamacpp_tag: Option<String>,
+    pub llamacpp_version: Option<String>,
+    pub llamacpp_executable: Option<String>,
 }
 
 fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
@@ -53,7 +58,8 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             &distro_detected,
             "cat ~/llm-lp/.provisioned 2>/dev/null || true",
         );
-        let gpu = gpu_snapshot(&distro_detected);
+        let native_gpu = crate::llamacpp_install::windows_gpu_snapshot();
+        let gpu = gpu_snapshot(&distro_detected).or(native_gpu);
         if let Some(g) = &gpu {
             *st.gpu.lock().unwrap() = Some(g.clone());
             st.record_system_metric(g);
@@ -148,6 +154,17 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             available_ram_gb,
             ram_bandwidth_gbps,
             providers_detected,
+            llamacpp_installed: crate::llamacpp_install::executable_from_config(&st.config())
+                .is_some(),
+            llamacpp_tag: st.config().llamacpp_installed_tag,
+            llamacpp_version: st.config().llamacpp_version,
+            llamacpp_executable: st
+                .config()
+                .llamacpp_executable
+                .or_else(|| {
+                    crate::llamacpp_install::executable_from_config(&st.config())
+                        .map(|p| p.to_string_lossy().into_owned())
+                }),
         }
     })
     .await
@@ -176,6 +193,40 @@ pub async fn provision(
     .await
     .map_err(|e| format!("provision task error: {e}"))?
     .map_err(|e| format!("provision failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn install_llamacpp(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::llamacpp_install::InstallStatus, String> {
+    let st = (*state).clone();
+    let destination = PathBuf::from(st.config().llamacpp_dir);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::llamacpp_install::install(&destination, |file, done, total| {
+            let _ = app.emit(
+                "llamacpp-install-progress",
+                serde_json::json!({"file": file, "done": done, "total": total}),
+            );
+        })
+    })
+    .await
+    .map_err(|e| format!("llama.cpp install task error: {e}"))?
+    .map_err(|e| format!("llama.cpp install failed: {e}"))?;
+    let (tag, exe, version, help) = result;
+    let mut cfg = st.config.lock().unwrap();
+    cfg.llamacpp_installed_tag = Some(tag);
+    cfg.llamacpp_version = Some(version.clone());
+    cfg.llamacpp_help = Some(help);
+    cfg.llamacpp_executable = Some(exe.to_string_lossy().into_owned());
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(crate::llamacpp_install::InstallStatus {
+        installed: true,
+        tag: cfg.llamacpp_installed_tag.clone(),
+        version: cfg.llamacpp_version.clone(),
+        executable: cfg.llamacpp_executable.clone(),
+        gpu: crate::llamacpp_install::windows_gpu_snapshot(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +927,7 @@ pub fn servers_list(state: State<'_, Arc<AppState>>) -> Vec<ServerListRow> {
 
 #[derive(serde::Deserialize)]
 pub struct CreateServerInput {
+    pub backend: Option<String>,
     pub name: String,
     pub model_id: String,
     pub task: Option<String>,
@@ -887,6 +939,22 @@ pub struct CreateServerInput {
     pub enforce_eager: Option<bool>,
     pub swap_space_gb: Option<usize>,
     pub cpu_offload_gb: Option<usize>,
+    pub model_path: Option<String>,
+    pub mmproj_path: Option<String>,
+    pub ctx_size: Option<usize>,
+    pub n_gpu_layers: Option<usize>,
+    pub n_cpu_moe: Option<usize>,
+    pub flash_attn: Option<bool>,
+    pub cache_type_k: Option<String>,
+    pub cache_type_v: Option<String>,
+    pub threads: Option<usize>,
+    pub batch_size: Option<usize>,
+    pub ubatch_size: Option<usize>,
+    pub parallel: Option<usize>,
+    pub jinja: Option<bool>,
+    pub no_kv_offload: Option<bool>,
+    pub metrics: Option<bool>,
+    pub extra_args: Option<Vec<String>>,
 }
 
 #[tauri::command]
@@ -977,6 +1045,7 @@ pub async fn servers_create(
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let def = ServerDef {
+        backend: input.backend.unwrap_or_else(|| "vllm".into()),
         id: format!("srv-{ts:x}"),
         name: input.name.trim().to_string(),
         model_id: input.model_id,
@@ -993,6 +1062,22 @@ pub async fn servers_create(
         swap_space_gb: input.swap_space_gb,
         cpu_offload_gb: input.cpu_offload_gb,
         was_running: false,
+        model_path: input.model_path,
+        mmproj_path: input.mmproj_path,
+        ctx_size: input.ctx_size,
+        n_gpu_layers: input.n_gpu_layers.unwrap_or(99),
+        n_cpu_moe: input.n_cpu_moe,
+        flash_attn: input.flash_attn.unwrap_or(true),
+        cache_type_k: input.cache_type_k.unwrap_or_else(|| "q8_0".into()),
+        cache_type_v: input.cache_type_v.unwrap_or_else(|| "q8_0".into()),
+        threads: input.threads,
+        batch_size: input.batch_size,
+        ubatch_size: input.ubatch_size,
+        parallel: input.parallel.unwrap_or(1),
+        jinja: input.jinja.unwrap_or(true),
+        no_kv_offload: input.no_kv_offload.unwrap_or(false),
+        metrics: input.metrics.unwrap_or(true),
+        extra_args: input.extra_args.unwrap_or_default(),
     };
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.push(def.clone());
@@ -1070,6 +1155,32 @@ pub async fn servers_chat(
     server::chat(&st, &id, messages)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn servers_test_tool_call(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let st = (*state).clone();
+    let messages = vec![serde_json::json!({
+        "role": "user",
+        "content": "Call get_weather for Seattle. Do not answer with prose."
+    })];
+    let body = server::chat_with_tools(&st, &id, messages)
+        .await
+        .map_err(|e| e.to_string())?;
+    let passed = body["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .map(|calls| calls.iter().any(|call| {
+            call["function"]["name"].as_str() == Some("get_weather")
+        }))
+        .unwrap_or(false);
+    Ok(serde_json::json!({
+        "passed": passed,
+        "response": body,
+        "hint": if passed { "" } else { "Check --jinja and the model chat template first." }
+    }))
 }
 
 #[tauri::command]
@@ -1205,6 +1316,9 @@ pub struct SettingsPatch {
     pub distro: Option<String>,
     pub llm_dir: Option<String>,
     pub venv_dir: Option<String>,
+    pub llamacpp_dir: Option<String>,
+    pub gguf_dir: Option<String>,
+    pub llamacpp_executable: Option<String>,
     pub hf_token: Option<String>,
     pub default_quant: Option<String>,
     pub advanced_settings: Option<crate::state::AdvancedSettings>,
@@ -1234,6 +1348,19 @@ pub fn settings_set(
     if let Some(v) = patch.venv_dir {
         if !v.trim().is_empty() {
             cfg.venv_dir = v.trim().to_string();
+        }
+        if let Some(d) = patch.llamacpp_dir {
+            if !d.trim().is_empty() {
+                cfg.llamacpp_dir = d.trim().to_string();
+            }
+        }
+        if let Some(d) = patch.gguf_dir {
+            if !d.trim().is_empty() {
+                cfg.gguf_dir = d.trim().to_string();
+            }
+        }
+        if let Some(exe) = patch.llamacpp_executable {
+            cfg.llamacpp_executable = (!exe.trim().is_empty()).then(|| exe.trim().to_string());
         }
     }
     if let Some(t) = patch.hf_token {
@@ -1596,12 +1723,147 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
         }
         let mut local =
             scan_imported_local_folders(&distro, &st.config().imported_local_models, &running_servers);
+        local.extend(scan_native_gguf_library(
+            &st.config().gguf_dir,
+            &running_servers,
+        ));
         out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
         local.append(&mut out_v);
         local
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+fn scan_native_gguf_library(
+    root: &str,
+    running_servers: &[(String, String)],
+) -> Vec<LibraryEntry> {
+    let mut entries = Vec::new();
+    let Ok(repos) = std::fs::read_dir(root) else {
+        return entries;
+    };
+    for repo in repos.flatten().filter(|e| e.path().is_dir()) {
+        let files: Vec<_> = std::fs::read_dir(repo.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("gguf"))
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
+        let size_mb = files
+            .iter()
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum::<u64>()
+            / (1024 * 1024);
+        let model_id = repo.file_name().to_string_lossy().into_owned();
+        let in_use_server = running_servers
+            .iter()
+            .find(|(_, model)| model == &model_id)
+            .map(|(name, _)| name.clone());
+        entries.push(LibraryEntry {
+            model_id,
+            size_mb,
+            files: files.len(),
+            quant: Some("GGUF".into()),
+            params_b: None,
+            installed: true,
+            in_use: in_use_server.is_some(),
+            in_use_server,
+            task: Some("instruct".into()),
+            is_local: true,
+        });
+    }
+    entries
+}
+
+#[tauri::command]
+pub async fn gguf_files(
+    state: State<'_, Arc<AppState>>,
+    repo_id: String,
+) -> Result<Vec<crate::hf::GgufRepoFile>, String> {
+    let token = state.hf_token();
+    crate::hf::list_gguf_repo_files(&state.http, &repo_id, token.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn download_gguf(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    repo_id: String,
+    files: Vec<String>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("select at least one GGUF file".into());
+    }
+    let cfg = state.config();
+    let token = state.hf_token();
+    let model = repo_id.clone();
+    let destination = PathBuf::from(cfg.gguf_dir).join(
+        repo_id
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("model"),
+    );
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+        let client = reqwest::blocking::Client::new();
+        for file_name in files {
+            let target = destination.join(
+                PathBuf::from(&file_name)
+                    .file_name()
+                    .ok_or_else(|| "invalid GGUF file name".to_string())?,
+            );
+            let offset = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+            let url = format!("https://huggingface.co/{model}/resolve/main/{file_name}");
+            let mut request = client.get(url);
+            if let Some(token) = token.as_deref().filter(|t| !t.trim().is_empty()) {
+                request = request.bearer_auth(token);
+            }
+            if offset > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+            }
+            let mut response = request.send().map_err(|e| e.to_string())?;
+            if offset > 0 && response.status() == reqwest::StatusCode::OK {
+                std::fs::File::create(&target).map_err(|e| e.to_string())?;
+            }
+            response.error_for_status_ref().map_err(|e| e.to_string())?;
+            let total = response.content_length().map(|n| n + offset);
+            let mut output = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&target)
+                .map_err(|e| e.to_string())?;
+            let mut done = offset;
+            loop {
+                let mut buf = [0u8; 1024 * 1024];
+                let n = std::io::Read::read(&mut response, &mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut output, &buf[..n]).map_err(|e| e.to_string())?;
+                done += n as u64;
+                let percent = total.map(|t| (done as f64 / t as f64 * 100.0) as f32);
+                let _ = app.emit(
+                    "pull-progress",
+                    serde_json::json!({"model": model, "state": "downloading", "file": file_name, "percent": percent}),
+                );
+            }
+        }
+        let _ = app.emit(
+            "pull-progress",
+            serde_json::json!({"model": model, "state": "complete", "file": null, "percent": 100.0}),
+        );
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Scan the persisted imported local model folders inside WSL and build
@@ -1673,6 +1935,32 @@ pub async fn library_import_local(
 ) -> Result<LibraryEntry, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if path.to_ascii_lowercase().ends_with(".gguf") {
+            let source = PathBuf::from(&path);
+            if !source.is_file() {
+                return Err(format!("GGUF file does not exist: {path}"));
+            }
+            let file_name = source
+                .file_name()
+                .ok_or_else(|| "GGUF path has no file name".to_string())?;
+            let repo_dir = PathBuf::from(st.config().gguf_dir).join("imported");
+            std::fs::create_dir_all(&repo_dir).map_err(|e| e.to_string())?;
+            let target = repo_dir.join(file_name);
+            std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
+            let size_mb = target.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+            return Ok(LibraryEntry {
+                model_id: "imported".into(),
+                size_mb,
+                files: 1,
+                quant: Some("GGUF".into()),
+                params_b: None,
+                installed: true,
+                in_use: false,
+                in_use_server: None,
+                task: Some("instruct".into()),
+                is_local: true,
+            });
+        }
         let wsl_path = crate::wsl::windows_to_wsl_path(&path);
         if wsl_path.is_empty() || !wsl_path.starts_with('/') {
             return Err("Enter a local model directory path (e.g. D:\\AI\\qwen or /mnt/d/AI/qwen)".into());

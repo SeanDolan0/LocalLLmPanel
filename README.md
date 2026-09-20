@@ -1,16 +1,18 @@
 # Local LLM Panel
 
-A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages a **vLLM** installation inside **WSL2**:
+A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages **vLLM** inside WSL2 and native Windows **llama.cpp** servers:
 
 - **Auto-provisions** WSL2 (idempotent): apt basics → uv venv (CPython 3.12) → `vllm` CUDA wheels → torch/GPU verification.
 - **Search & estimate** any Hugging Face model: live `config.json` context, VRAM context-fit, and per-GPU **estimated max tok/s** for your hardware.
 - **Pull models** in the background (`hf download`, progress streamed to the UI).
 - **Run multiple servers** concurrently (instruct + embedding) with per-server quantization (`--quantization`), GPU memory util, max-model-len, ports, and live log tails, metrics, and a minimal chat playground.
+- **Run llama.cpp `llama-server.exe` natively on Windows**, including GGUF models, split-shard downloads, CUDA builds, Jinja tool calling, and MoE expert CPU offload.
 
 ## Requirements
 
 - Windows 11 (WebView2), NVIDIA GPU + driver supporting CUDA ≥ 12.4 inside WSL2
 - WSL2 with an Ubuntu distro (`.wslconfig` memory recommended: `memory=24GB` as the dev machine uses)
+- For llama.cpp: an NVIDIA Windows driver and a recent CUDA-enabled llama.cpp release. WSL provisioning is not required for this backend.
 - Rust toolchain (MSVC target; VS Build Tools "Desktop development with C++" — cargo picks VS up via vswhere), Node ≥ 20
 
 ## Setup (dev)
@@ -50,6 +52,16 @@ Requires ~5 GB disk + network. If `nvidia-smi` is unavailable inside WSL, the te
 4. **Servers → New server** → pick the model, task `instruct` (or `embed`), press Start.
 5. Logs stream live; the chat drawer works once `/health` is green; VRAM gauge updates on Dashboard.
 6. Measured tok/s replaces the estimate after the first generation run.
+
+### Native llama.cpp first run
+
+1. Open **Dashboard** and use **Install / update llama.cpp**. The app selects the latest Windows CUDA release, verifies `llama-server.exe --version`, and records its help capabilities.
+2. In **Settings**, review the native llama.cpp and GGUF directories, or set a custom `llama-server.exe` path.
+3. Download a GGUF from **Search** or place an existing `.gguf` in the GGUF directory.
+4. In **Servers → New server**, select **llama.cpp (Windows)**, choose the first shard for split files, and use the **MoE with CPU expert offload** preset as a starting point. It enables `--jinja`, so OpenAI-compatible tool calling can be tested from the server row.
+5. Point an external harness at the displayed `http://127.0.0.1:<port>/v1` URL. Native logs persist under `%APPDATA%\local-llm-panel\logs`.
+
+The llama.cpp backend binds to localhost only. `n_cpu_moe` is a starting tuning value: reduce GPU expert residency if VRAM is exhausted, and leave RAM headroom for the operating system and context/KV cache.
 
 ## Notes & gotchas
 
