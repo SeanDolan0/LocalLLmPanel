@@ -1,10 +1,10 @@
 //! Persisted configuration (JSON in %APPDATA%) and live server registry.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
@@ -463,6 +463,35 @@ pub struct AppState {
     pub chat_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub benchmarks: Mutex<Vec<BenchmarkRun>>,
     pub benchmark_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    pub system_metrics: Mutex<VecDeque<SystemMetricPoint>>,
+    pub server_metrics: Mutex<HashMap<String, VecDeque<ServerMetricPoint>>>,
+}
+
+pub const METRICS_SERIES_CAPACITY: usize = 60;
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SystemMetricPoint {
+    pub timestamp: u64,
+    pub vram_used_mb: u64,
+    pub vram_total_mb: u64,
+    pub vram_free_mb: u64,
+    pub gpu_util_pct: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerMetricPoint {
+    pub timestamp: u64,
+    pub tok_s: f64,
+    pub prompt_tok_s: f64,
+    pub requests_running: u64,
+    pub requests_waiting: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -503,7 +532,34 @@ impl AppState {
             chat_cancels: Mutex::new(HashMap::new()),
             benchmarks: Mutex::new(BenchmarkRun::load_all()),
             benchmark_cancels: Mutex::new(HashMap::new()),
+            system_metrics: Mutex::new(VecDeque::new()),
+            server_metrics: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn record_system_metric(&self, snap: &GpuSnapshot) {
+        let vram_used_mb = snap.vram_total_mb.saturating_sub(snap.vram_free_mb);
+        let pt = SystemMetricPoint {
+            timestamp: now_ms(),
+            vram_used_mb,
+            vram_total_mb: snap.vram_total_mb,
+            vram_free_mb: snap.vram_free_mb,
+            gpu_util_pct: snap.util_percent,
+        };
+        let mut sm = self.system_metrics.lock().unwrap();
+        if sm.len() >= METRICS_SERIES_CAPACITY {
+            sm.pop_front();
+        }
+        sm.push_back(pt);
+    }
+
+    pub fn record_server_metric(&self, server_id: &str, pt: ServerMetricPoint) {
+        let mut sm = self.server_metrics.lock().unwrap();
+        let q = sm.entry(server_id.to_string()).or_insert_with(VecDeque::new);
+        if q.len() >= METRICS_SERIES_CAPACITY {
+            q.pop_front();
+        }
+        q.push_back(pt);
     }
 
     pub fn config(&self) -> PersistedConfig {
@@ -736,5 +792,43 @@ mod tests {
         let parsed: BenchmarkRun = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, b);
         assert_eq!(parsed.gen_tok_s, 85.2);
+    }
+
+    #[test]
+    fn test_system_and_server_metric_series_ring_buffer() {
+        use super::{AppState, GpuSnapshot, ServerMetricPoint, METRICS_SERIES_CAPACITY};
+        let app_state = AppState::new();
+
+        // Test system metric ring buffer
+        for i in 0..(METRICS_SERIES_CAPACITY + 10) {
+            let snap = GpuSnapshot {
+                name: "RTX 4090".to_string(),
+                vram_total_mb: 24576,
+                vram_free_mb: 24576 - (i as u64 * 100),
+                util_percent: (i % 100) as u32,
+            };
+            app_state.record_system_metric(&snap);
+        }
+
+        let sm = app_state.system_metrics.lock().unwrap();
+        assert_eq!(sm.len(), METRICS_SERIES_CAPACITY);
+        assert_eq!(sm.back().unwrap().vram_total_mb, 24576);
+
+        // Test server metric ring buffer
+        for i in 0..(METRICS_SERIES_CAPACITY + 15) {
+            let pt = ServerMetricPoint {
+                timestamp: 1000 + i as u64,
+                tok_s: 40.0 + (i as f64),
+                prompt_tok_s: 150.0,
+                requests_running: 1,
+                requests_waiting: 0,
+            };
+            app_state.record_server_metric("test-server", pt);
+        }
+
+        let srv_m = app_state.server_metrics.lock().unwrap();
+        let q = srv_m.get("test-server").unwrap();
+        assert_eq!(q.len(), METRICS_SERIES_CAPACITY);
+        assert_eq!(q.back().unwrap().tok_s, 40.0 + ((METRICS_SERIES_CAPACITY + 14) as f64));
     }
 }

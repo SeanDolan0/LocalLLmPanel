@@ -375,6 +375,18 @@ pub fn start_server(
                             requests: m.requests,
                             measured: measured.clone(),
                         };
+                        let tok_s = measured.as_ref().and_then(|ms| ms.tokens_per_sec).unwrap_or(0.0);
+                        let prompt_tok_s = measured.as_ref().and_then(|ms| ms.prompt_tokens_per_sec).unwrap_or(0.0);
+                        state_task.record_server_metric(
+                            &id_task,
+                            crate::state::ServerMetricPoint {
+                                timestamp: now_ms(),
+                                tok_s,
+                                prompt_tok_s,
+                                requests_running: m.running,
+                                requests_waiting: m.waiting,
+                            },
+                        );
                         {
                             let mut servers = state_task.servers.lock().unwrap();
                             if let Some(ls) = servers.get_mut(&id_task) {

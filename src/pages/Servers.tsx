@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
+import { Sparkline } from "../components/Sparkline";
 import { effectiveModelName } from "../types";
-import type { CreateServerInput, ServerListRow, ChatMessage, Conversation, BenchmarkRun } from "../types";
+import type { ServerListRow, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot } from "../types";
 
 export default function Servers() {
   const location = useLocation();
   const [rows, setRows] = useState<ServerListRow[]>([]);
+  const [serverSeries, setServerSeries] = useState<Record<string, ServerMetricPoint[]>>({});
+  const [gpu, setGpu] = useState<GpuSnapshot | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [prefillModel, setPrefillModel] = useState<string | null>(null);
   const [prefillQuant, setPrefillQuant] = useState<string | null>(null);
@@ -64,7 +67,28 @@ export default function Servers() {
   }, [location.state]);
 
   const refresh = useCallback(() => {
-    api.serversList().then(setRows).catch(() => {});
+    api
+      .serversList()
+      .then(async (newRows) => {
+        setRows(newRows);
+        const running = newRows.filter((r) => r.status === "running");
+        if (running.length > 0) {
+          const seriesMap: Record<string, ServerMetricPoint[]> = {};
+          await Promise.all(
+            running.map(async (r) => {
+              try {
+                const pts = await api.serverMetricsSeries(r.def.id);
+                seriesMap[r.def.id] = pts;
+              } catch {
+                // ignore
+              }
+            })
+          );
+          setServerSeries((prev) => ({ ...prev, ...seriesMap }));
+        }
+      })
+      .catch(() => {});
+    api.gpuStatus().then(setGpu).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -132,9 +156,20 @@ export default function Servers() {
 
   const selectedRow = rows.find((r) => r.def.id === selected) ?? null;
   const selectedLog = selected ? logs[selected] ?? "" : "";
+  const freeGb = gpu ? gpu.vram_free_mb / 1024 : null;
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-5">
+      {/* VRAM Pressure Alert */}
+      {gpu && freeGb !== null && freeGb < 1.0 && (
+        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm flex items-center gap-2.5">
+          <span className="text-base">⚠️</span>
+          <div>
+            <strong>VRAM Pressure Warning:</strong> Less than 1.0 GB GPU VRAM headroom remaining ({freeGb.toFixed(1)} GB free). Starting another server or expanding context length may cause CUDA out-of-memory errors.
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-100">Servers</h1>
         <Button onClick={() => setShowNew((s) => !s)}>{showNew ? "Cancel" : "+ New server"}</Button>
@@ -144,6 +179,7 @@ export default function Servers() {
 
       {showNew && (
         <NewServerForm
+          freeGb={freeGb}
           initialModelId={prefillModel ?? ""}
           initialQuant={prefillQuant ?? undefined}
           initialSwapSpace={prefillSwapSpace}
@@ -252,6 +288,20 @@ export default function Servers() {
                   <div>requests: <span className="text-slate-300">{fmtNum(r.metrics.requests)}</span></div>
                 </div>
               )}
+              {r.status === "running" && serverSeries[r.def.id] && serverSeries[r.def.id].length > 0 && (
+                <div className="mt-2.5 pt-2 border-t border-edge/40">
+                  <Sparkline
+                    label="Throughput (last 5 min)"
+                    data={serverSeries[r.def.id].map((p) => p.tok_s)}
+                    height={28}
+                    min={0}
+                    color="#22d3ee"
+                    unit="tok/s"
+                    currentValue={r.metrics?.measured?.tokens_per_sec != null ? fmtTokPerSec(r.metrics.measured.tokens_per_sec) : undefined}
+                    showMinMax={false}
+                  />
+                </div>
+              )}
             </Card>
           ))}
         </div>
@@ -289,13 +339,28 @@ export default function Servers() {
           <Card>
             <CardTitle>Metrics</CardTitle>
             {selectedRow.metrics ? (
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <Stat label="Generation tok/s" value={selectedRow.metrics.measured?.tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.tokens_per_sec) : "– (needs traffic)"} />
-                <Stat label="Prompt tok/s" value={selectedRow.metrics.measured?.prompt_tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.prompt_tokens_per_sec) : "–"} />
-                <Stat label="Total gen tokens" value={fmtNum(selectedRow.metrics.total_generation_tokens)} />
-                <Stat label="Total prompt tokens" value={fmtNum(selectedRow.metrics.total_prompt_tokens)} />
-                <Stat label="In-flight / waiting" value={`${selectedRow.metrics.running} / ${selectedRow.metrics.waiting}`} />
-                <Stat label="Requests" value={fmtNum(selectedRow.metrics.requests)} />
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <Stat label="Generation tok/s" value={selectedRow.metrics.measured?.tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.tokens_per_sec) : "– (needs traffic)"} />
+                  <Stat label="Prompt tok/s" value={selectedRow.metrics.measured?.prompt_tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.prompt_tokens_per_sec) : "–"} />
+                  <Stat label="Total gen tokens" value={fmtNum(selectedRow.metrics.total_generation_tokens)} />
+                  <Stat label="Total prompt tokens" value={fmtNum(selectedRow.metrics.total_prompt_tokens)} />
+                  <Stat label="In-flight / waiting" value={`${selectedRow.metrics.running} / ${selectedRow.metrics.waiting}`} />
+                  <Stat label="Requests" value={fmtNum(selectedRow.metrics.requests)} />
+                </div>
+                {selectedRow.status === "running" && serverSeries[selectedRow.def.id] && serverSeries[selectedRow.def.id].length > 0 && (
+                  <div className="pt-2 border-t border-edge/40">
+                    <Sparkline
+                      label="Throughput History (last 5 min)"
+                      data={serverSeries[selectedRow.def.id].map((p) => p.tok_s)}
+                      height={44}
+                      min={0}
+                      color="#38bdf8"
+                      unit="tok/s"
+                      currentValue={selectedRow.metrics.measured?.tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.tokens_per_sec) : undefined}
+                    />
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-sm text-slate-500">No metrics yet — the monitor samples /metrics every 5s once running.</div>
@@ -319,6 +384,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 // ---------------------------------------------------------------------------
 
 function NewServerForm({
+  freeGb,
   initialModelId = "",
   initialQuant,
   initialSwapSpace,
@@ -329,6 +395,7 @@ function NewServerForm({
   onCancel,
   onErr,
 }: {
+  freeGb?: number | null;
   initialModelId?: string;
   initialQuant?: string;
   initialSwapSpace?: number;
@@ -383,19 +450,18 @@ function NewServerForm({
     try {
       const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
-      const input: CreateServerInput = {
-        name: name.trim() || modelId.split("/").pop() || "server",
+      const s = await api.serversCreate({
         model_id: modelId.trim(),
+        name: name.trim() || modelId.split("/").pop() || "server",
         task,
         quant,
         gpu_mem_util: parseFloat(gpuUtil) || 0.92,
-        max_model_len: maxLen ? parseInt(maxLen, 10) || undefined : undefined,
+        max_model_len: maxLen ? parseInt(maxLen, 10) : undefined,
         swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
         cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
         served_model_name: served.trim() || undefined,
-      };
-      const def = await api.serversCreate(input);
-      onDone(def);
+      });
+      onDone(s);
     } catch (e) {
       onErr(String(e));
     } finally {
@@ -406,6 +472,11 @@ function NewServerForm({
   return (
     <Card className="border-indigo-500/30">
       <CardTitle>Define new server</CardTitle>
+      {freeGb !== null && freeGb !== undefined && freeGb < 1.0 && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+          ⚠️ <strong>VRAM Pressure:</strong> Current free VRAM is only {freeGb.toFixed(1)} GB. Consider configuring Swap Space or CPU Offload below to avoid OOM errors.
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Model id (HF)">
           <input className={inputCls} placeholder="Qwen/Qwen2.5-0.5B-Instruct" value={modelId} onChange={(e) => setModelId(e.target.value)} />

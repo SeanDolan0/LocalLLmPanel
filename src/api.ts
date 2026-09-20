@@ -105,6 +105,10 @@ export const api = {
     invoke<Settings>("settings_set", { patch }),
   wslconfigGet: () => invoke<WslConfigInfo>("wslconfig_get"),
   gpuStatus: () => invoke<import("./types").GpuSnapshot | null>("gpu_status"),
+  systemMetricsSeries: () =>
+    invoke<import("./types").SystemMetricPoint[]>("system_metrics_series"),
+  serverMetricsSeries: (serverId: string) =>
+    invoke<import("./types").ServerMetricPoint[]>("server_metrics_series", { serverId }),
   getMemorySettings: () => invoke<MemorySettings>("get_memory_settings"),
   updateMemorySettings: (settings: MemorySettings) =>
     invoke<void>("update_memory_settings", { settings }),

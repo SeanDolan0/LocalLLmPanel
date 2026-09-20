@@ -52,6 +52,8 @@ pub fn run() {
             commands::settings_set,
             commands::wslconfig_get,
             commands::gpu_status,
+            commands::system_metrics_series,
+            commands::server_metrics_series,
             commands::get_memory_settings,
             commands::update_memory_settings,
             commands::get_system_memory,

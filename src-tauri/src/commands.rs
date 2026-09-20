@@ -65,6 +65,7 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
         let gpu = gpu_snapshot(&distro_detected);
         if let Some(g) = &gpu {
             *st.gpu.lock().unwrap() = Some(g.clone());
+            st.record_system_metric(g);
         }
         let (bandwidth, known) = gpu
             .as_ref()
@@ -836,6 +837,7 @@ pub async fn servers_create(
 pub fn servers_delete(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
     let st = (*state).clone();
     server::stop_server(&st, Some(&app), &id).ok();
+    st.server_metrics.lock().unwrap().remove(&id);
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.retain(|s| s.id != id);
     cfg.save().map_err(|e| e.to_string())?;
@@ -1281,12 +1283,57 @@ pub async fn gpu_status(state: State<'_, Arc<AppState>>) -> Result<Option<GpuSna
         let snap = gpu_snapshot(&distro);
         if let Some(s) = snap.clone() {
             let mut gpu = st.gpu.lock().unwrap();
-            *gpu = Some(s);
+            *gpu = Some(s.clone());
+            st.record_system_metric(&s);
         }
         snap
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn system_metrics_series(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::state::SystemMetricPoint>, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let should_sample = {
+            let sm = st.system_metrics.lock().unwrap();
+            match sm.back() {
+                Some(pt) => crate::state::now_ms().saturating_sub(pt.timestamp) > 4000,
+                None => true,
+            }
+        };
+        if should_sample {
+            let distro = st.resolve_distro();
+            if let Some(s) = gpu_snapshot(&distro) {
+                let mut gpu = st.gpu.lock().unwrap();
+                *gpu = Some(s.clone());
+                st.record_system_metric(&s);
+            }
+        }
+        let sm = st.system_metrics.lock().unwrap();
+        Ok(sm.iter().cloned().collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub fn get_server_metrics_series(
+    state: &AppState,
+    server_id: &str,
+) -> Vec<crate::state::ServerMetricPoint> {
+    let sm = state.server_metrics.lock().unwrap();
+    sm.get(server_id).map(|q| q.iter().cloned().collect()).unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn server_metrics_series(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<crate::state::ServerMetricPoint>, String> {
+    Ok(get_server_metrics_series(&state, &server_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -1756,5 +1803,39 @@ mod tests {
 
         let dir_name = format!("models--{}", entry.model_id.replace('/', "--"));
         assert_eq!(dir_name, "models--Qwen--Qwen2.5-Coder-7B-Instruct");
+    }
+
+    #[test]
+    fn test_metric_series_commands() {
+        use crate::state::{AppState, ServerMetricPoint, SystemMetricPoint};
+        let app_state = Arc::new(AppState::new());
+        {
+            let mut sm = app_state.system_metrics.lock().unwrap();
+            sm.push_back(SystemMetricPoint {
+                timestamp: 1000,
+                vram_used_mb: 8000,
+                vram_total_mb: 24576,
+                vram_free_mb: 16576,
+                gpu_util_pct: 45,
+            });
+        }
+        {
+            let mut srv_m = app_state.server_metrics.lock().unwrap();
+            let q = srv_m.entry("test-srv".to_string()).or_default();
+            q.push_back(ServerMetricPoint {
+                timestamp: 1000,
+                tok_s: 55.4,
+                prompt_tok_s: 220.1,
+                requests_running: 2,
+                requests_waiting: 0,
+            });
+        }
+
+        let srv_res = get_server_metrics_series(&app_state, "test-srv");
+        assert_eq!(srv_res.len(), 1);
+        assert_eq!(srv_res[0].tok_s, 55.4);
+
+        let empty_res = get_server_metrics_series(&app_state, "nonexistent");
+        assert!(empty_res.is_empty());
     }
 }

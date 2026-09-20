@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, events, fmtGB, fmtNum } from "../api";
 import { Button, Card, CardTitle, Gauge, Spinner } from "../ui";
-import type { EnvStatus, ProvisionReport, WslLogEvent } from "../types";
+import { Sparkline } from "../components/Sparkline";
+import type { EnvStatus, ProvisionReport, SystemMetricPoint, WslLogEvent } from "../types";
 
 export default function Dashboard() {
   const [env, setEnv] = useState<EnvStatus | null>(null);
+  const [systemSeries, setSystemSeries] = useState<SystemMetricPoint[]>([]);
   const [logs, setLogs] = useState<WslLogEvent[]>([]);
   const [provisioning, setProvisioning] = useState(false);
   const [provisionErr, setProvisionErr] = useState<string | null>(null);
@@ -21,7 +23,25 @@ export default function Dashboard() {
     api
       .envStatus()
       .then(setEnv)
-      .catch(() => setEnv((e) => e ?? { wsl_ok: false, distro: "?", apt_based: false, provisioned: false, report: null, gpu: null, servers_running: 0, running_weight_gb: 0, gpu_bandwidth_gbs: 700, gpu_bw_known: false }));
+      .catch(() =>
+        setEnv((e) => e ?? {
+          wsl_ok: false,
+          distro: "?",
+          apt_based: false,
+          provisioned: false,
+          report: null,
+          gpu: null,
+          servers_running: 0,
+          running_weight_gb: 0,
+          gpu_bandwidth_gbs: 700,
+          gpu_bw_known: false,
+        })
+      );
+
+    api
+      .systemMetricsSeries()
+      .then(setSystemSeries)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -74,6 +94,21 @@ export default function Dashboard() {
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{provisionErr}</div>
       )}
 
+      {/* VRAM Pressure Alert */}
+      {gpu && (freeGb < 1.0 || (env && env.running_weight_gb > 0 && env.running_weight_gb > freeGb)) && (
+        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-amber-200 shadow-sm flex items-start gap-3">
+          <span className="text-xl">⚠️</span>
+          <div>
+            <div className="font-semibold text-amber-100">VRAM Pressure Warning</div>
+            <div className="text-xs text-amber-300/90 mt-0.5">
+              {freeGb < 1.0
+                ? `Critical VRAM headroom: only ${fmtNum(freeGb, 2)} GB free remaining. High risk of CUDA out-of-memory errors or fallback to CPU swap.`
+                : `Active model weights (${fmtGB(env?.running_weight_gb || 0)}) exceed available GPU VRAM headroom (${fmtNum(freeGb, 1)} GB free). Offloading to RAM or swap may be active.`}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Health row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
@@ -108,7 +143,7 @@ export default function Dashboard() {
         <Card>
           <CardTitle>GPU</CardTitle>
           {gpu ? (
-            <div className="space-y-1.5 text-sm">
+            <div className="space-y-2 text-sm">
               <div className="font-medium text-slate-200">{gpu.name}</div>
               <div className="text-xs text-slate-500">
                 {fmtNum(gpu.vram_free_mb / 1024, 1)} / {fmtNum(gpu.vram_total_mb / 1024, 0)} GB free · util{" "}
@@ -121,6 +156,19 @@ export default function Dashboard() {
               </div>
               <div className="text-xs text-slate-500">
                 CUDA: {rep?.torch_version ?? "n/a"} · bf16 {rep?.bf16_supported ? "✓" : "✗"}
+              </div>
+              <div className="pt-1">
+                <Sparkline
+                  label="Core Util"
+                  data={systemSeries.map((p) => p.gpu_util_pct)}
+                  height={28}
+                  min={0}
+                  max={100}
+                  color="#34d399"
+                  unit="%"
+                  currentValue={`${gpu.util_percent}%`}
+                  showMinMax={false}
+                />
               </div>
             </div>
           ) : (
@@ -180,11 +228,37 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* VRAM gauge + log */}
+      {/* VRAM gauge + Time-series Sparklines + log */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card className="flex items-center justify-center">
-          <Gauge pct={vramPct} label={gpu ? `${vramPct}%` : "?"} sub={gpu ? `${fmtNum(freeGb, 1)} GB free / ${fmtNum(totalGb, 0)} GB` : "no GPU"} />
+        <Card className="flex flex-col justify-between p-4 gap-4">
+          <CardTitle>GPU & VRAM History (last 5 min)</CardTitle>
+          <div className="flex flex-col sm:flex-row items-center justify-around gap-6 my-auto">
+            <Gauge pct={vramPct} label={gpu ? `${vramPct}%` : "?"} sub={gpu ? `${fmtNum(freeGb, 1)} GB free / ${fmtNum(totalGb, 0)} GB` : "no GPU"} />
+            <div className="flex-1 w-full space-y-3">
+              <Sparkline
+                label="VRAM Used"
+                data={systemSeries.map((p) => p.vram_used_mb / 1024)}
+                unit="GB"
+                min={0}
+                max={totalGb || 24}
+                color="#38bdf8"
+                currentValue={gpu ? `${((gpu.vram_total_mb - gpu.vram_free_mb) / 1024).toFixed(1)} GB` : undefined}
+                formatValue={(v) => `${v.toFixed(1)}`}
+              />
+              <Sparkline
+                label="GPU Core Utilization"
+                data={systemSeries.map((p) => p.gpu_util_pct)}
+                unit="%"
+                min={0}
+                max={100}
+                color="#34d399"
+                currentValue={gpu ? `${gpu.util_percent}%` : undefined}
+                formatValue={(v) => `${Math.round(v)}`}
+              />
+            </div>
+          </div>
         </Card>
+
         <Card>
           <CardTitle
             right={

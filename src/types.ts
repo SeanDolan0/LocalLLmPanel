@@ -380,3 +380,19 @@ export interface BenchmarkErrorPayload {
   server_id: string;
   error: string;
 }
+
+export interface SystemMetricPoint {
+  timestamp: number;
+  vram_used_mb: number;
+  vram_total_mb: number;
+  vram_free_mb: number;
+  gpu_util_pct: number;
+}
+
+export interface ServerMetricPoint {
+  timestamp: number;
+  tok_s: number;
+  prompt_tok_s: number;
+  requests_running: number;
+  requests_waiting: number;
+}
