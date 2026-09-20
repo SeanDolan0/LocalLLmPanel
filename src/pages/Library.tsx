@@ -41,6 +41,32 @@ export default function Library() {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    api.pullStatus().then((res) => {
+      if (res?.pulling?.length) {
+        const active: Record<string, PullStatus> = {};
+        res.pulling.forEach((id) => {
+          active[id] = { model: id, state: "downloading" };
+        });
+        setPulls((prev) => ({ ...prev, ...active }));
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleCancelPull = async (modelId: string) => {
+    try {
+      await api.pullCancel(modelId);
+      setPulls((prev) => {
+        const next = { ...prev };
+        delete next[modelId];
+        return next;
+      });
+      refresh();
+    } catch (err) {
+      setErrorMsg(String(err));
+    }
+  };
+
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setIsDeleting(true);
@@ -111,6 +137,30 @@ export default function Library() {
           </div>
         </div>
       </Card>
+
+      {/* Active Downloads Banner */}
+      {Object.entries(pulls).filter(([, p]) => p.state === "downloading").length > 0 && (
+        <div className="space-y-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
+          <div className="font-semibold text-indigo-300">Active Downloads</div>
+          {Object.entries(pulls)
+            .filter(([, p]) => p.state === "downloading")
+            .map(([m, p]) => (
+              <div key={m} className="flex items-center justify-between gap-2">
+                <div className="truncate">
+                  <span className="text-indigo-200 font-medium">{m}</span>
+                  {p.file ? <span className="ml-2 text-slate-400">({p.file})</span> : null}
+                </div>
+                <Button
+                  variant="danger"
+                  className="text-xs px-2.5 py-1 shrink-0"
+                  onClick={() => handleCancelPull(m)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            ))}
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -232,7 +282,15 @@ export default function Library() {
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-edge/60 flex items-center justify-between gap-2">
-                  {e.in_use ? (
+                  {pull?.state === "downloading" ? (
+                    <Button
+                      variant="danger"
+                      onClick={() => handleCancelPull(e.model_id)}
+                      className="text-xs"
+                    >
+                      Cancel
+                    </Button>
+                  ) : e.in_use ? (
                     <Button
                       variant="danger"
                       disabled
@@ -254,6 +312,7 @@ export default function Library() {
                   <Button
                     variant="ghost"
                     className="text-xs"
+                    disabled={pull?.state === "downloading"}
                     onClick={() => navigate("/servers", { state: { prefillModel: e.model_id } })}
                   >
                     Deploy →

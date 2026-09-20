@@ -712,6 +712,20 @@ pub fn pull_status(state: State<'_, Arc<AppState>>) -> PullState {
     PullState { pulling: pulling.keys().cloned().collect() }
 }
 
+#[tauri::command]
+pub async fn pull_cancel(
+    state: State<'_, Arc<AppState>>,
+    model_id: String,
+) -> Result<(), String> {
+    let st = (*state).clone();
+    let distro = st.resolve_distro();
+    // Kill any hf download processes matching this model id
+    let script = format!("pkill -f 'hf download.*{}' || true", model_id);
+    let _ = crate::wsl::run_script(&distro, &script);
+    st.pulling.lock().unwrap().remove(&model_id);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Servers
 // ---------------------------------------------------------------------------

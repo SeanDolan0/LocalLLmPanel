@@ -223,6 +223,15 @@ export default function Search() {
 
   useEffect(() => {
     api.envStatus().then(setEnv).catch(() => {});
+    api.pullStatus().then((res) => {
+      if (res?.pulling?.length) {
+        const active: Record<string, PullStatus> = {};
+        res.pulling.forEach((id) => {
+          active[id] = { model: id, state: "downloading" };
+        });
+        setPulls((prev) => ({ ...prev, ...active }));
+      }
+    }).catch(() => {});
     const unsub = events.pullProgress((p) => {
       setPulls((prev) => ({ ...prev, [p.model]: p }));
     });
@@ -299,6 +308,15 @@ export default function Search() {
 
   const pull = (repoId: string) => {
     api.pullModel(repoId).catch((e) => setSearchErr(String(e)));
+  };
+
+  const cancelPull = (repoId: string) => {
+    api.pullCancel(repoId).catch((e) => setSearchErr(String(e)));
+    setPulls((prev) => {
+      const next = { ...prev };
+      delete next[repoId];
+      return next;
+    });
   };
 
   const deploy = (repoId: string, quant: string, fit?: FitResultBackend) => {
@@ -533,6 +551,7 @@ export default function Search() {
                   onSelect={() => setSelectedModel(m)}
                   onDeploy={deploy}
                   onPull={pull}
+                  onCancelPull={cancelPull}
                   pullState={pulls[getBestVariant(m)?.variant.repo_id || m.id] || pulls[m.id]}
                 />
               ))}
@@ -574,6 +593,7 @@ export default function Search() {
                   onSelect={() => setSelectedModel(m)}
                   onDeploy={deploy}
                   onPull={pull}
+                  onCancelPull={cancelPull}
                   pullState={pulls[getBestVariant(m)?.variant.repo_id || m.id] || pulls[m.id]}
                 />
               ))}
@@ -721,17 +741,29 @@ export default function Search() {
                               Deploy
                             </Button>
                             {pullState ? (
-                              <Badge
-                                color={
-                                  pullState.state === "complete"
-                                    ? "emerald"
-                                    : pullState.state === "failed"
-                                    ? "red"
-                                    : "indigo"
-                                }
-                              >
-                                {pullState.state}
-                              </Badge>
+                              <div className="flex items-center gap-1.5">
+                                <Badge
+                                  color={
+                                    pullState.state === "complete"
+                                      ? "emerald"
+                                      : pullState.state === "failed"
+                                      ? "red"
+                                      : "indigo"
+                                  }
+                                >
+                                  {pullState.state}
+                                </Badge>
+                                {pullState.state === "downloading" && (
+                                  <Button
+                                    variant="danger"
+                                    className="text-xs px-2 py-0.5"
+                                    onClick={() => cancelPull(variant?.repo_id || m.id)}
+                                    title="Cancel download"
+                                  >
+                                    Cancel
+                                  </Button>
+                                )}
+                              </div>
                             ) : (
                               <Button
                                 variant="ghost"
@@ -759,8 +791,18 @@ export default function Search() {
           {Object.entries(pulls)
             .filter(([, p]) => p.state === "downloading")
             .map(([m, p]) => (
-              <div key={m} className="truncate">
-                <span className="text-indigo-300 font-medium">{m}</span>: {p.file}
+              <div key={m} className="flex items-center justify-between gap-2">
+                <div className="truncate">
+                  <span className="text-indigo-300 font-medium">{m}</span>: {p.file || "Downloading..."}
+                </div>
+                <Button
+                  variant="danger"
+                  className="text-xs px-2.5 py-1 shrink-0"
+                  onClick={() => cancelPull(m)}
+                  title="Cancel download"
+                >
+                  Cancel
+                </Button>
               </div>
             ))}
         </div>
@@ -786,6 +828,7 @@ export default function Search() {
           onClose={() => setSelectedModel(null)}
           pulls={pulls}
           onPull={pull}
+          onCancelPull={cancelPull}
           onDeploy={deploy}
           totalVramMb={env?.gpu?.vram_total_mb ?? null}
         />
@@ -802,12 +845,14 @@ function ModelCard({
   onSelect,
   onDeploy,
   onPull,
+  onCancelPull,
   pullState,
 }: {
   model: ModelWithFit;
   onSelect: () => void;
   onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
   onPull: (repoId: string) => void;
+  onCancelPull?: (repoId: string) => void;
   pullState?: PullStatus;
 }) {
   const best = getBestVariant(model);
@@ -1064,18 +1109,30 @@ function ModelCard({
             Deploy
           </Button>
           {pullState ? (
-            <Badge
-              color={
-                pullState.state === "complete"
-                  ? "emerald"
-                  : pullState.state === "failed"
-                  ? "red"
-                  : "indigo"
-              }
-              title={pullState.file || undefined}
-            >
-              {pullState.state}
-            </Badge>
+            <div className="flex items-center gap-1.5">
+              <Badge
+                color={
+                  pullState.state === "complete"
+                    ? "emerald"
+                    : pullState.state === "failed"
+                    ? "red"
+                    : "indigo"
+                }
+                title={pullState.file || undefined}
+              >
+                {pullState.state}
+              </Badge>
+              {pullState.state === "downloading" && onCancelPull && (
+                <Button
+                  variant="danger"
+                  className="text-xs px-2 py-0.5"
+                  onClick={() => onCancelPull(variant?.repo_id || model.id)}
+                  title="Cancel download"
+                >
+                  Cancel
+                </Button>
+              )}
+            </div>
           ) : (
             <Button
               variant="ghost"
@@ -1099,6 +1156,7 @@ function ModelDetailModal({
   onClose,
   pulls,
   onPull,
+  onCancelPull,
   onDeploy,
   totalVramMb,
 }: {
@@ -1106,6 +1164,7 @@ function ModelDetailModal({
   onClose: () => void;
   pulls: Record<string, PullStatus>;
   onPull: (repoId: string) => void;
+  onCancelPull?: (repoId: string) => void;
   onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
   totalVramMb: number | null;
 }) {
@@ -1439,18 +1498,30 @@ function ModelDetailModal({
 
                         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
                           {pullState ? (
-                            <Badge
-                              color={
-                                pullState.state === "complete"
-                                  ? "emerald"
-                                  : pullState.state === "failed"
-                                  ? "red"
-                                  : "indigo"
-                              }
-                              title={pullState.file || undefined}
-                            >
-                              {pullState.state}
-                            </Badge>
+                            <div className="flex items-center gap-1.5">
+                              <Badge
+                                color={
+                                  pullState.state === "complete"
+                                    ? "emerald"
+                                    : pullState.state === "failed"
+                                    ? "red"
+                                    : "indigo"
+                                }
+                                title={pullState.file || undefined}
+                              >
+                                {pullState.state}
+                              </Badge>
+                              {pullState.state === "downloading" && onCancelPull && (
+                                <Button
+                                  variant="danger"
+                                  className="text-xs px-2.5 py-1"
+                                  onClick={() => onCancelPull(variant.repo_id)}
+                                  title="Cancel download"
+                                >
+                                  Cancel
+                                </Button>
+                              )}
+                            </div>
                           ) : (
                             <Button
                               variant="ghost"

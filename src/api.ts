@@ -61,6 +61,7 @@ export const api = {
     invoke<ModelStats>("model_stats", { modelId, quant: quant ?? null }),
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),
   pullStatus: () => invoke<{ pulling: string[] }>("pull_status"),
+  pullCancel: (modelId: string) => invoke<void>("pull_cancel", { modelId }),
   serversList: () => invoke<ServerListRow[]>("servers_list"),
   serversCreate: (input: CreateServerInput) => invoke<ServerDef>("servers_create", { input }),
   serversDelete: (id: string) => invoke<void>("servers_delete", { id }),

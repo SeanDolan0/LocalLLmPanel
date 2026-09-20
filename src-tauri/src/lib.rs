@@ -115,6 +115,7 @@ pub fn run() {
             commands::model_stats,
             commands::pull_model,
             commands::pull_status,
+            commands::pull_cancel,
             commands::servers_list,
             commands::servers_create,
             commands::servers_delete,

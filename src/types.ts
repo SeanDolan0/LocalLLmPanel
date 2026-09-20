@@ -158,8 +158,8 @@ export interface Settings {
 export interface PullStatus {
   model: string;
   state: string; // downloading | complete | failed
-  file: string | null;
-  percent: number | null;
+  file?: string | null;
+  percent?: number | null;
 }
 
 export interface WslLogEvent {

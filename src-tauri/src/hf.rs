@@ -971,4 +971,13 @@ mod tests {
         );
         assert_eq!(clean_model_query("Qwen2.5"), "Qwen2.5");
     }
+
+    #[test]
+    fn test_pull_cancellation_map() {
+        let state = Arc::new(AppState::new());
+        state.pulling.lock().unwrap().insert("test/model".into(), true);
+        assert!(state.pulling.lock().unwrap().contains_key("test/model"));
+        state.pulling.lock().unwrap().remove("test/model");
+        assert!(!state.pulling.lock().unwrap().contains_key("test/model"));
+    }
 }
