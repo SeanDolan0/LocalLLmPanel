@@ -325,6 +325,9 @@ pub struct PersistedConfig {
     pub auto_restart_crashed: bool,
     #[serde(default)]
     pub launch_at_login: bool,
+    /// WSL paths of locally imported model folders (Task 9 local import).
+    #[serde(default)]
+    pub imported_local_models: Vec<String>,
 }
 
 pub type AppConfig = PersistedConfig;
@@ -346,6 +349,7 @@ impl Default for PersistedConfig {
             resume_servers_on_launch: true,
             auto_restart_crashed: true,
             launch_at_login: false,
+            imported_local_models: Vec::new(),
         }
     }
 }

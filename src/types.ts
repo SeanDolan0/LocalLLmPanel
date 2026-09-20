@@ -215,6 +215,7 @@ export interface LibraryEntry {
   in_use?: boolean;
   in_use_server?: string | null;
   task?: string | null;
+  is_local?: boolean;
 }
 
 export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";

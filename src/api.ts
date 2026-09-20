@@ -99,6 +99,8 @@ export const api = {
   benchmarksHistory: (serverId?: string) =>
     invoke<BenchmarkRun[]>("benchmarks_history", { serverId: serverId ?? null }),
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
+  libraryImportLocal: (path: string) =>
+    invoke<import("./types").LibraryEntry>("library_import_local", { path }),
   libraryRemove: (modelId: string) => invoke<void>("library_remove", { modelId }),
   libraryDiskUsage: () => invoke<number>("library_disk_usage"),
   settingsGet: () => invoke<Settings>("settings_get"),

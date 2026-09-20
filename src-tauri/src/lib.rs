@@ -139,6 +139,7 @@ pub fn run() {
             commands::library_list,
             commands::library_remove,
             commands::library_disk_usage,
+            commands::library_import_local,
             commands::settings_get,
             commands::settings_set,
             commands::gateway_status,

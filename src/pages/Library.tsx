@@ -15,6 +15,10 @@ export default function Library() {
   const [deleteTarget, setDeleteTarget] = useState<LibraryEntry | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importPath, setImportPath] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     Promise.all([
@@ -67,6 +71,22 @@ export default function Library() {
     }
   };
 
+  const handleImport = async () => {
+    if (!importPath.trim()) return;
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      await api.libraryImportLocal(importPath.trim());
+      setImportOpen(false);
+      setImportPath("");
+      refresh();
+    } catch (err) {
+      setImportError(String(err));
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setIsDeleting(true);
@@ -108,6 +128,7 @@ export default function Library() {
         </div>
         <div className="flex items-center gap-3">
           <Button variant="ghost" onClick={refresh}>↻ Refresh</Button>
+          <Button variant="primary" onClick={() => setImportOpen(true)}>📂 Import Local Folder</Button>
         </div>
       </div>
 
@@ -251,6 +272,8 @@ export default function Library() {
                       <Badge color="amber" title={`Running on server: ${e.in_use_server || "active"}`}>
                         in use
                       </Badge>
+                    ) : e.is_local ? (
+                      <Badge color="indigo">Folder</Badge>
                     ) : (
                       <Badge color="emerald">cached</Badge>
                     )}
@@ -282,7 +305,14 @@ export default function Library() {
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-edge/60 flex items-center justify-between gap-2">
-                  {pull?.state === "downloading" ? (
+                  {e.is_local ? (
+                    <span
+                      className="text-[11px] text-slate-500"
+                      title="Managed on disk outside the HF cache — not removed by Delete"
+                    >
+                      local folder on disk
+                    </span>
+                  ) : pull?.state === "downloading" ? (
                     <Button
                       variant="danger"
                       onClick={() => handleCancelPull(e.model_id)}
@@ -321,6 +351,75 @@ export default function Library() {
               </Card>
             );
           })}
+        </div>
+      )}
+
+      {/* Import Local Folder Modal */}
+      {importOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md rounded-xl border border-indigo-500/30 bg-surface-2 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-indigo-300">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-indigo-500/10 border border-indigo-500/20 text-xl">
+                📂
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-slate-100">Import Local Model Folder</h3>
+                <p className="text-xs text-slate-400">Add an existing model directory and deploy it directly</p>
+              </div>
+            </div>
+
+            <div className="text-sm text-slate-300 space-y-2">
+              <label className="block text-xs font-medium text-slate-400" htmlFor="import-path">
+                Model directory path
+              </label>
+              <input
+                id="import-path"
+                className={inputCls}
+                placeholder="D:\AI\qwen  or  /mnt/d/AI/qwen  or  ~/models/qwen"
+                value={importPath}
+                onChange={(e) => setImportPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleImport();
+                }}
+                autoFocus
+              />
+              <div className="rounded-lg bg-surface-3 p-3 border border-edge text-xs space-y-1 text-slate-400">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-indigo-300">Windows:</span>
+                  <span className="font-mono">D:\AI\qwen</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-emerald-300">WSL:</span>
+                  <span className="font-mono">/mnt/d/AI/qwen</span>
+                </div>
+                <p className="pt-1 text-slate-500">
+                  The folder must contain a <code className="font-mono">config.json</code> so vLLM can load it.
+                </p>
+              </div>
+              {importError && (
+                <div className="rounded-md bg-red-950/50 border border-red-500/30 p-2.5 text-xs text-red-300">
+                  {importError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setImportOpen(false);
+                  setImportError(null);
+                  setImportPath("");
+                }}
+                disabled={importBusy}
+              >
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={handleImport} disabled={importBusy || !importPath.trim()}>
+                {importBusy ? <Spinner label="Checking…" /> : "Import & Add to Library"}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 

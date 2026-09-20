@@ -791,9 +791,12 @@ pub async fn servers_create(
     let quant = input.quant.unwrap_or_else(|| st.config().default_quant.clone());
     let task = input.task.unwrap_or_else(|| "instruct".into());
     let token = st.hf_token();
+    // Local model folders (imported WSL paths) have no HF metadata to enrich.
+    let is_local_path = input.model_id.starts_with('/');
     // Default max_model_len := min(declared context, VRAM context-fit) at quant.
     let max_model_len = match input.max_model_len {
         Some(l) => Some(l),
+        None if is_local_path => None,
         None => {
             let stats = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await;
             let gpu = st.gpu.lock().unwrap().clone();
@@ -821,7 +824,11 @@ pub async fn servers_create(
             Some(fit.map(|f| f.min(max_ctx)).unwrap_or(max_ctx))
         }
     };
-    let params_b = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await.and_then(|s| s.params_b);
+    let params_b = if is_local_path {
+        None
+    } else {
+        hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await.and_then(|s| s.params_b)
+    };
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1287,6 +1294,10 @@ pub struct LibraryEntry {
     pub in_use: bool,
     pub in_use_server: Option<String>,
     pub task: Option<String>,
+    /// True when this entry is an imported local folder (WSL path) rather
+    /// than a HuggingFace hub cache download.
+    #[serde(default)]
+    pub is_local: bool,
 }
 
 /// List models present in the WSL HF cache (~/.cache/huggingface/hub).
@@ -1366,13 +1377,165 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
                 in_use,
                 in_use_server,
                 task,
+                is_local: false,
             });
         }
+        let mut local =
+            scan_imported_local_folders(&distro, &st.config().imported_local_models, &running_servers);
         out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
-        out_v
+        local.append(&mut out_v);
+        local
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Scan the persisted imported local model folders inside WSL and build
+/// library entries for the ones that still exist.
+fn scan_imported_local_folders(
+    distro: &str,
+    paths: &[String],
+    running_servers: &[(String, String)],
+) -> Vec<LibraryEntry> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let quoted: Vec<String> = paths
+        .iter()
+        .map(|p| format!("'{}'", p.replace('\'', "'\\''")))
+        .collect();
+    let script = format!(
+        r#"
+for p in {}; do
+  [ -d "$p" ] || continue
+  size=$(du -sm "$p" 2>/dev/null | cut -f1)
+  files=$(find "$p" -maxdepth 2 -type f 2>/dev/null | wc -l)
+  echo "$p|$size|$files"
+done
+"#,
+        quoted.join(" ")
+    );
+    let out = crate::wsl::run_script(distro, &script);
+    let mut entries = Vec::new();
+    for line in out.stdout.lines() {
+        let mut it = line.split('|');
+        let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let model_id_str = model_id.to_string();
+        let size_mb: u64 = size.parse().unwrap_or(0);
+        let files_cnt: usize = files.parse().unwrap_or(0);
+        let mut in_use = false;
+        let mut in_use_server = None;
+        for (srv_name, srv_model) in running_servers {
+            if srv_model == &model_id_str {
+                in_use = true;
+                in_use_server = Some(srv_name.clone());
+                break;
+            }
+        }
+        entries.push(LibraryEntry {
+            model_id: model_id_str,
+            size_mb,
+            files: files_cnt,
+            quant: Some("native".into()),
+            params_b: None,
+            installed: true,
+            in_use,
+            in_use_server,
+            task: Some("instruct".into()),
+            is_local: true,
+        });
+    }
+    entries
+}
+
+/// Import a local model folder (Windows or WSL path) into the library so it
+/// can be deployed directly. The path is persisted and re-listed on refresh.
+#[tauri::command]
+pub async fn library_import_local(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<LibraryEntry, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let wsl_path = crate::wsl::windows_to_wsl_path(&path);
+        if wsl_path.is_empty() || !wsl_path.starts_with('/') {
+            return Err("Enter a local model directory path (e.g. D:\\AI\\qwen or /mnt/d/AI/qwen)".into());
+        }
+        let esc = wsl_path.replace('\'', "'\\''");
+        let distro = st.resolve_distro();
+        let check = crate::wsl::run_script(
+            &distro,
+            &format!(
+                "test -d '{}' && echo dir; test -f '{}/config.json' && echo ok",
+                esc, esc
+            ),
+        );
+        if !check.ok {
+            return Err(format!("Failed to check directory inside WSL: {}", check.stderr));
+        }
+        let stdout = check.stdout.clone();
+        if !stdout.contains("dir") {
+            return Err(format!("Directory does not exist inside WSL: {wsl_path}"));
+        }
+        if !stdout.contains("ok") {
+            return Err(format!("Directory exists inside WSL but has no config.json (not a ready vLLM model dir): {wsl_path}"));
+        }
+
+        {
+            let mut cfg = st.config.lock().unwrap();
+            if !cfg.imported_local_models.contains(&wsl_path) {
+                cfg.imported_local_models.push(wsl_path.clone());
+                let _ = cfg.save();
+            }
+        }
+
+        let stats = crate::wsl::run_script(
+            &distro,
+            &format!(
+                "size=$(du -sm '{}' 2>/dev/null | cut -f1); files=$(find '{}' -maxdepth 2 -type f 2>/dev/null | wc -l); echo \"$size|$files\"",
+                esc, esc
+            ),
+        );
+        let mut size_mb = 0u64;
+        let mut files = 0usize;
+        if let Some((sz, fl)) = stats.stdout.split_once('|') {
+            size_mb = sz.trim().parse().unwrap_or(0);
+            files = fl.trim().parse().unwrap_or(0);
+        }
+
+        let mut in_use = false;
+        let mut in_use_server = None;
+        {
+            let srvs = st.servers.lock().unwrap();
+            for ls in srvs.values() {
+                if (ls.status == crate::state::ServerStatus::Running
+                    || ls.status == crate::state::ServerStatus::Starting)
+                    && ls.def.model_id == wsl_path
+                {
+                    in_use = true;
+                    in_use_server = Some(ls.def.name.clone());
+                    break;
+                }
+            }
+        }
+
+        Ok(LibraryEntry {
+            model_id: wsl_path,
+            size_mb,
+            files,
+            quant: Some("native".into()),
+            params_b: None,
+            installed: true,
+            in_use,
+            in_use_server,
+            task: Some("instruct".into()),
+            is_local: true,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub fn compose_library_remove_script(model_id: &str) -> String {
@@ -1994,6 +2157,7 @@ mod tests {
             in_use: false,
             in_use_server: None,
             task: Some("instruct".to_string()),
+            is_local: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: LibraryEntry = serde_json::from_str(&json).unwrap();

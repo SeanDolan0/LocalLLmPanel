@@ -4,6 +4,35 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
+/// Convert a Windows (or already-WSL) path to the WSL mount path.
+///
+/// `D:\AI\qwen` -> `/mnt/d/AI/qwen`. Paths already inside WSL
+/// (`/mnt/...`, `/home/...`, `~`) pass through unchanged so they can be
+/// pasted either way.
+pub fn windows_to_wsl_path(path: &str) -> String {
+    let p = path.trim();
+    if p.is_empty() {
+        return p.to_string();
+    }
+    // Already a WSL-style path: keep it as-is.
+    if p.starts_with('/') || p.starts_with('~') {
+        return p.to_string();
+    }
+    // Drive-letter path (backslash or forward slash): `C:\Models` or `c:/models`.
+    let bytes = p.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let drive = bytes[0].to_ascii_lowercase() as char;
+        let rest: String = p[2..].replace('\\', "/");
+        let rest = rest.trim_matches('/');
+        if rest.is_empty() {
+            return format!("/mnt/{drive}");
+        }
+        return format!("/mnt/{drive}/{rest}");
+    }
+    // Unknown shape — pass through untouched.
+    p.to_string()
+}
+
 /// Create a `Command` for `wsl.exe` with `CREATE_NO_WINDOW` on Windows
 /// so that child console windows do not flash on screen.
 pub fn wsl_command() -> Command {
@@ -337,6 +366,17 @@ mod tests {
         // This tests the real local machine; if no wsl.exe at all, we still
         // shouldn't panic — just return None.
         let _ = detect_default_distro();
+    }
+
+    #[test]
+    fn test_windows_to_wsl_path_conversion() {
+        assert_eq!(windows_to_wsl_path(r"C:\Models\Llama"), "/mnt/c/Models/Llama");
+        assert_eq!(windows_to_wsl_path(r"D:\AI\qwen"), "/mnt/d/AI/qwen");
+        assert_eq!(windows_to_wsl_path(r"D:\AI\qwen\"), "/mnt/d/AI/qwen");
+        assert_eq!(windows_to_wsl_path("D:/AI/qwen"), "/mnt/d/AI/qwen");
+        assert_eq!(windows_to_wsl_path("/mnt/d/Models/Llama"), "/mnt/d/Models/Llama");
+        assert_eq!(windows_to_wsl_path("~/models/qwen"), "~/models/qwen");
+        assert_eq!(windows_to_wsl_path("  D:/AI/qwen  "), "/mnt/d/AI/qwen");
     }
 
     #[test]
