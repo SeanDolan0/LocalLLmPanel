@@ -763,6 +763,16 @@ export default function Search() {
                                     Cancel
                                   </Button>
                                 )}
+                                {pullState.state === "failed" && (
+                                  <Button
+                                    variant="ghost"
+                                    className="text-xs px-2 py-0.5"
+                                    onClick={() => pull(variant?.repo_id || m.id)}
+                                    title="Retry download"
+                                  >
+                                    Retry
+                                  </Button>
+                                )}
                               </div>
                             ) : (
                               <Button
@@ -814,8 +824,34 @@ export default function Search() {
           {Object.entries(pulls)
             .filter(([, p]) => p.state === "failed" && p.file)
             .map(([m, p]) => (
-              <div key={m} className="truncate">
-                <span className="text-rose-200 font-semibold">{m} failed</span>: {p.file}
+              <div key={m} className="flex items-center justify-between gap-2">
+                <div className="truncate">
+                  <span className="text-rose-200 font-semibold">{m} failed</span>: {p.file}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Button
+                    variant="ghost"
+                    className="text-xs px-2 py-0.5 text-rose-200 hover:text-white"
+                    onClick={() => pull(m)}
+                    title="Retry download"
+                  >
+                    Retry
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="text-xs px-2 py-0.5 text-slate-400 hover:text-slate-200"
+                    onClick={() => {
+                      setPulls((prev) => {
+                        const next = { ...prev };
+                        delete next[m];
+                        return next;
+                      });
+                    }}
+                    title="Dismiss"
+                  >
+                    ✕
+                  </Button>
+                </div>
               </div>
             ))}
         </div>
@@ -1130,6 +1166,16 @@ function ModelCard({
                   title="Cancel download"
                 >
                   Cancel
+                </Button>
+              )}
+              {pullState.state === "failed" && (
+                <Button
+                  variant="ghost"
+                  className="text-xs px-2 py-0.5"
+                  onClick={() => onPull(variant?.repo_id || model.id)}
+                  title="Retry download"
+                >
+                  Retry
                 </Button>
               )}
             </div>
@@ -1519,6 +1565,16 @@ function ModelDetailModal({
                                   title="Cancel download"
                                 >
                                   Cancel
+                                </Button>
+                              )}
+                              {pullState.state === "failed" && (
+                                <Button
+                                  variant="ghost"
+                                  className="text-xs px-2.5 py-1"
+                                  onClick={() => onPull(variant.repo_id)}
+                                  title="Retry download"
+                                >
+                                  Retry
                                 </Button>
                               )}
                             </div>

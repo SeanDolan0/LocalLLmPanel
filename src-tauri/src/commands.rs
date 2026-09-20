@@ -720,7 +720,7 @@ pub async fn pull_cancel(
     let st = (*state).clone();
     let distro = st.resolve_distro();
     // Kill any hf download processes matching this model id
-    let script = format!("pkill -f 'hf download.*{}' || true", model_id);
+    let script = format!("pkill -f 'hf download.*[ /]{}(\\s|$)' || true", model_id);
     let _ = crate::wsl::run_script(&distro, &script);
     st.pulling.lock().unwrap().remove(&model_id);
     Ok(())
@@ -2050,5 +2050,12 @@ mod tests {
         assert!(script.contains("hub/blobs"));
         assert!(script.contains("readlink"));
         assert!(script.contains("snaps"));
+    }
+
+    #[test]
+    fn test_pull_cancel_script_anchoring() {
+        let model_id = "meta-llama/Llama-3.1-8B";
+        let script = format!("pkill -f 'hf download.*[ /]{}(\\s|$)' || true", model_id);
+        assert!(script.contains("[ /]meta-llama/Llama-3.1-8B(\\s|$)"));
     }
 }

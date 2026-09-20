@@ -758,6 +758,16 @@ pub fn pull_model(
             );
         };
         let out = crate::wsl::run_script_stream(&distro, &script, on_line);
+
+        // If the download was cancelled via pull_cancel, model_id was already removed from pulling_arc.
+        // Do not emit "failed" or overwrite the cancellation state.
+        {
+            let pulling = pulling_arc.lock().unwrap();
+            if !pulling.contains_key(&model_id) {
+                return;
+            }
+        }
+
         let state_label = if out.ok && !out.stdout.contains("__HF_PULL_FAILED__") && !out.stderr.contains("__HF_PULL_FAILED__")
         {
             "complete"
