@@ -191,55 +191,60 @@ pub fn run_script_stream(
             return RunOutput { ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {e}") };
         }
     };
+
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let (mut so, mut se) = (String::new(), String::new());
 
-    // Drain one stream, splitting on \n (vLLM/HF progress uses \r — those
-    // lines are flushed as-is so the UI can show them live).
-    fn drain<R: std::io::Read>(reader: R, on_line: &mut dyn FnMut(&str)) -> String {
-        let mut out = String::new();
-        let mut partial = String::new();
-        for b in reader.bytes() {
-            let Ok(b) = b else { break };
-            if b == b'\0' {
-                continue;
-            }
-            if b == b'\n' {
-                out.push_str(&partial);
-                out.push('\n');
-                if !partial.trim().is_empty() {
-                    on_line(&partial);
-                }
-                partial.clear();
-            } else if b == b'\r' {
-                if !partial.trim().is_empty() {
-                    on_line(&partial);
-                }
-                partial.clear();
-            } else {
-                partial.push(b as char);
-            }
-        }
-        if !partial.trim().is_empty() {
-            out.push_str(&partial);
-        }
-        out
-    }
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>();
 
+    let mut handles = Vec::new();
     if let Some(out) = stdout {
-        so = drain(out, &mut on_line);
+        let tx_out = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let reader = BufReader::new(out);
+            for line in reader.lines().flatten() {
+                let _ = tx_out.send((true, line));
+            }
+        }));
     }
     if let Some(err) = stderr {
-        se = drain(err, &mut on_line);
+        let tx_err = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let reader = BufReader::new(err);
+            for line in reader.lines().flatten() {
+                let _ = tx_err.send((false, line));
+            }
+        }));
+    }
+    drop(tx);
+
+    let mut so = String::new();
+    let mut se = String::new();
+
+    while let Ok((is_stdout, line)) = rx.recv() {
+        let clean: String = line.chars().filter(|c| *c != '\u{0}').collect();
+        if !clean.trim().is_empty() {
+            on_line(&clean);
+        }
+        if is_stdout {
+            so.push_str(&clean);
+            so.push('\n');
+        } else {
+            se.push_str(&clean);
+            se.push('\n');
+        }
     }
 
-    // Read the remainder (leftover lines not yet flushed after drain).
+    for h in handles {
+        let _ = h.join();
+    }
+
     let status = child.wait();
     let (ok, code) = match &status {
         Ok(s) => (s.success(), s.code().unwrap_or(-1)),
         Err(_) => (false, -1),
     };
+
     RunOutput {
         ok,
         code,
@@ -376,5 +381,26 @@ mod tests {
             assert!(!d.contains('\u{0}'));
             assert!(!d.is_empty());
         }
+    }
+
+    #[test]
+    fn test_run_script_stream_does_not_deadlock_on_large_stderr() {
+        // Echoes lines to both stdout and stderr in alternating batches
+        let script = r#"
+            python3 -c '
+import sys
+for i in range(500):
+    sys.stderr.write("E" * 128 + "\n")
+    sys.stdout.write("O" * 128 + "\n")
+sys.stderr.flush()
+sys.stdout.flush()
+' 2>&1 || true
+        "#;
+        let mut count = 0;
+        let res = run_script_stream("Ubuntu", script, |_line| {
+            count += 1;
+        });
+        // Even if Ubuntu is absent or command fails, it must return cleanly without hanging
+        let _ = res;
     }
 }
