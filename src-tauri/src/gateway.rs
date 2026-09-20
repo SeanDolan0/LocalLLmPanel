@@ -73,6 +73,39 @@ pub fn find_server_port_for_model(
     None
 }
 
+/// Route a requested embedding model name to the port of the running
+/// server that serves it. Mirrors find_server_port_for_model but for
+/// task == "embed".
+pub fn find_server_port_for_embed(
+    servers: &BTreeMap<String, crate::state::LiveServer>,
+    model: &str,
+) -> Option<u16> {
+    let m = model.trim();
+    if m.is_empty() {
+        return None;
+    }
+    let running: Vec<&crate::state::LiveServer> = servers
+        .values()
+        .filter(|ls| ls.status == crate::state::ServerStatus::Running && ls.def.task == "embed")
+        .collect();
+    for ls in &running {
+        if ls.def.effective_model_name().eq_ignore_ascii_case(m)
+            || ls.def.model_id.eq_ignore_ascii_case(m)
+        {
+            return Some(ls.def.port);
+        }
+    }
+    let lower = m.to_lowercase();
+    for ls in &running {
+        let hf = ls.def.model_id.to_lowercase();
+        let name = ls.def.effective_model_name().to_lowercase();
+        if hf.ends_with(&lower) || name.ends_with(&lower) || lower.ends_with(&hf) {
+            return Some(ls.def.port);
+        }
+    }
+    None
+}
+
 /// OpenAI-style `data` rows for `GET /v1/models`. Prefer the served model
 /// name when present (that is the name a client would pass in `"model"`).
 pub fn model_rows(servers: &BTreeMap<String, crate::state::LiveServer>) -> Vec<serde_json::Value> {
@@ -551,6 +584,30 @@ mod tests {
         assert_eq!(find_server_port_for_model(&servers, "nope/model"), None);
         assert_eq!(find_server_port_for_model(&servers, ""), None);
         assert_eq!(find_server_port_for_model(&servers, "   "), None);
+    }
+
+    #[test]
+    fn test_route_embed_server_exact_and_fuzzy() {
+        let servers = running_map();
+        // BAAI/bge-small-en is task=embed, port 8003 in running_map()
+        assert_eq!(
+            find_server_port_for_embed(&servers, "BAAI/bge-small-en"),
+            Some(8003)
+        );
+        assert_eq!(
+            find_server_port_for_embed(&servers, "bge-small-en"),
+            Some(8003)
+        );
+    }
+
+    #[test]
+    fn test_route_embed_ignores_instruct_servers() {
+        let servers = running_map();
+        assert_eq!(
+            find_server_port_for_embed(&servers, "Qwen/Qwen2.5-7B-Instruct"),
+            None
+        );
+        assert_eq!(find_server_port_for_embed(&servers, ""), None);
     }
 
     #[test]
