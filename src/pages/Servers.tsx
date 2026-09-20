@@ -557,11 +557,12 @@ function NewServerForm({
   const [creating, setCreating] = useState(false);
   const [modelPath, setModelPath] = useState("");
   const [mmprojPath, setMmprojPath] = useState("");
-  const [ctxSize, setCtxSize] = useState("32768");
+  const [ctxSize, setCtxSize] = useState("");
   const [nGpuLayers, setNGpuLayers] = useState("99");
-  const [nCpuMoe, setNCpuMoe] = useState("24");
+  const [nCpuMoe, setNCpuMoe] = useState("");
   const [flashAttn, setFlashAttn] = useState(true);
   const [jinja, setJinja] = useState(true);
+  const [moePresetApplied, setMoePresetApplied] = useState(false);
 
   useEffect(() => {
     if (initialModelId) {
@@ -684,15 +685,27 @@ function NewServerForm({
         </Field>}
         {backend === "llamacpp" && (
           <>
-            <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-              <div>
-                <div className="text-sm font-medium text-indigo-200">MoE with CPU expert offload</div>
-                <div className="text-xs text-slate-400">Starting point for large GGUF MoE models on limited VRAM.</div>
+            {!moePresetApplied && (
+              <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+                <div>
+                  <div className="text-sm font-medium text-indigo-200">MoE with CPU expert offload</div>
+                  <div className="text-xs text-slate-400">Starting point for large GGUF MoE models on limited VRAM.</div>
+                </div>
+                <Button
+                  variant="subtle"
+                  onClick={() => {
+                    setNGpuLayers("99");
+                    setNCpuMoe("24");
+                    setCtxSize("32768");
+                    setFlashAttn(true);
+                    setJinja(true);
+                    setMoePresetApplied(true);
+                  }}
+                >
+                  Apply preset
+                </Button>
               </div>
-              <Button variant="subtle" onClick={() => { setNGpuLayers("99"); setNCpuMoe("24"); setCtxSize("32768"); setFlashAttn(true); setJinja(true); }}>
-                Apply preset
-              </Button>
-            </div>
+            )}
             <Field label="Context size">
               <input className={inputCls} value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} />
             </Field>

@@ -23,9 +23,15 @@ Run commands from the repository root unless noted.
 npm install
 npm run dev                 # Vite frontend only
 npm run tauri dev           # development desktop app; builds frontend and Rust
-npm run build               # TypeScript no-emit check followed by Vite production build
-npm run tauri build         # Windows MSI/NSIS production bundle
+npm run check               # fast preflight: TypeScript checks + cargo check (~3s)
+npm run build:fast          # fast standalone executable (.exe only, ~20s, no bundling)
+npm run build:setup         # standard release: standalone + NSIS setup installer (~40s)
+npm run build:all           # full distribution: standalone + NSIS + WiX MSI package
+npm run release             # alias for npm run build:setup
 ```
+
+See [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) for the complete AI agent deployment SOP, 4-file version synchronization rules, and `skills/github-deployment/SKILL.md` for GitHub release workflows.
+
 
 Rust commands run from `src-tauri`:
 

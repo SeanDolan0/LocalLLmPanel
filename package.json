@@ -1,13 +1,18 @@
 {
   "name": "local-llm-panel",
   "private": true,
-  "version": "1.2.2",
+  "version": "1.2.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check": "node scripts/build.mjs --check",
+    "build:fast": "node scripts/build.mjs --fast",
+    "build:setup": "node scripts/build.mjs --setup",
+    "build:all": "node scripts/build.mjs --all",
+    "release": "node scripts/build.mjs --setup"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.4.0",

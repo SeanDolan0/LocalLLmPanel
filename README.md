@@ -22,17 +22,20 @@ npm install
 npm run tauri dev        # builds web UI + Rust, launches app
 ```
 
-Production bundle:
+Production builds & releases:
 
 ```bash
-npm run tauri build
+npm run check              # fast preflight type check + cargo check (~3s)
+npm run build:fast         # fast standalone executable (~20s, no bundling)
+npm run build:setup        # standard release: standalone + NSIS installer (~40s)
+npm run build:all          # full distribution: standalone + NSIS + WiX MSI
 ```
 
-Binary outputs to `src-tauri/target/release/bundle/msi|nsis/`.
+Staged release binaries and installers output automatically to `dist-release/`.
 
-The Windows Rust build uses LLVM's `lld-link.exe` for faster linking. Install
-LLVM for Windows and add its `bin` directory (normally
-`C:\Program Files\LLVM\bin`) to `PATH` before running the Tauri commands.
+The build runner (`scripts/build.mjs`) automatically locates LLVM's `lld-link.exe` (from `C:\Program Files\LLVM\bin` or Visual Studio VC tools) and enables high-speed linking.
+
+For the full cross-agent deployment SOP, version synchronization guidelines, and GitHub release instructions, see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`skills/github-deployment/SKILL.md`](skills/github-deployment/SKILL.md).
 
 ## Test
 

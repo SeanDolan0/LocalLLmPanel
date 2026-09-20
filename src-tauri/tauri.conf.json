@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Local LLM Panel",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "identifier": "com.local-llm-panel.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "category": "DeveloperTool",
     "shortDescription": "Manage vLLM servers inside WSL2",
     "longDescription": "A native Windows app that provisions vLLM in WSL2, estimates and pulls any Hugging Face model, and runs multiple vLLM servers concurrently.",
