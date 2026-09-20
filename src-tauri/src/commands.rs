@@ -214,7 +214,7 @@ pub async fn install_llamacpp(
     let st = (*state).clone();
     let cfg = st.config();
     let destination = PathBuf::from(cfg.llamacpp_dir);
-    let github_token = (!cfg.hf_token.trim().is_empty()).then_some(cfg.hf_token);
+    let github_token = (!cfg.github_token.trim().is_empty()).then_some(cfg.github_token);
     let result = tauri::async_runtime::spawn_blocking(move || {
         crate::llamacpp_install::install(
             &destination,
@@ -277,6 +277,27 @@ pub async fn llamacpp_status(
     })
     .await
     .map_err(|e| format!("llamacpp status task error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn github_access(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::llamacpp_install::GithubAccess, String> {
+    let token = state.config().github_token;
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::llamacpp_install::test_github_access(Some(&token)))
+    })
+    .await
+    .map_err(|e| format!("GitHub access task error: {e}"))?
+}
+
+#[tauri::command]
+pub fn clear_github_token(state: State<'_, Arc<AppState>>) -> Result<PersistedConfig, String> {
+    let st = (*state).clone();
+    let mut cfg = st.config.lock().unwrap();
+    cfg.github_token.clear();
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(cfg.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -1382,6 +1403,7 @@ pub struct SettingsPatch {
     pub gguf_dir: Option<String>,
     pub llamacpp_executable: Option<String>,
     pub hf_token: Option<String>,
+    pub github_token: Option<String>,
     pub default_quant: Option<String>,
     pub advanced_settings: Option<crate::state::AdvancedSettings>,
     pub minimize_to_tray: Option<bool>,
@@ -1427,6 +1449,9 @@ pub fn settings_set(
     }
     if let Some(t) = patch.hf_token {
         cfg.hf_token = t.trim().to_string();
+    }
+    if let Some(t) = patch.github_token {
+        cfg.github_token = t.trim().to_string();
     }
     if let Some(q) = patch.default_quant {
         cfg.default_quant = q;

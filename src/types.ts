@@ -17,6 +17,16 @@ export interface LlamacppInstallStatus {
   devices: LlamaDevice[];
 }
 
+export interface GithubAccess {
+  ok: boolean;
+  status: number | null;
+  remaining: string | null;
+  reset: string | null;
+  token_used: boolean;
+  warning: string | null;
+  message: string;
+}
+
 export interface ProvisionReport {
   phases_completed: string[];
   distro: string;
@@ -202,6 +212,7 @@ export interface Settings {
   llamacpp_installed_tag?: string | null;
   llamacpp_version?: string | null;
   hf_token: string;
+  github_token: string;
   default_quant: string;
   servers: ServerDef[];
   measured: Record<string, MeasuredStats>;

@@ -28,6 +28,7 @@ export default function Settings() {
   const [gwInstruct, setGwInstruct] = useState<string | null>(null);
   const [gwEmbed, setGwEmbed] = useState<string | null>(null);
   const [llamacppStatus, setLlamacppStatus] = useState<import("../types").LlamacppInstallStatus | null>(null);
+  const [githubMsg, setGithubMsg] = useState<string | null>(null);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -150,6 +151,7 @@ export default function Settings() {
         gguf_dir: s.gguf_dir,
         llamacpp_executable: s.llamacpp_executable,
         hf_token: s.hf_token,
+        github_token: s.github_token,
         default_quant: s.default_quant,
         advanced_settings: s.advanced_settings,
         minimize_to_tray: s.minimize_to_tray,
@@ -483,6 +485,18 @@ export default function Settings() {
                     <div className="flex items-center gap-1.5 text-[11px] text-emerald-400">
                       <span>🔒</span>
                       <span>Encrypted at rest with Windows DPAPI (CryptProtectData). Never stored in plaintext.</span>
+                    </div>
+                    <div className="sm:col-span-2">
+                      <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
+                        <div className="space-y-1.5">
+                          <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => setS({ ...s, github_token: e.target.value })} />
+                          <div className="flex gap-2">
+                            <Button variant="ghost" onClick={async () => { setGithubMsg("Testing…"); try { const r = await api.githubAccess(); setGithubMsg(`${r.message} Token used: ${r.token_used ? "yes" : "no"}.`); } catch (e) { setGithubMsg(String(e)); } }}>Test GitHub access</Button>
+                            <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
+                          </div>
+                          {githubMsg && <div className="text-xs text-slate-400">{githubMsg}</div>}
+                        </div>
+                      </Field>
                     </div>
                   </div>
                 </Field>

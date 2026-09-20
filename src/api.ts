@@ -121,6 +121,7 @@ export const api = {
         | "gguf_dir"
         | "llamacpp_executable"
         | "hf_token"
+        | "github_token"
         | "default_quant"
         | "advanced_settings"
         | "minimize_to_tray"
@@ -130,6 +131,8 @@ export const api = {
       >
     >
   ) => invoke<Settings>("settings_set", { patch }),
+  githubAccess: () => invoke<import("./types").GithubAccess>("github_access"),
+  clearGithubToken: () => invoke<Settings>("clear_github_token"),
   autostartGet: () => invoke<boolean>("autostart_get"),
   autostartSet: (enabled: boolean) => invoke<void>("autostart_set", { enabled }),
   wslconfigGet: () => invoke<WslConfigInfo>("wslconfig_get"),

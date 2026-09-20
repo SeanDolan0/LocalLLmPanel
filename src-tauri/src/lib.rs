@@ -5,8 +5,8 @@ pub mod estimate;
 pub mod fit;
 pub mod gateway;
 pub mod hf;
-pub mod llmfit_adapter;
 pub mod llamacpp_install;
+pub mod llmfit_adapter;
 pub mod provision;
 pub mod security;
 pub mod server;
@@ -117,6 +117,8 @@ pub fn run() {
             commands::provision,
             commands::install_llamacpp,
             commands::llamacpp_status,
+            commands::github_access,
+            commands::clear_github_token,
             commands::search_models,
             commands::search_models_with_fit,
             commands::recommended_models,

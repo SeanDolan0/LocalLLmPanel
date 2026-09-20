@@ -407,6 +407,8 @@ pub struct PersistedConfig {
     #[serde(default)]
     pub llamacpp_help: Option<String>,
     pub hf_token: String,
+    #[serde(default)]
+    pub github_token: String,
     pub default_quant: String,
     pub servers: Vec<ServerDef>,
     pub measured: HashMap<String, MeasuredStats>,
@@ -453,6 +455,7 @@ impl Default for PersistedConfig {
             llamacpp_version: None,
             llamacpp_help: None,
             hf_token: String::new(),
+            github_token: String::new(),
             default_quant: "fp16".to_string(),
             servers: Vec::new(),
             measured: HashMap::new(),
@@ -492,6 +495,11 @@ impl PersistedConfig {
             if let Ok(plain) = crate::security::decrypt_token(&cfg.hf_token) {
                 cfg.hf_token = plain;
             }
+            if cfg.github_token.starts_with("dpapi:") {
+                if let Ok(plain) = crate::security::decrypt_token(&cfg.github_token) {
+                    cfg.github_token = plain;
+                }
+            }
         }
         cfg
     }
@@ -505,6 +513,11 @@ impl PersistedConfig {
         if !on_disk.hf_token.is_empty() && !on_disk.hf_token.starts_with("dpapi:") {
             if let Ok(enc) = crate::security::encrypt_token(&on_disk.hf_token) {
                 on_disk.hf_token = enc;
+            }
+            if !on_disk.github_token.is_empty() && !on_disk.github_token.starts_with("dpapi:") {
+                if let Ok(enc) = crate::security::encrypt_token(&on_disk.github_token) {
+                    on_disk.github_token = enc;
+                }
             }
         }
         let text = serde_json::to_string_pretty(&on_disk).map_err(|e| format!("serialize: {e}"))?;

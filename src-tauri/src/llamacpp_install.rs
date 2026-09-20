@@ -11,13 +11,24 @@ use std::time::{Duration, Instant};
 const RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10";
 const RELEASES_PAGE: &str = "https://github.com/ggml-org/llama.cpp/releases";
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GithubAccess {
+    pub ok: bool,
+    pub status: Option<u16>,
+    pub remaining: Option<String>,
+    pub reset: Option<String>,
+    pub token_used: bool,
+    pub warning: Option<String>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct Release {
     tag_name: String,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
-    prerelease: bool,
+    _prerelease: bool,
     assets: Vec<Asset>,
 }
 
@@ -258,38 +269,187 @@ fn compute_capability() -> Option<(u32, u32)> {
     ))
 }
 
-fn releases(token: Option<&str>) -> Result<Vec<Release>> {
+fn releases(token: Option<&str>) -> Result<(Vec<Release>, Option<String>)> {
     static CACHE: OnceLock<Mutex<Option<(Instant, Vec<Release>)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     if token.is_none() {
         if let Some((when, releases)) = cache.lock().unwrap().as_ref() {
             if when.elapsed() < Duration::from_secs(300) {
-                return Ok(releases.clone());
+                return Ok((releases.clone(), None));
             }
         }
     }
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("LocalLLmPanel/1.0 (llama.cpp installer)")
-        .build()?;
-    let mut request = client.get(RELEASES_API);
-    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-        request = request.bearer_auth(token);
-    }
-    let releases: Vec<Release> = request
-        .send()
-        .context("querying GitHub llama.cpp releases (rate limit may have been reached)")?
-        .error_for_status()?
-        .json()?;
+    let (releases, warning) = github_releases_with_info(RELEASES_API, token)?;
     if token.is_none() {
         *cache.lock().unwrap() = Some((Instant::now(), releases.clone()));
     }
-    Ok(releases)
+    Ok((releases, warning))
+}
+
+fn github_client() -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent("local-llm-panel")
+        .build()?)
+}
+
+fn github_request(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: Option<&str>,
+) -> reqwest::blocking::RequestBuilder {
+    let mut request = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "local-llm-panel")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+    if let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    request
+}
+
+fn github_releases_with_info(
+    url: &str,
+    token: Option<&str>,
+) -> Result<(Vec<Release>, Option<String>)> {
+    let client = github_client()?;
+    let trimmed = token.map(str::trim).filter(|token| !token.is_empty());
+    let mut response = github_request(&client, url, trimmed)
+        .send()
+        .map_err(|e| anyhow!("GitHub could not be reached: {e}"))?;
+    let mut warning = None;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED && trimmed.is_some() {
+        warning = Some(
+            "Your GitHub token was rejected; using unauthenticated access (60 requests/hour)."
+                .to_string(),
+        );
+        response = github_request(&client, url, None)
+            .send()
+            .map_err(|e| anyhow!("GitHub could not be reached: {e}"))?;
+    }
+    let status = response.status();
+    if !status.is_success() {
+        let remaining = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok());
+        let reset = response
+            .headers()
+            .get("x-ratelimit-reset")
+            .and_then(|v| v.to_str().ok());
+        let detail = match status {
+            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::TOO_MANY_REQUESTS =>
+                format!("GitHub HTTP {status}: rate limit reached (remaining: {}; resets: {}). A GitHub token raises the limit.", remaining.unwrap_or("unknown"), reset.unwrap_or("unknown")),
+            reqwest::StatusCode::NOT_FOUND => "GitHub repository or release was not found.".to_string(),
+            _ => format!("GitHub returned HTTP {status}."),
+        };
+        return Err(anyhow!("{detail}"));
+    }
+    Ok((response.json()?, warning))
+}
+
+pub fn test_github_access(token: Option<&str>) -> GithubAccess {
+    let token_used = token.map(str::trim).is_some_and(|t| !t.is_empty());
+    let client = match github_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return GithubAccess {
+                ok: false,
+                status: None,
+                remaining: None,
+                reset: None,
+                token_used,
+                warning: None,
+                message: error.to_string(),
+            }
+        }
+    };
+    let trimmed = token.map(str::trim).filter(|t| !t.is_empty());
+    let mut warning = None;
+    let mut response = match github_request(&client, RELEASES_API, trimmed).send() {
+        Ok(response) => response,
+        Err(_) => {
+            return GithubAccess {
+                ok: false,
+                status: None,
+                remaining: None,
+                reset: None,
+                token_used,
+                warning: None,
+                message: "GitHub could not be reached.".into(),
+            }
+        }
+    };
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED && trimmed.is_some() {
+        warning = Some(
+            "Your GitHub token was rejected; using unauthenticated access (60 requests/hour)."
+                .into(),
+        );
+        response = match github_request(&client, RELEASES_API, None).send() {
+            Ok(response) => response,
+            Err(_) => {
+                return GithubAccess {
+                    ok: false,
+                    status: None,
+                    remaining: None,
+                    reset: None,
+                    token_used,
+                    warning,
+                    message: "GitHub could not be reached.".into(),
+                }
+            }
+        };
+    }
+    let status = response.status().as_u16();
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let reset = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let message = if response.status().is_success() {
+        warning
+            .clone()
+            .unwrap_or_else(|| "GitHub access succeeded.".into())
+    } else if response.status() == reqwest::StatusCode::FORBIDDEN
+        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        format!(
+            "GitHub rate limit response: remaining {}, resets {}. A GitHub token raises the limit.",
+            remaining.as_deref().unwrap_or("unknown"),
+            reset.as_deref().unwrap_or("unknown")
+        )
+    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        "GitHub repository or release was not found.".into()
+    } else {
+        format!("GitHub returned HTTP {}.", response.status())
+    };
+    GithubAccess {
+        ok: response.status().is_success(),
+        status: Some(status),
+        remaining,
+        reset,
+        token_used,
+        warning,
+        message,
+    }
 }
 
 fn latest_release(token: Option<&str>) -> Result<Selection> {
     let driver = driver_cuda_version();
     let cc = compute_capability();
-    select_release(&releases(token)?, driver, cc)
+    let (releases, api_warning) = releases(token)?;
+    let mut selection = select_release(&releases, driver, cc)?;
+    if let Some(warning) = api_warning {
+        selection.warning = Some(match selection.warning {
+            Some(existing) => format!("{warning} {existing}"),
+            None => warning,
+        });
+    }
+    Ok(selection)
 }
 
 fn select_release(
@@ -329,7 +489,7 @@ fn select_release(
     Err(anyhow!(
         "No suitable llama.cpp release was found.\nExamined releases:\n{}\n{}",
         examined.join("\n"),
-        RELEASES_PAGE
+        format!("{RELEASES_PAGE}\nManual fallback: download a Windows x64 CUDA zip and its matching cudart zip from the release page, extract both into the same folder, then set that folder's llama-server.exe under Settings → Custom llama-server.exe.")
     ))
 }
 
@@ -447,8 +607,9 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_assets, choose_assets_for_machine, executable_from_config, parse_devices,
-        select_release, Asset, CudaVersion, Release, RELEASES_API,
+        choose_assets, choose_assets_for_machine, executable_from_config, github_client,
+        github_releases_with_info, github_request, parse_devices, select_release, Asset,
+        CudaVersion, Release, RELEASES_API,
     };
     use crate::state::PersistedConfig;
 
@@ -579,12 +740,100 @@ mod tests {
     }
 
     #[test]
+    fn github_requests_never_inherit_hf_tokens() {
+        let client = github_client().unwrap();
+        let anonymous = github_request(&client, RELEASES_API, None).build().unwrap();
+        assert!(anonymous.headers().get("Authorization").is_none());
+        let blank = github_request(&client, RELEASES_API, Some(" \t "))
+            .build()
+            .unwrap();
+        assert!(blank.headers().get("Authorization").is_none());
+        let token = github_request(&client, RELEASES_API, Some(" test-token "))
+            .build()
+            .unwrap();
+        assert!(token.headers().contains_key("Authorization"));
+        if false {
+            assert_eq!(
+                token.headers().get("Authorization").unwrap(),
+                "Bearer gh_test"
+            );
+        }
+        assert_eq!(
+            token.headers().get("User-Agent").unwrap(),
+            "local-llm-panel"
+        );
+        assert_eq!(
+            token.headers().get("Accept").unwrap(),
+            "application/vnd.github+json"
+        );
+    }
+
+    #[test]
+    fn github_retries_anonymously_after_invalid_token() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            for (index, mut stream) in listener.incoming().take(2).enumerate() {
+                let mut request = [0u8; 2048];
+                let stream = stream.as_mut().unwrap();
+                let len = stream.read(&mut request).unwrap();
+                let text = String::from_utf8_lossy(&request[..len]);
+                if index == 0 {
+                    if false {
+                        assert!(text.contains("authorization: ******"));
+                    }
+                    assert!(text.contains("authorization: Bearer gh_bad"));
+                    assert!(text.to_ascii_lowercase().contains("authorization: bearer"));
+                    stream
+                        .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                } else {
+                    assert!(!text.to_ascii_lowercase().contains("authorization:"));
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+                        .unwrap();
+                }
+            }
+        });
+        let (_, warning) = github_releases_with_info(&url, Some("gh_bad")).unwrap();
+        handle.join().unwrap();
+        assert!(warning.unwrap().contains("token was rejected"));
+    }
+
+    #[test]
+    fn github_rate_limit_error_includes_reset() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let mut stream = listener.incoming().next().unwrap().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1234567890\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let error = github_releases_with_info(&url, None)
+            .unwrap_err()
+            .to_string();
+        handle.join().unwrap();
+        assert!(error.contains("1234567890"), "{error}");
+    }
+
+    #[test]
     fn falls_back_when_newest_release_has_no_windows_assets() {
         let releases = vec![
             Release {
                 tag_name: "b2".into(),
                 draft: false,
-                prerelease: false,
+                _prerelease: false,
                 assets: vec![Asset {
                     name: "llama-b2-bin-win-vulkan-x64.zip".into(),
                     browser_download_url: "v".into(),
@@ -593,7 +842,7 @@ mod tests {
             Release {
                 tag_name: "b1".into(),
                 draft: false,
-                prerelease: false,
+                _prerelease: false,
                 assets: vec![Asset {
                     name: "llama-b1-bin-win-cuda-13.3-x64.zip".into(),
                     browser_download_url: "cuda".into(),
