@@ -1104,11 +1104,17 @@ pub fn wslconfig_get() -> WslConfigInfo {
     WslConfigInfo { path: Some(p.display().to_string()), content }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LibraryEntry {
     pub model_id: String,
     pub size_mb: u64,
     pub files: usize,
+    pub quant: Option<String>,
+    pub params_b: Option<f64>,
+    pub installed: bool,
+    pub in_use: bool,
+    pub in_use_server: Option<String>,
+    pub task: Option<String>,
 }
 
 /// List models present in the WSL HF cache (~/.cache/huggingface/hub).
@@ -1117,6 +1123,17 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let distro = st.resolve_distro();
+        let running_servers: Vec<(String, String)> = {
+            let srvs = st.servers.lock().unwrap();
+            srvs.values()
+                .filter(|ls| {
+                    ls.status == crate::state::ServerStatus::Running
+                        || ls.status == crate::state::ServerStatus::Starting
+                })
+                .map(|ls| (ls.def.name.clone(), ls.def.model_id.clone()))
+                .collect()
+        };
+
         // Hub cache dirs are `models--owner--name` or `models--name`; replace the first `--` with `/`.
         let out = crate::wsl::run_script(
             &distro,
@@ -1128,10 +1145,55 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
             let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
                 continue;
             };
+            let model_id_str = model_id.to_string();
+            let size_mb: u64 = size.parse().unwrap_or(0);
+            let files_cnt: usize = files.parse().unwrap_or(0);
+
+            let mut in_use = false;
+            let mut in_use_server = None;
+            for (srv_name, srv_model) in &running_servers {
+                if srv_model == &model_id_str
+                    || model_id_str.contains(srv_model)
+                    || srv_model.contains(&model_id_str)
+                {
+                    in_use = true;
+                    in_use_server = Some(srv_name.clone());
+                    break;
+                }
+            }
+
+            let params_b = crate::estimate::parse_params_from_name(&model_id_str);
+            let quant = if model_id_str.to_uppercase().contains("AWQ") {
+                Some("AWQ".to_string())
+            } else if model_id_str.to_uppercase().contains("GPTQ") {
+                Some("GPTQ".to_string())
+            } else if model_id_str.to_uppercase().contains("GGUF") {
+                Some("GGUF".to_string())
+            } else if model_id_str.to_uppercase().contains("FP8") {
+                Some("FP8".to_string())
+            } else {
+                Some("FP16".to_string())
+            };
+
+            let task = if model_id_str.to_lowercase().contains("embed")
+                || model_id_str.to_lowercase().contains("bge")
+                || model_id_str.to_lowercase().contains("gte")
+            {
+                Some("embed".to_string())
+            } else {
+                Some("instruct".to_string())
+            };
+
             out_v.push(LibraryEntry {
-                model_id: model_id.to_string(),
-                size_mb: size.parse().unwrap_or(0),
-                files: files.parse().unwrap_or(0),
+                model_id: model_id_str,
+                size_mb,
+                files: files_cnt,
+                quant,
+                params_b,
+                installed: true,
+                in_use,
+                in_use_server,
+                task,
             });
         }
         out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
@@ -1139,6 +1201,72 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn library_remove(
+    state: State<'_, Arc<AppState>>,
+    model_id: String,
+) -> Result<(), String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Check if model is in use
+        {
+            let srvs = st.servers.lock().unwrap();
+            for ls in srvs.values() {
+                if (ls.status == crate::state::ServerStatus::Running
+                    || ls.status == crate::state::ServerStatus::Starting)
+                    && (ls.def.model_id == model_id
+                        || model_id.contains(&ls.def.model_id)
+                        || ls.def.model_id.contains(&model_id))
+                {
+                    return Err(format!(
+                        "Model \"{}\" is currently in use by active server \"{}\" — stop server first",
+                        model_id, ls.def.name
+                    ));
+                }
+            }
+        }
+
+        // Sanitize model_id
+        if model_id.contains("..")
+            || model_id.starts_with('/')
+            || model_id.contains(';')
+            || model_id.contains('&')
+            || model_id.contains('|')
+            || model_id.contains('`')
+            || model_id.contains('$')
+        {
+            return Err("Invalid characters in model ID".to_string());
+        }
+
+        let distro = st.resolve_distro();
+        let dir_name = format!("models--{}", model_id.replace('/', "--"));
+        let script = format!("rm -rf ~/.cache/huggingface/hub/{}", dir_name);
+        let out = crate::wsl::run_script(&distro, &script);
+        if !out.ok {
+            return Err(format!("Failed to delete model directory: {}", out.stderr));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_disk_usage(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let distro = st.resolve_distro();
+        let out = crate::wsl::run_script(
+            &distro,
+            "du -sm ~/.cache/huggingface/hub 2>/dev/null | cut -f1",
+        );
+        let mb: u64 = out.stdout.trim().parse().unwrap_or(0);
+        Ok(mb)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,5 +1735,26 @@ mod tests {
         assert!(open_url("ftp://evil.com".into()).is_err());
         assert!(open_url("javascript:alert(1)".into()).is_err());
         assert!(open_url("file:///etc/passwd".into()).is_err());
+    }
+
+    #[test]
+    fn test_library_entry_and_dir_name() {
+        let entry = LibraryEntry {
+            model_id: "Qwen/Qwen2.5-Coder-7B-Instruct".to_string(),
+            size_mb: 14500,
+            files: 8,
+            quant: Some("AWQ".to_string()),
+            params_b: Some(7.0),
+            installed: true,
+            in_use: false,
+            in_use_server: None,
+            task: Some("instruct".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: LibraryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, entry);
+
+        let dir_name = format!("models--{}", entry.model_id.replace('/', "--"));
+        assert_eq!(dir_name, "models--Qwen--Qwen2.5-Coder-7B-Instruct");
     }
 }

@@ -46,6 +46,8 @@ pub fn run() {
             commands::benchmarks_cancel,
             commands::benchmarks_history,
             commands::library_list,
+            commands::library_remove,
+            commands::library_disk_usage,
             commands::settings_get,
             commands::settings_set,
             commands::wslconfig_get,

@@ -196,6 +196,12 @@ export interface LibraryEntry {
   model_id: string;
   size_mb: number;
   files: number;
+  quant?: string | null;
+  params_b?: number | null;
+  installed?: boolean;
+  in_use?: boolean;
+  in_use_server?: string | null;
+  task?: string | null;
 }
 
 export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";

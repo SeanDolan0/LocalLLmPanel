@@ -98,6 +98,8 @@ export const api = {
   benchmarksHistory: (serverId?: string) =>
     invoke<BenchmarkRun[]>("benchmarks_history", { serverId: serverId ?? null }),
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
+  libraryRemove: (modelId: string) => invoke<void>("library_remove", { modelId }),
+  libraryDiskUsage: () => invoke<number>("library_disk_usage"),
   settingsGet: () => invoke<Settings>("settings_get"),
   settingsSet: (patch: Partial<Pick<Settings, "distro" | "llm_dir" | "venv_dir" | "hf_token" | "default_quant" | "advanced_settings">>) =>
     invoke<Settings>("settings_set", { patch }),
