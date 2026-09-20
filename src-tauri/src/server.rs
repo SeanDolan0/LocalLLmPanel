@@ -1376,7 +1376,7 @@ pub async fn chat_with_tools(
     let body = serde_json::json!({
         "model": model,
         "messages": messages,
-        "max_tokens": 64,
+        "max_tokens": max_tokens,
         "tools": [{
             "type": "function",
             "function": {
@@ -1389,7 +1389,12 @@ pub async fn chat_with_tools(
                 }
             }
         }],
-        "tool_choice": "auto"
+        "tool_choice": "auto",
+        "chat_template_kwargs": if disable_thinking {
+            serde_json::json!({"enable_thinking": false})
+        } else {
+            serde_json::json!({})
+        }
     });
     let mut request = state
         .http

@@ -32,6 +32,8 @@ export default function Servers() {
   const [recipeInput, setRecipeInput] = useState("");
   const [recipeErr, setRecipeErr] = useState<string | null>(null);
   const [toolResults, setToolResults] = useState<Record<string, string>>({});
+  const [toolMaxTokens, setToolMaxTokens] = useState(2048);
+  const [toolDisableThinking, setToolDisableThinking] = useState(true);
 
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
@@ -380,10 +382,44 @@ export default function Servers() {
                   {r.status === "running" && r.def.task === "instruct" && (
                     <>
                       <ChatButton serverId={r.def.id} port={r.def.port} model={effectiveModelName(r.def)} />
+                      <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                        max tokens
+                        <input
+                          className="w-16 rounded border border-edge bg-surface-2 px-1.5 py-1 text-right text-slate-200"
+                          type="number"
+                          min={1}
+                          step={256}
+                          value={toolMaxTokens}
+                          onChange={(e) => setToolMaxTokens(Math.max(1, Number(e.target.value) || 1))}
+                        />
+                      </label>
+                      <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                        <input
+                          type="checkbox"
+                          checked={toolDisableThinking}
+                          onChange={(e) => setToolDisableThinking(e.target.checked)}
+                        />
+                        disable thinking
+                      </label>
                       <Button variant="subtle" onClick={async () => {
                         try {
-                          const result = await api.serversTestToolCall(r.def.id);
-                          setToolResults((prev) => ({ ...prev, [r.def.id]: result.passed ? "Tool call passed" : `Failed: ${result.hint}\n${JSON.stringify(result.response)}` }));
+                          const result = await api.serversTestToolCall(r.def.id, toolMaxTokens, toolDisableThinking);
+                          const timing = result.response.timings as { prompt_per_second?: number; predicted_per_second?: number } | undefined;
+                          const timingText = timing
+                            ? `\nTiming: prompt ${timing.prompt_per_second ?? "?"} tok/s, predicted ${timing.predicted_per_second ?? "?"} tok/s. The first request after loading is slower while weights are paged in.`
+                            : "";
+                          const callText = result.tool_call
+                            ? `\nParsed call: ${JSON.stringify(result.tool_call)}`
+                            : "";
+                          const reasoningText = result.reasoning_content
+                            ? `\nReasoning content:\n${result.reasoning_content}`
+                            : "";
+                          setToolResults((prev) => ({
+                            ...prev,
+                            [r.def.id]: result.passed
+                              ? `Tool call passed${callText}${timingText}`
+                              : `Failed: ${result.hint}${reasoningText}${timingText}\nRaw response:\n${JSON.stringify(result.response, null, 2)}`,
+                          }));
                         } catch (e) {
                           setToolResults((prev) => ({ ...prev, [r.def.id]: `Tool call error: ${String(e)}` }));
                         }

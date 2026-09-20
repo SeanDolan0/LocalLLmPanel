@@ -1242,28 +1242,97 @@ pub async fn servers_chat(
 pub async fn servers_test_tool_call(
     state: State<'_, Arc<AppState>>,
     id: String,
+    max_tokens: Option<u32>,
+    disable_thinking: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let st = (*state).clone();
+    let max_tokens = max_tokens.unwrap_or(2048).max(1);
+    let disable_thinking = disable_thinking.unwrap_or(true);
     let messages = vec![serde_json::json!({
         "role": "user",
         "content": "Call get_weather for Seattle. Do not answer with prose."
     })];
-    let body = server::chat_with_tools(&st, &id, messages)
+    let body = server::chat_with_tools(&st, &id, messages, max_tokens, disable_thinking)
         .await
         .map_err(|e| e.to_string())?;
-    let passed = body["choices"][0]["message"]["tool_calls"]
-        .as_array()
-        .map(|calls| {
-            calls
-                .iter()
-                .any(|call| call["function"]["name"].as_str() == Some("get_weather"))
-        })
-        .unwrap_or(false);
+    let classification = classify_tool_call_response(&body);
     Ok(serde_json::json!({
-        "passed": passed,
+        "passed": classification.passed,
         "response": body,
-        "hint": if passed { "" } else { "Check --jinja and the model chat template first." }
+        "hint": classification.hint,
+        "tool_call": classification.tool_call,
+        "reasoning_content": classification.reasoning_content,
+        "max_tokens": max_tokens,
+        "disable_thinking": disable_thinking
     }))
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct ToolCallClassification {
+    passed: bool,
+    hint: String,
+    tool_call: Option<serde_json::Value>,
+    reasoning_content: Option<String>,
+}
+
+fn classify_tool_call_response(body: &serde_json::Value) -> ToolCallClassification {
+    let message = &body["choices"][0]["message"];
+    if let Some(calls) = message["tool_calls"].as_array() {
+        if let Some(call) = calls.iter().find(|call| {
+            call["function"]["name"].as_str().is_some()
+                && (call["function"]["arguments"].is_string()
+                    || call["function"]["arguments"].is_object())
+        }) {
+            return ToolCallClassification {
+                passed: true,
+                hint: String::new(),
+                tool_call: Some(call.clone()),
+                reasoning_content: message["reasoning_content"].as_str().map(str::to_string),
+            };
+        }
+    }
+
+    let reasoning_content = message["reasoning_content"].as_str().map(str::to_string);
+    if body["choices"][0]["finish_reason"].as_str() == Some("length") {
+        return ToolCallClassification {
+            passed: false,
+            hint: "Output was cut off at max_tokens (model may still be thinking); raise max tokens or disable thinking.".into(),
+            tool_call: None,
+            reasoning_content,
+        };
+    }
+
+    let content = message["content"].as_str().unwrap_or_default();
+    if looks_like_text_tool_call(content) {
+        return ToolCallClassification {
+            passed: false,
+            hint: "Tool call was emitted as text; check that --jinja is on and the chat template supports tools.".into(),
+            tool_call: None,
+            reasoning_content,
+        };
+    }
+
+    ToolCallClassification {
+        passed: false,
+        hint: format!("No tool call was returned. Raw response: {body}"),
+        tool_call: None,
+        reasoning_content,
+    }
+}
+
+fn looks_like_text_tool_call(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.contains("<tool_call>") || trimmed.contains("</tool_call>") {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .is_some_and(|value| {
+            value.get("name").is_some()
+                || value.get("arguments").is_some()
+                || value.get("tool_call").is_some()
+                || value.get("tool_calls").is_some()
+        })
 }
 
 #[tauri::command]
@@ -2368,6 +2437,70 @@ pub fn wsl_distros() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_call_response_length_is_not_reported_as_template_failure() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "I should inspect the available tools before calling one."
+                }
+            }],
+            "usage": {"completion_tokens": 64}
+        });
+        let result = classify_tool_call_response(&response);
+        assert!(!result.passed);
+        assert!(result.hint.contains("cut off at max_tokens"));
+        assert!(!result.hint.contains("--jinja"));
+        assert_eq!(
+            result.reasoning_content.as_deref(),
+            Some("I should inspect the available tools before calling one.")
+        );
+    }
+
+    #[test]
+    fn valid_tool_call_response_passes_with_parsed_call() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Seattle\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let result = classify_tool_call_response(&response);
+        assert!(result.passed);
+        assert_eq!(
+            result.tool_call.as_ref().unwrap()["function"]["name"],
+            "get_weather"
+        );
+    }
+
+    #[test]
+    fn text_emitted_tool_call_gets_template_hint() {
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Seattle\"}}</tool_call>"
+                }
+            }]
+        });
+        let result = classify_tool_call_response(&response);
+        assert!(!result.passed);
+        assert!(result.hint.contains("emitted as text"));
+        assert!(result.hint.contains("--jinja"));
+    }
 
     #[test]
     fn test_hardware_profile_detected() {

@@ -75,8 +75,20 @@ export const api = {
   serversMetrics: (id: string) => invoke<MetricsSnapshot | null>("servers_metrics", { id }),
   serversChat: (id: string, messages: ChatMessage[]) =>
     invoke<Record<string, unknown>>("servers_chat", { id, messages }),
-  serversTestToolCall: (id: string) =>
-    invoke<{ passed: boolean; response: Record<string, unknown>; hint: string }>("servers_test_tool_call", { id }),
+  serversTestToolCall: (id: string, maxTokens = 2048, disableThinking = true) =>
+    invoke<{
+      passed: boolean;
+      response: Record<string, unknown>;
+      hint: string;
+      tool_call?: Record<string, unknown>;
+      reasoning_content?: string;
+      max_tokens: number;
+      disable_thinking: boolean;
+    }>("servers_test_tool_call", {
+      id,
+      maxTokens,
+      disableThinking,
+    }),
   serversChatStream: (
     requestId: string,
     serverId: string,
