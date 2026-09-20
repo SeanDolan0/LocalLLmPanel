@@ -22,6 +22,12 @@ import type {
   SystemMemoryInfo,
   WslConfigInfo,
   WslLogEvent,
+  ChatMessage,
+  Conversation,
+  ChatTokenPayload,
+  ChatDonePayload,
+  ChatCancelPayload,
+  ChatErrorPayload,
 } from "./types";
 
 export type {
@@ -61,6 +67,26 @@ export const api = {
   serversMetrics: (id: string) => invoke<MetricsSnapshot | null>("servers_metrics", { id }),
   serversChat: (id: string, messages: { role: string; content: string }[]) =>
     invoke<Record<string, unknown>>("servers_chat", { id, messages }),
+  serversChatStream: (
+    requestId: string,
+    serverId: string,
+    messages: ChatMessage[],
+    temperature?: number
+  ) =>
+    invoke<void>("servers_chat_stream", {
+      requestId,
+      serverId,
+      messages,
+      temperature: temperature ?? null,
+    }),
+  serversChatCancel: (requestId: string) =>
+    invoke<void>("servers_chat_cancel", { requestId }),
+  conversationsList: () =>
+    invoke<Conversation[]>("conversations_list"),
+  conversationsSave: (conversation: Conversation) =>
+    invoke<void>("conversations_save", { conversation }),
+  conversationsDelete: (id: string) =>
+    invoke<void>("conversations_delete", { id }),
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
   settingsGet: () => invoke<Settings>("settings_get"),
   settingsSet: (patch: Partial<Pick<Settings, "distro" | "llm_dir" | "venv_dir" | "hf_token" | "default_quant" | "advanced_settings">>) =>
@@ -99,6 +125,14 @@ export const events = {
   serverMetrics: (cb: (e: MetricsSnapshot & { id?: string }) => void) =>
     listen("server-metrics", (e) => cb(e.payload as MetricsSnapshot & { id?: string })),
   pullProgress: (cb: (e: PullStatus) => void) => listen<PullStatus>("pull-progress", (e) => cb(e.payload)),
+  chatToken: (cb: (e: ChatTokenPayload) => void) =>
+    listen<ChatTokenPayload>("chat-token", (e) => cb(e.payload)),
+  chatDone: (cb: (e: ChatDonePayload) => void) =>
+    listen<ChatDonePayload>("chat-done", (e) => cb(e.payload)),
+  chatCancel: (cb: (e: ChatCancelPayload) => void) =>
+    listen<ChatCancelPayload>("chat-cancel", (e) => cb(e.payload)),
+  chatError: (cb: (e: ChatErrorPayload) => void) =>
+    listen<ChatErrorPayload>("chat-error", (e) => cb(e.payload)),
 };
 
 // ---------------------------------------------------------------------------

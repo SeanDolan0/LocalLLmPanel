@@ -8,6 +8,52 @@ use std::time::Instant;
 
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
+pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Conversation {
+    pub id: String,
+    pub server_id: String,
+    pub title: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub messages: Vec<ChatMessage>,
+}
+
+impl Conversation {
+    pub fn path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(CONFIG_DIR_NAME)
+            .join(CONVERSATIONS_FILE_NAME)
+    }
+
+    pub fn load_all() -> Vec<Conversation> {
+        let path = Self::path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn save_all(convs: &[Conversation]) -> Result<(), String> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        }
+        let text = serde_json::to_string_pretty(convs).map_err(|e| format!("serialize: {e}"))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CachedEnrichment {
@@ -370,6 +416,8 @@ pub struct AppState {
     pub enrichment_cache: Mutex<HashMap<String, CachedEnrichment>>,
     pub quant_cache: Mutex<HashMap<String, CachedQuants>>,
     pub rec_cache: Mutex<Option<(Vec<crate::commands::ModelWithFit>, Instant, u64)>>,
+    pub conversations: Mutex<Vec<Conversation>>,
+    pub chat_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -406,6 +454,8 @@ impl AppState {
             enrichment_cache: Mutex::new(HashMap::new()),
             quant_cache: Mutex::new(HashMap::new()),
             rec_cache: Mutex::new(None),
+            conversations: Mutex::new(Conversation::load_all()),
+            chat_cancels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -589,5 +639,35 @@ mod tests {
         let empty_json = "{}";
         let from_empty: AdvancedSettings = serde_json::from_str(empty_json).unwrap();
         assert_eq!(from_empty, adv);
+    }
+
+    #[test]
+    fn test_conversation_serialization_and_roundtrip() {
+        use super::{ChatMessage, Conversation};
+        let c = Conversation {
+            id: "conv-1".to_string(),
+            server_id: "srv-1".to_string(),
+            title: "Test Conversation".to_string(),
+            created_at: 1000,
+            updated_at: 2000,
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: "You are an assistant.".to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "Hello!".to_string(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "Hi there!".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let parsed: Conversation = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+        assert_eq!(parsed.messages.len(), 3);
     }
 }

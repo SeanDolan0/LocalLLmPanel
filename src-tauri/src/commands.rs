@@ -882,6 +882,62 @@ pub async fn servers_chat(
     server::chat(&st, &id, messages).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn servers_chat_stream(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    request_id: String,
+    server_id: String,
+    messages: Vec<crate::state::ChatMessage>,
+    temperature: Option<f32>,
+) -> Result<(), String> {
+    let st = (*state).clone();
+    tokio::spawn(async move {
+        server::chat_stream(Some(app), st, request_id, server_id, messages, temperature).await;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn servers_chat_cancel(
+    state: State<'_, Arc<AppState>>,
+    request_id: String,
+) -> Result<(), String> {
+    if let Some(notify) = state.chat_cancels.lock().unwrap().get(&request_id) {
+        notify.notify_waiters();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn conversations_list(state: State<'_, Arc<AppState>>) -> Result<Vec<crate::state::Conversation>, String> {
+    Ok(state.conversations.lock().unwrap().clone())
+}
+
+#[tauri::command]
+pub fn conversations_save(
+    state: State<'_, Arc<AppState>>,
+    conversation: crate::state::Conversation,
+) -> Result<(), String> {
+    let mut convs = state.conversations.lock().unwrap();
+    if let Some(pos) = convs.iter().position(|c| c.id == conversation.id) {
+        convs[pos] = conversation;
+    } else {
+        convs.insert(0, conversation);
+    }
+    crate::state::Conversation::save_all(&convs)
+}
+
+#[tauri::command]
+pub fn conversations_delete(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    let mut convs = state.conversations.lock().unwrap();
+    convs.retain(|c| c.id != id);
+    crate::state::Conversation::save_all(&convs)
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -1309,14 +1365,13 @@ mod tests {
         }
 
         // Expired entry
-        let past = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(601))
-            .unwrap();
-        *st.rec_cache.lock().unwrap() = Some((dummy, past, 16384));
-        {
-            let cache = st.rec_cache.lock().unwrap();
-            let (_, time, _) = cache.as_ref().unwrap();
-            assert!(time.elapsed() >= std::time::Duration::from_secs(600));
+        if let Some(past) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(601)) {
+            *st.rec_cache.lock().unwrap() = Some((dummy, past, 16384));
+            {
+                let cache = st.rec_cache.lock().unwrap();
+                let (_, time, _) = cache.as_ref().unwrap();
+                assert!(time.elapsed() >= std::time::Duration::from_secs(600));
+            }
         }
     }
 

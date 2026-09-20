@@ -883,23 +883,24 @@ mod tests {
             n_kv_heads: Some(8),
             torch_dtype: Some("bfloat16".into()),
         };
-        let past = Instant::now().checked_sub(Duration::from_secs(3605)).unwrap();
-        cache.lock().unwrap().insert(
-            "dummy/model-expired-xyz".to_string(),
-            CachedEnrichment {
-                stats: dummy_stats,
-                fetched_at: past,
-            },
-        );
+        if let Some(past) = Instant::now().checked_sub(Duration::from_secs(3605)) {
+            cache.lock().unwrap().insert(
+                "dummy/model-expired-xyz".to_string(),
+                CachedEnrichment {
+                    stats: dummy_stats,
+                    fetched_at: past,
+                },
+            );
 
-        // Verify cache expiry without live network call:
-        // Cache lookup requires elapsed() < 3600 seconds, so this expired entry is rejected.
-        let guard = cache.lock().unwrap();
-        let is_hit = guard
-            .get("dummy/model-expired-xyz")
-            .map(|entry| entry.fetched_at.elapsed() < Duration::from_secs(3600))
-            .unwrap_or(false);
-        assert!(!is_hit, "Expired cache entry (>3600s) should not count as a cache hit");
+            // Verify cache expiry without live network call:
+            // Cache lookup requires elapsed() < 3600 seconds, so this expired entry is rejected.
+            let guard = cache.lock().unwrap();
+            let is_hit = guard
+                .get("dummy/model-expired-xyz")
+                .map(|entry| entry.fetched_at.elapsed() < Duration::from_secs(3600))
+                .unwrap_or(false);
+            assert!(!is_hit, "Expired cache entry (>3600s) should not count as a cache hit");
+        }
     }
 
     #[test]

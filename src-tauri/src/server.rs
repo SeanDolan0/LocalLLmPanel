@@ -619,6 +619,196 @@ pub async fn chat(
     Ok(resp.json().await.context("chat response JSON")?)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatTokenPayload {
+    pub request_id: String,
+    pub server_id: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatDonePayload {
+    pub request_id: String,
+    pub server_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatCancelPayload {
+    pub request_id: String,
+    pub server_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatErrorPayload {
+    pub request_id: String,
+    pub server_id: String,
+    pub error: String,
+}
+
+pub fn parse_sse_token(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("data:") {
+        return None;
+    }
+    let data = trimmed.trim_start_matches("data:").trim();
+    if data == "[DONE]" || data.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+        if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
+            if !content.is_empty() {
+                return Some(content.to_string());
+            }
+        }
+        if let Some(text) = v["choices"][0]["text"].as_str() {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Stream chat completion tokens over SSE and emit Tauri events.
+pub async fn chat_stream(
+    app: Option<tauri::AppHandle>,
+    state: Arc<AppState>,
+    request_id: String,
+    server_id: String,
+    messages: Vec<crate::state::ChatMessage>,
+    temperature: Option<f32>,
+) {
+    let cancel_notify = Arc::new(tokio::sync::Notify::new());
+    state
+        .chat_cancels
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), cancel_notify.clone());
+
+    let res: Result<bool> = async {
+        let def = state
+            .config()
+            .find_server(&server_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no server {server_id}"))?;
+        if def.task != "instruct" {
+            bail!("server {server_id} is not an instruct server");
+        }
+        let url = format!("http://127.0.0.1:{}/v1/chat/completions", def.port);
+        let mut body = serde_json::json!({
+            "model": def.effective_model_name(),
+            "messages": messages,
+            "stream": true,
+        });
+        if let Some(temp) = temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+
+        let mut resp = state
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("chat stream failed ({}): {}", status, text);
+        }
+
+        let mut buffer = String::new();
+        loop {
+            tokio::select! {
+                _ = cancel_notify.notified() => {
+                    return Ok(true); // cancelled
+                }
+                chunk_opt = resp.chunk() => {
+                    match chunk_opt {
+                        Ok(Some(chunk)) => {
+                            buffer.push_str(&String::from_utf8_lossy(&chunk));
+                            while let Some(newline_pos) = buffer.find('\n') {
+                                let line = buffer[..newline_pos].to_string();
+                                buffer.drain(..=newline_pos);
+                                if let Some(token) = parse_sse_token(&line) {
+                                    if let Some(ref a) = app {
+                                        let _ = a.emit("chat-token", ChatTokenPayload {
+                                            request_id: request_id.clone(),
+                                            server_id: server_id.clone(),
+                                            token,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            break;
+                        }
+                        Err(e) => {
+                            bail!("stream read error: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        if !buffer.is_empty() {
+            if let Some(token) = parse_sse_token(&buffer) {
+                if let Some(ref a) = app {
+                    let _ = a.emit("chat-token", ChatTokenPayload {
+                        request_id: request_id.clone(),
+                        server_id: server_id.clone(),
+                        token,
+                    });
+                }
+            }
+        }
+
+        Ok(false)
+    }
+    .await;
+
+    state.chat_cancels.lock().unwrap().remove(&request_id);
+
+    match res {
+        Ok(true) => {
+            if let Some(ref a) = app {
+                let _ = a.emit(
+                    "chat-cancel",
+                    ChatCancelPayload {
+                        request_id,
+                        server_id,
+                    },
+                );
+            }
+        }
+        Ok(false) => {
+            if let Some(ref a) = app {
+                let _ = a.emit(
+                    "chat-done",
+                    ChatDonePayload {
+                        request_id,
+                        server_id,
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            if let Some(ref a) = app {
+                let _ = a.emit(
+                    "chat-error",
+                    ChatErrorPayload {
+                        request_id,
+                        server_id,
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    }
+}
+
 pub fn server_logs(state: &Arc<AppState>, server_id: &str, since: usize) -> String {
     let servers = state.servers.lock().unwrap();
     match servers.get(server_id) {
@@ -786,5 +976,23 @@ mod tests {
     #[test]
     fn metrics_parse_ignores_garbage() {
         assert!(parse_metrics("hello world\nnot a metric").is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_token() {
+        use super::parse_sse_token;
+        assert_eq!(
+            parse_sse_token(r#"data: {"choices":[{"delta":{"content":"Hello world"}}]}"#),
+            Some("Hello world".to_string())
+        );
+        assert_eq!(
+            parse_sse_token(r#"data: {"choices":[{"text":"Alternative"}]}"#),
+            Some("Alternative".to_string())
+        );
+        assert_eq!(parse_sse_token("data: [DONE]"), None);
+        assert_eq!(parse_sse_token("data:   "), None);
+        assert_eq!(parse_sse_token(": ping"), None);
+        assert_eq!(parse_sse_token(""), None);
+        assert_eq!(parse_sse_token("random text"), None);
     }
 }

@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { effectiveModelName } from "../types";
-import type { CreateServerInput, ServerListRow } from "../types";
+import type { CreateServerInput, ServerListRow, ChatMessage, Conversation } from "../types";
 
 export default function Servers() {
   const location = useLocation();
@@ -512,89 +512,560 @@ function NewServerForm({
 
 // ---------------------------------------------------------------------------
 
+function MarkdownContent({ content }: { content: string }) {
+  const parts = content.split(/(```[\s\S]*?```)/g);
+  return (
+    <div className="space-y-2 text-sm leading-relaxed break-words">
+      {parts.map((part, i) => {
+        if (part.startsWith("```") && part.endsWith("```")) {
+          const inner = part.slice(3, -3);
+          const firstLineBreak = inner.indexOf("\n");
+          let lang = "";
+          let code = inner;
+          if (firstLineBreak !== -1) {
+            lang = inner.slice(0, firstLineBreak).trim();
+            code = inner.slice(firstLineBreak + 1);
+          }
+          return <CodeBlock key={i} lang={lang} code={code} />;
+        }
+        return <FormattedText key={i} text={part} />;
+      })}
+    </div>
+  );
+}
+
+function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="my-2 overflow-hidden rounded-lg border border-edge bg-surface-1 font-mono text-xs">
+      <div className="flex items-center justify-between border-b border-edge bg-surface-3/60 px-3 py-1 text-slate-400">
+        <span>{lang || "code"}</span>
+        <button
+          onClick={copy}
+          className="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-surface-3 hover:text-slate-200"
+        >
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+      <pre className="overflow-x-auto p-3 text-slate-200">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+function FormattedText({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <>
+      {lines.map((line, idx) => (
+        <span key={idx}>
+          {idx > 0 && <br />}
+          {renderInlineFormatting(line)}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function renderInlineFormatting(line: string) {
+  const segments = line.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  return segments.map((seg, i) => {
+    if (seg.startsWith("`") && seg.endsWith("`") && seg.length >= 2) {
+      return (
+        <code key={i} className="rounded bg-surface-3 px-1 py-0.5 font-mono text-xs text-amber-300">
+          {seg.slice(1, -1)}
+        </code>
+      );
+    }
+    if (seg.startsWith("**") && seg.endsWith("**") && seg.length >= 4) {
+      return <strong key={i} className="font-semibold text-slate-100">{seg.slice(2, -2)}</strong>;
+    }
+    return seg;
+  });
+}
+
 function ChatButton({ serverId, port, model }: { serverId: string; port: number; model: string }) {
   const [open, setOpen] = useState(false);
-  const [msgs, setMsgs] = useState<{ role: string; content: string }[]>([
-    { role: "system", content: "You are a helpful assistant." },
-  ]);
+  return (
+    <>
+      <Button variant="ghost" onClick={() => setOpen(true)}>💬 Chat</Button>
+      {open && (
+        <ChatDrawer serverId={serverId} port={port} model={model} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+function ChatDrawer({
+  serverId,
+  port,
+  model,
+  onClose,
+}: {
+  serverId: string;
+  port: number;
+  model: string;
+  onClose: () => void;
+}) {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [systemPrompt, setSystemPrompt] = useState("You are a helpful assistant.");
+  const [temperature, setTemperature] = useState(0.7);
+  const [showSettings, setShowSettings] = useState(false);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const endRef = useRef<HTMLDivElement | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editingTitleText, setEditingTitleText] = useState("");
 
+  const activeRequestIdRef = useRef<string | null>(null);
+  activeRequestIdRef.current = activeRequestId;
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const conversationsRef = useRef<Conversation[]>([]);
+  conversationsRef.current = conversations;
+
+  const activeConv = conversations.find((c) => c.id === activeId);
+
+  // Load conversations on mount
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
-  }, [msgs, open]);
+    let unmounted = false;
+    api.conversationsList().then((all) => {
+      if (unmounted) return;
+      const filtered = all.filter((c) => c.server_id === serverId);
+      setConversations(filtered);
+      if (filtered.length > 0) {
+        setActiveId(filtered[0].id);
+        const sysMsg = filtered[0].messages.find((m) => m.role === "system");
+        if (sysMsg) setSystemPrompt(sysMsg.content);
+      } else {
+        // Create initial conversation
+        const initial: Conversation = {
+          id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          server_id: serverId,
+          title: "New Conversation",
+          created_at: Date.now(),
+          updated_at: Date.now(),
+          messages: [{ role: "system", content: "You are a helpful assistant." }],
+        };
+        setConversations([initial]);
+        setActiveId(initial.id);
+        api.conversationsSave(initial);
+      }
+    }).catch(console.error);
 
-  const send = async () => {
-    if (!input.trim() || busy) return;
-    const next: { role: string; content: string }[] = [...msgs, { role: "user", content: input }];
-    setMsgs(next);
+    return () => {
+      unmounted = true;
+    };
+  }, [serverId]);
+
+  // Auto-scroll on messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeConv?.messages, streaming]);
+
+  // Listen to streaming events
+  useEffect(() => {
+    const unlistenTokenPromise = events.chatToken((payload) => {
+      if (payload.request_id !== activeRequestIdRef.current) return;
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== activeId) return c;
+          const msgs = [...c.messages];
+          if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+            const last = msgs[msgs.length - 1];
+            msgs[msgs.length - 1] = { ...last, content: last.content + payload.token };
+          }
+          return { ...c, messages: msgs, updated_at: Date.now() };
+        })
+      );
+    });
+
+    const unlistenDonePromise = events.chatDone((payload) => {
+      if (payload.request_id !== activeRequestIdRef.current) return;
+      setStreaming(false);
+      setActiveRequestId(null);
+      const current = conversationsRef.current.find((c) => c.id === activeId);
+      if (current) {
+        api.conversationsSave(current).catch(console.error);
+      }
+    });
+
+    const unlistenCancelPromise = events.chatCancel((payload) => {
+      if (payload.request_id !== activeRequestIdRef.current) return;
+      setStreaming(false);
+      setActiveRequestId(null);
+      const current = conversationsRef.current.find((c) => c.id === activeId);
+      if (current) {
+        api.conversationsSave(current).catch(console.error);
+      }
+    });
+
+    const unlistenErrorPromise = events.chatError((payload) => {
+      if (payload.request_id !== activeRequestIdRef.current) return;
+      setStreaming(false);
+      setActiveRequestId(null);
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== activeId) return c;
+          const msgs = [...c.messages];
+          if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+            const last = msgs[msgs.length - 1];
+            msgs[msgs.length - 1] = {
+              ...last,
+              content: last.content ? `${last.content}\n\n⚠ Error: ${payload.error}` : `⚠ Error: ${payload.error}`,
+            };
+          }
+          const updated = { ...c, messages: msgs, updated_at: Date.now() };
+          api.conversationsSave(updated).catch(console.error);
+          return updated;
+        })
+      );
+    });
+
+    return () => {
+      unlistenTokenPromise.then((fn) => fn());
+      unlistenDonePromise.then((fn) => fn());
+      unlistenCancelPromise.then((fn) => fn());
+      unlistenErrorPromise.then((fn) => fn());
+    };
+  }, [activeId]);
+
+  const handleNewChat = () => {
+    const newConv: Conversation = {
+      id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      server_id: serverId,
+      title: `Chat ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      messages: [{ role: "system", content: systemPrompt }],
+    };
+    setConversations((prev) => [newConv, ...prev]);
+    setActiveId(newConv.id);
+    api.conversationsSave(newConv).catch(console.error);
+  };
+
+  const handleDeleteConv = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    api.conversationsDelete(id).catch(console.error);
+    const next = conversations.filter((c) => c.id !== id);
+    setConversations(next);
+    if (activeId === id) {
+      if (next.length > 0) {
+        setActiveId(next[0].id);
+      } else {
+        const fallback: Conversation = {
+          id: `conv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          server_id: serverId,
+          title: "New Conversation",
+          created_at: Date.now(),
+          updated_at: Date.now(),
+          messages: [{ role: "system", content: systemPrompt }],
+        };
+        setConversations([fallback]);
+        setActiveId(fallback.id);
+        api.conversationsSave(fallback).catch(console.error);
+      }
+    }
+  };
+
+  const startRename = (e: React.MouseEvent, conv: Conversation) => {
+    e.stopPropagation();
+    setEditingTitleId(conv.id);
+    setEditingTitleText(conv.title);
+  };
+
+  const saveRename = (id: string) => {
+    if (!editingTitleText.trim()) {
+      setEditingTitleId(null);
+      return;
+    }
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id === id) {
+          const updated = { ...c, title: editingTitleText.trim(), updated_at: Date.now() };
+          api.conversationsSave(updated).catch(console.error);
+          return updated;
+        }
+        return c;
+      })
+    );
+    setEditingTitleId(null);
+  };
+
+  const handleSend = async () => {
+    if (!input.trim() || streaming || !activeConv) return;
+    const userMsg: ChatMessage = { role: "user", content: input.trim() };
+    const assistantMsg: ChatMessage = { role: "assistant", content: "" };
+
+    const nextMessages = [...activeConv.messages, userMsg, assistantMsg];
+    const autoTitle =
+      activeConv.messages.length <= 1 && activeConv.title.startsWith("Chat ")
+        ? userMsg.content.slice(0, 24) + (userMsg.content.length > 24 ? "…" : "")
+        : activeConv.title;
+
+    const updatedConv: Conversation = {
+      ...activeConv,
+      title: autoTitle,
+      messages: nextMessages,
+      updated_at: Date.now(),
+    };
+
+    setConversations((prev) =>
+      prev.map((c) => (c.id === activeConv.id ? updatedConv : c))
+    );
     setInput("");
-    setBusy(true);
+
+    const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setActiveRequestId(reqId);
+    setStreaming(true);
+
     try {
-      const resp = await api.serversChat(serverId, next);
-      const content = (resp.choices as { message?: { content?: string } }[])?.[0]?.message?.content ?? "";
-      setMsgs((m) => [...m, { role: "assistant", content }]);
-    } catch (e) {
-      setMsgs((m) => [...m, { role: "assistant", content: `⚠ ${String(e)}` }]);
-    } finally {
-      setBusy(false);
+      await api.serversChatStream(
+        reqId,
+        serverId,
+        nextMessages.slice(0, -1),
+        temperature
+      );
+    } catch (err) {
+      setStreaming(false);
+      setActiveRequestId(null);
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== activeConv.id) return c;
+          const msgs = [...c.messages];
+          msgs[msgs.length - 1] = {
+            role: "assistant",
+            content: `⚠ Failed to start stream: ${String(err)}`,
+          };
+          return { ...c, messages: msgs };
+        })
+      );
+    }
+  };
+
+  const handleStop = () => {
+    if (activeRequestId) {
+      api.serversChatCancel(activeRequestId).catch(console.error);
     }
   };
 
   return (
-    <>
-      <Button variant="ghost" onClick={() => setOpen((o) => !o)}>💬 Chat</Button>
-      {open && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6" onClick={() => setOpen(false)}>
-          <div
-            className="flex h-[70vh] w-full max-w-2xl flex-col rounded-xl border border-edge bg-surface-2 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-edge px-4 py-2.5">
-              <div className="text-sm font-medium text-slate-200">
-                Playground · {model} <span className="text-slate-500">(port {port})</span>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-[88vh] w-full max-w-5xl rounded-2xl border border-edge bg-surface-1 shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Left Sidebar: Conversations list */}
+        <div className="flex w-64 flex-col border-r border-edge bg-surface-2/60">
+          <div className="flex items-center justify-between border-b border-edge p-3">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Chats
+            </span>
+            <button
+              onClick={handleNewChat}
+              className="flex items-center gap-1 rounded border border-edge bg-surface-3 px-2 py-1 text-xs text-slate-200 hover:bg-surface-3/80 hover:text-white"
+            >
+              <span>+</span> New
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            {conversations.map((c) => (
+              <div
+                key={c.id}
+                onClick={() => {
+                  setActiveId(c.id);
+                  const sys = c.messages.find((m) => m.role === "system");
+                  if (sys) setSystemPrompt(sys.content);
+                }}
+                className={`group flex items-center justify-between rounded-lg px-2.5 py-2 text-xs cursor-pointer transition-colors ${
+                  c.id === activeId
+                    ? "bg-indigo-500/15 text-indigo-200 border border-indigo-500/30"
+                    : "text-slate-400 hover:bg-surface-3 hover:text-slate-200"
+                }`}
+              >
+                {editingTitleId === c.id ? (
+                  <input
+                    autoFocus
+                    className="w-full rounded bg-surface-1 px-1.5 py-0.5 text-xs text-slate-100 border border-indigo-500 outline-hidden"
+                    value={editingTitleText}
+                    onChange={(e) => setEditingTitleText(e.target.value)}
+                    onBlur={() => saveRename(c.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveRename(c.id);
+                      if (e.key === "Escape") setEditingTitleId(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <span className="truncate flex-1 font-medium">{c.title}</span>
+                )}
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity ml-1">
+                  <button
+                    onClick={(e) => startRename(e, c)}
+                    className="p-1 hover:text-slate-100 text-slate-400"
+                    title="Rename"
+                  >
+                    ✏
+                  </button>
+                  <button
+                    onClick={(e) => handleDeleteConv(e, c.id)}
+                    className="p-1 hover:text-red-400 text-slate-400"
+                    title="Delete"
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="rounded border border-edge bg-surface-3 px-2 py-0.5 text-xs text-slate-400 hover:text-slate-200"
-                  onClick={() => setMsgs([{ role: "system", content: "You are a helpful assistant." }])}
-                  title="Reset conversation"
-                >
-                  Clear chat
-                </button>
-                <button className="text-slate-500 hover:text-slate-300" onClick={() => setOpen(false)}>✕</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Right Main Chat Area */}
+        <div className="flex flex-1 flex-col bg-surface-1">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-edge bg-surface-2/40 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-sm text-slate-200">{model}</span>
+              <Badge color="slate">port {port}</Badge>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setShowSettings((s) => !s)}
+                className={`rounded border px-2.5 py-1 text-xs transition-colors ${
+                  showSettings
+                    ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-200"
+                    : "border-edge bg-surface-3 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                ⚙ Options
+              </button>
+              <button
+                onClick={onClose}
+                className="text-slate-400 hover:text-slate-200 text-sm font-medium"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {/* Options Drawer/Bar */}
+          {showSettings && (
+            <div className="border-b border-edge bg-surface-2/70 p-3 text-xs space-y-3">
+              <div className="flex items-center gap-4">
+                <span className="text-slate-400 w-24 font-medium">Temperature:</span>
+                <input
+                  type="range"
+                  min="0.0"
+                  max="1.5"
+                  step="0.05"
+                  value={temperature}
+                  onChange={(e) => setTemperature(parseFloat(e.target.value))}
+                  className="w-48 accent-indigo-500"
+                />
+                <span className="font-mono text-slate-300 w-8">{temperature.toFixed(2)}</span>
+              </div>
+              <div className="flex items-start gap-4">
+                <span className="text-slate-400 w-24 font-medium pt-1">System Prompt:</span>
+                <textarea
+                  rows={2}
+                  value={systemPrompt}
+                  onChange={(e) => {
+                    setSystemPrompt(e.target.value);
+                    if (activeConv) {
+                      const updatedMsgs = [...activeConv.messages];
+                      const sysIdx = updatedMsgs.findIndex((m) => m.role === "system");
+                      if (sysIdx !== -1) {
+                        updatedMsgs[sysIdx] = { role: "system", content: e.target.value };
+                      } else {
+                        updatedMsgs.unshift({ role: "system", content: e.target.value });
+                      }
+                      const updated = { ...activeConv, messages: updatedMsgs };
+                      setConversations((prev) =>
+                        prev.map((c) => (c.id === activeConv.id ? updated : c))
+                      );
+                      api.conversationsSave(updated).catch(console.error);
+                    }
+                  }}
+                  className="flex-1 rounded-md border border-edge bg-surface-1 p-2 text-xs text-slate-200 outline-hidden focus:border-indigo-500"
+                  placeholder="System instructions..."
+                />
               </div>
             </div>
-            <div className="flex-1 space-y-3 overflow-y-auto p-4">
-              {msgs.map((m, i) => (
-                <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+          )}
+
+          {/* Message History */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {activeConv?.messages
+              .filter((m) => m.role !== "system")
+              .map((m, i) => (
+                <div
+                  key={i}
+                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                >
                   <div
-                    className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-                      m.role === "user" ? "bg-indigo-500/20 text-indigo-100" : m.role === "system" ? "bg-slate-800/60 text-slate-400 italic" : "bg-surface-3 text-slate-200"
+                    className={`max-w-[85%] rounded-xl px-4 py-3 text-sm shadow-xs ${
+                      m.role === "user"
+                        ? "bg-indigo-600 text-white rounded-br-xs"
+                        : "border border-edge bg-surface-2 text-slate-200 rounded-bl-xs"
                     }`}
                   >
-                    {m.content}
+                    <MarkdownContent
+                      content={
+                        m.content ||
+                        (streaming && i === activeConv.messages.filter((x) => x.role !== "system").length - 1
+                          ? "…"
+                          : "")
+                      }
+                    />
                   </div>
                 </div>
               ))}
-              {busy && <Spinner label="generating…" />}
-              <div ref={endRef} />
-            </div>
-            <div className="flex gap-2 border-t border-edge p-3">
-              <input
-                className={inputCls}
-                placeholder="Message… (Enter to send)"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && send()}
-                disabled={busy}
-              />
-              <Button onClick={send} disabled={busy || !input.trim()}>Send</Button>
-            </div>
+            {streaming && (
+              <div className="flex items-center gap-2 text-xs text-indigo-300">
+                <span className="inline-block h-2 w-2 animate-ping rounded-full bg-indigo-400" />
+                <span>Streaming tokens...</span>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input Bar */}
+          <div className="flex items-center gap-2 border-t border-edge bg-surface-2/30 p-3">
+            <input
+              className={`${inputCls} flex-1`}
+              placeholder="Ask anything... (Press Enter to send)"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              disabled={streaming}
+            />
+            {streaming ? (
+              <Button variant="danger" onClick={handleStop}>
+                ⏹ Stop
+              </Button>
+            ) : (
+              <Button onClick={handleSend} disabled={!input.trim()}>
+                Send
+              </Button>
+            )}
           </div>
         </div>
-      )}
-    </>
+      </div>
+    </div>
   );
 }

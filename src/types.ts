@@ -308,3 +308,39 @@ export interface ModelWithFit {
   gguf_sources?: GgufSource[];
   installed?: boolean;
 }
+
+export interface ChatMessage {
+  role: string; // "system" | "user" | "assistant"
+  content: string;
+}
+
+export interface Conversation {
+  id: string;
+  server_id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  messages: ChatMessage[];
+}
+
+export interface ChatTokenPayload {
+  request_id: string;
+  server_id: string;
+  token: string;
+}
+
+export interface ChatDonePayload {
+  request_id: string;
+  server_id: string;
+}
+
+export interface ChatCancelPayload {
+  request_id: string;
+  server_id: string;
+}
+
+export interface ChatErrorPayload {
+  request_id: string;
+  server_id: string;
+  error: string;
+}
