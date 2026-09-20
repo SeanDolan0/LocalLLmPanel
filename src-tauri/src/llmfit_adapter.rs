@@ -4,16 +4,16 @@
 //! 4-dimensional scoring (Quality, Speed, Fit, Context), and model recommendations
 //! matching `llmfit` exactly.
 
-use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
-use llmfit_core::hardware::{GpuBackend, SystemSpecs};
-use llmfit_core::models::{LlmModel, ModelDatabase, UseCase, QUANT_HIERARCHY};
+use llmfit_core::analysis::{self, InstalledIndex};
 use llmfit_core::fit::{
     rank_models_by_fit, FitLevel, InferenceRuntime, ModelFit, RunMode as LlmfitRunMode,
     ScoreComponents,
 };
-use llmfit_core::analysis::{self, InstalledIndex};
+use llmfit_core::hardware::{GpuBackend, SystemSpecs};
+use llmfit_core::models::{LlmModel, ModelDatabase, UseCase, QUANT_HIERARCHY};
 
 use crate::fit::{FitResult, FitVerdict, FormatSupport, RunMode};
 use crate::hf::{QuantFormat, QuantVariant};
@@ -178,7 +178,8 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
     let (cat_title, pipeline) = use_case_to_category_name(fit.use_case);
 
     let params_b = m.parameters_raw.map(|p| p as f64 / 1e9).or_else(|| {
-        fit.model.parameter_count
+        fit.model
+            .parameter_count
             .trim_end_matches('B')
             .trim_end_matches('b')
             .parse::<f64>()
@@ -254,7 +255,9 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
         let score_val = (variant_fit.score.round() as u8).min(100);
 
         let vram_pct = (variant_fit.utilization_pct.round().min(255.0)) as u8;
-        let ram_pct = if variant_fit.run_mode == LlmfitRunMode::CpuOffload || variant_fit.run_mode == LlmfitRunMode::MoeOffload {
+        let ram_pct = if variant_fit.run_mode == LlmfitRunMode::CpuOffload
+            || variant_fit.run_mode == LlmfitRunMode::MoeOffload
+        {
             vram_pct
         } else {
             0
@@ -271,17 +274,29 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
             run_mode,
             score: score_val,
             weight_gb: variant_fit.memory_required_gb,
-            vram_context: if variant_fit.run_mode == LlmfitRunMode::Gpu { variant_fit.usable_context as usize } else { 0 },
+            vram_context: if variant_fit.run_mode == LlmfitRunMode::Gpu {
+                variant_fit.usable_context as usize
+            } else {
+                0
+            },
             extended_context: variant_fit.usable_context as usize,
             native_context: m.context_length as usize,
             usable_context: variant_fit.usable_context as usize,
             swap_space_gb: variant_fit.moe_offloaded_gb.unwrap_or(0.0).ceil() as usize,
-            cpu_offload_gb: if variant_fit.run_mode == LlmfitRunMode::CpuOffload { variant_fit.memory_required_gb.ceil() as usize } else { 0 },
+            cpu_offload_gb: if variant_fit.run_mode == LlmfitRunMode::CpuOffload {
+                variant_fit.memory_required_gb.ceil() as usize
+            } else {
+                0
+            },
             est_tok_s: Some(variant_fit.estimated_tps),
             measured_tok_s: variant_fit.measured_tps.map(|mt| mt.tok_s),
             vram_pct,
             ram_pct,
-            format_support: if format == QuantFormat::GGUF { FormatSupport::Experimental } else { FormatSupport::Native },
+            format_support: if format == QuantFormat::GGUF {
+                FormatSupport::Experimental
+            } else {
+                FormatSupport::Native
+            },
             reason: reason_text,
             score_components: Some(variant_fit.score_components.into()),
             runtime: Some(variant_fit.runtime.label().to_string()),
@@ -301,12 +316,20 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
 
     let best_variant_idx = 0;
 
-    let gguf_sources: Vec<GgufSourceDto> = m.gguf_sources.iter().map(|s| GgufSourceDto {
-        provider: s.provider.clone(),
-        repo: s.repo.clone(),
-    }).collect();
+    let gguf_sources: Vec<GgufSourceDto> = m
+        .gguf_sources
+        .iter()
+        .map(|s| GgufSourceDto {
+            provider: s.provider.clone(),
+            repo: s.repo.clone(),
+        })
+        .collect();
 
-    let capabilities: Vec<String> = m.capabilities.iter().map(|c| c.label().to_string()).collect();
+    let capabilities: Vec<String> = m
+        .capabilities
+        .iter()
+        .map(|c| c.label().to_string())
+        .collect();
 
     ModelWithFit {
         id: m.name.clone(),
@@ -396,7 +419,8 @@ pub fn search_models_local(query: &str, limit: usize) -> Vec<ModelWithFit> {
 
     let is_apple_silicon = specs.backend == GpuBackend::Metal && specs.unified_memory;
 
-    let mut matches: Vec<&LlmModel> = db.get_all_models()
+    let mut matches: Vec<&LlmModel> = db
+        .get_all_models()
         .iter()
         .filter(|m| {
             if !is_apple_silicon && m.is_mlx_only() {
@@ -406,7 +430,10 @@ pub fn search_models_local(query: &str, limit: usize) -> Vec<ModelWithFit> {
             let provider = m.provider.to_lowercase();
             let params = m.parameter_count.to_lowercase();
             let use_case = m.use_case.to_lowercase();
-            name.contains(&q_clean) || provider.contains(&q_clean) || params.contains(&q_clean) || use_case.contains(&q_clean)
+            name.contains(&q_clean)
+                || provider.contains(&q_clean)
+                || params.contains(&q_clean)
+                || use_case.contains(&q_clean)
         })
         .collect();
 
@@ -422,7 +449,8 @@ pub fn search_models_local(query: &str, limit: usize) -> Vec<ModelWithFit> {
         }
     });
 
-    matches.into_iter()
+    matches
+        .into_iter()
         .take(limit)
         .map(|m| {
             let fit = ModelFit::analyze(m, specs);
@@ -451,14 +479,20 @@ mod tests {
         assert!(recs.len() <= 10);
 
         for (i, m) in recs.iter().take(5).enumerate() {
-            eprintln!("#{i}: id={}, score={}, quant={:?}, runtime={:?}", m.id, m.score, m.best_quant, m.runtime);
+            eprintln!(
+                "#{i}: id={}, score={}, quant={:?}, runtime={:?}",
+                m.id, m.score, m.best_quant, m.runtime
+            );
         }
         assert_eq!(recs[0].score, 94.2);
 
         for m in &recs {
             assert!(!m.id.is_empty());
             assert!(m.score > 0.0, "Score should be positive: {}", m.score);
-            assert!(m.score_components.is_some(), "Score components should be present");
+            assert!(
+                m.score_components.is_some(),
+                "Score components should be present"
+            );
             let sc = m.score_components.unwrap();
             assert!(sc.quality >= 0.0 && sc.quality <= 100.0);
             assert!(sc.speed >= 0.0 && sc.speed <= 100.0);
@@ -472,9 +506,19 @@ mod tests {
     #[test]
     fn test_search_models_local() {
         let results = search_models_local("qwen", 5);
-        assert!(!results.is_empty(), "Search for 'qwen' should return results");
+        assert!(
+            !results.is_empty(),
+            "Search for 'qwen' should return results"
+        );
         for m in &results {
-            assert!(m.id.to_lowercase().contains("qwen") || m.provider.as_deref().unwrap_or("").to_lowercase().contains("qwen"));
+            assert!(
+                m.id.to_lowercase().contains("qwen")
+                    || m.provider
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains("qwen")
+            );
             assert!(m.score >= 0.0);
         }
     }

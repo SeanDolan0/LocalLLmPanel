@@ -10,7 +10,13 @@ use serde::Serialize;
 pub fn bytes_per_param(quant: &str) -> f64 {
     let q = quant.to_ascii_lowercase();
     let q_str = q.as_str();
-    if q_str.starts_with("q4") || q_str.contains("q4_") || q_str.contains("iq4") || q_str == "awq" || q_str == "gptq" || q_str == "int4" {
+    if q_str.starts_with("q4")
+        || q_str.contains("q4_")
+        || q_str.contains("iq4")
+        || q_str == "awq"
+        || q_str == "gptq"
+        || q_str == "int4"
+    {
         0.55 // 4-bit: 0.50 bytes/weight + ~0.05 scaling overhead
     } else if q_str.starts_with("q8") || q_str.contains("q8_") {
         1.05 // 8-bit: 1.00 byte/weight + scaling overhead
@@ -157,7 +163,9 @@ pub fn context_fit_tiered(
         let swap_space_gb = if extended_tokens == 0 {
             0
         } else {
-            ((extended_tokens as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0)).ceil().max(1.0) as usize
+            ((extended_tokens as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0))
+                .ceil()
+                .max(1.0) as usize
         };
 
         TieredContextFit {
@@ -183,7 +191,9 @@ pub fn context_fit_tiered(
                 };
             }
             let extended_context = ram_tokens.min(max_context).max(512.min(max_context));
-            let swap_space_gb = ((extended_context as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0)).ceil().max(1.0) as usize;
+            let swap_space_gb = ((extended_context as f64 * kv_bpt) / (1024.0 * 1024.0 * 1024.0))
+                .ceil()
+                .max(1.0) as usize;
 
             TieredContextFit {
                 vram_context: 0,
@@ -241,37 +251,98 @@ pub fn gpu_bandwidth(name: &str) -> (f64, bool) {
     let n = name.to_lowercase();
     let find = |needle: &str| n.contains(needle);
     // Blackwell desktop (GDDR7)
-    if find("5090") && find("laptop") { return (1418.0, true); }
-    if find("5090") { return (1792.0, true); }
-    if find("5080") && find("laptop") { return (960.0, true); }
-    if find("5080") { return (960.0, true); }
-    if find("5070 ti") && find("laptop") { return (672.0, true); }
-    if find("5070 ti") { return (896.0, true); }
-    if find("5070") { return (448.0, true); }
-    if find("5060 ti") { return (448.0, true); }
-    if find("5060") { return (288.0, true); }
+    if find("5090") && find("laptop") {
+        return (1418.0, true);
+    }
+    if find("5090") {
+        return (1792.0, true);
+    }
+    if find("5080") && find("laptop") {
+        return (960.0, true);
+    }
+    if find("5080") {
+        return (960.0, true);
+    }
+    if find("5070 ti") && find("laptop") {
+        return (672.0, true);
+    }
+    if find("5070 ti") {
+        return (896.0, true);
+    }
+    if find("5070") {
+        return (448.0, true);
+    }
+    if find("5060 ti") {
+        return (448.0, true);
+    }
+    if find("5060") {
+        return (288.0, true);
+    }
     // Ada Lovelace
-    if find("4090") { return (1008.0, true); }
-    if find("4080") && find("super") { return (736.0, true); }
-    if find("4080") { return (716.0, true); }
-    if find("4070 ti") && find("super") { return (672.0, true); }
-    if find("4070 ti") { return (504.0, true); }
-    if find("4070 super") { return (504.0, true); }
-    if find("4070") { return (504.0, true); }
-    if find("4060 ti") { return (288.0, true); }
-    if find("4060") { return (272.0, true); }
+    if find("4090") {
+        return (1008.0, true);
+    }
+    if find("4080") && find("super") {
+        return (736.0, true);
+    }
+    if find("4080") {
+        return (716.0, true);
+    }
+    if find("4070 ti") && find("super") {
+        return (672.0, true);
+    }
+    if find("4070 ti") {
+        return (504.0, true);
+    }
+    if find("4070 super") {
+        return (504.0, true);
+    }
+    if find("4070") {
+        return (504.0, true);
+    }
+    if find("4060 ti") {
+        return (288.0, true);
+    }
+    if find("4060") {
+        return (272.0, true);
+    }
     // Ampere
-    if find("3090 ti") { return (1008.0, true); }
-    if find("3090") { return (936.0, true); }
-    if find("3080 ti") { return (912.0, true); }
-    if find("3080") { return (760.0, true); }
-    if find("3070 ti") { return (608.0, true); }
-    if find("3070") { return (448.0, true); }
-    if find("3060 ti") { return (448.0, true); }
-    if find("3060") { return (360.0, true); }
-    if find("3050") { return (224.0, true); }
+    if find("3090 ti") {
+        return (1008.0, true);
+    }
+    if find("3090") {
+        return (936.0, true);
+    }
+    if find("3080 ti") {
+        return (912.0, true);
+    }
+    if find("3080") {
+        return (760.0, true);
+    }
+    if find("3070 ti") {
+        return (608.0, true);
+    }
+    if find("3070") {
+        return (448.0, true);
+    }
+    if find("3060 ti") {
+        return (448.0, true);
+    }
+    if find("3060") {
+        return (360.0, true);
+    }
+    if find("3050") {
+        return (224.0, true);
+    }
     // Mildest fallback: something NVIDIA-like but unknown
-    if find("nvidia") || find("geforce") || find("rtx") || find("quadro") || find("tesla") || find("a100") || find("h100") {
+    if find("nvidia")
+        || find("geforce")
+        || find("rtx")
+        || find("quadro")
+        || find("tesla")
+        || find("a100")
+        || find("h100")
+    {
         return (700.0, false);
     }
     (700.0, false)
@@ -326,7 +397,8 @@ pub fn parse_context(config: &serde_json::Value) -> (usize, ContextSource) {
 
 fn apply_rope_scaling(config: &serde_json::Value, base_ctx: usize) -> usize {
     if let Some(rope) = config.get("rope_scaling") {
-        let rope_type = rope.get("type")
+        let rope_type = rope
+            .get("type")
             .or_else(|| rope.get("rope_type"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -345,7 +417,9 @@ fn apply_rope_scaling(config: &serde_json::Value, base_ctx: usize) -> usize {
 }
 
 fn as_usize(v: &serde_json::Value) -> Option<usize> {
-    v.as_u64().map(|n| n as usize).or_else(|| v.as_i64().and_then(|n| usize::try_from(n).ok()))
+    v.as_u64()
+        .map(|n| n as usize)
+        .or_else(|| v.as_i64().and_then(|n| usize::try_from(n).ok()))
 }
 
 /// Family-based fallback context when config.json doesn't declare one.
@@ -416,7 +490,11 @@ pub fn head_dim_from_config(cfg: &serde_json::Value) -> Option<usize> {
 fn derive_head_dim(cfg: &serde_json::Value) -> Option<usize> {
     let hidden = cfg.get("hidden_size").and_then(as_usize)?;
     let heads = cfg.get("num_attention_heads").and_then(as_usize)?;
-    if heads > 0 { Some(hidden / heads) } else { None }
+    if heads > 0 {
+        Some(hidden / heads)
+    } else {
+        None
+    }
 }
 
 /// Estimate parameter count (`params_b` = billions) from HF config dims.
@@ -446,13 +524,17 @@ pub fn estimate_params_from_config(cfg: &serde_json::Value) -> Option<f64> {
 }
 
 static PARAMS_NAME_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-    regex_lite::Regex::new(r"(?i)(?:^|[-_ /])(\d+(?:\.\d+)?)[bB](?:[-_ /.]|$)").expect("valid params regex")
+    regex_lite::Regex::new(r"(?i)(?:^|[-_ /])(\d+(?:\.\d+)?)[bB](?:[-_ /.]|$)")
+        .expect("valid params regex")
 });
 
 /// Try to parse parameter count in billions from a model ID / repo name (e.g. "Qwen3.8-27B-GGUF" -> 27.0).
 pub fn parse_params_from_name(name: &str) -> Option<f64> {
     let base = name.split('/').last().unwrap_or(name);
-    PARAMS_NAME_RE.captures(base).and_then(|c| c.get(1)).and_then(|m| m.as_str().parse::<f64>().ok())
+    PARAMS_NAME_RE
+        .captures(base)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<f64>().ok())
 }
 
 /// Parse param count from the HF API `?expand[]=safetensors` response.
@@ -461,17 +543,19 @@ pub fn parse_params_from_safetensors_api(model_info: &serde_json::Value) -> Opti
     let params = model_info.get("safetensors")?.get("parameters")?;
     let obj = params.as_object()?;
     let total: u64 = obj.values().filter_map(|v| v.as_u64()).sum();
-    if total == 0 { return None; }
+    if total == 0 {
+        return None;
+    }
     Some(total as f64 / 1e9)
 }
 
 /// Parse params from a safetensors index `metadata.total_size` (bytes),
 /// dividing by the dtype's byte width. `torch_dtype` from config.json.
-pub fn parse_params_from_index(index: &serde_json::Value, torch_dtype: Option<&str>) -> Option<f64> {
-    let total = index
-        .get("metadata")?
-        .get("total_size")?
-        .as_u64()? as f64;
+pub fn parse_params_from_index(
+    index: &serde_json::Value,
+    torch_dtype: Option<&str>,
+) -> Option<f64> {
+    let total = index.get("metadata")?.get("total_size")?.as_u64()? as f64;
     let divisor = match torch_dtype.map(|d| d.to_ascii_lowercase()) {
         Some(ref d) if d.contains("float32") || d.contains("float16") => 2.0_f64, // fp16 stored as 2B
         Some(ref d) if d.contains("float8") => 1.0,
@@ -597,7 +681,10 @@ mod tests {
 
     #[test]
     fn bandwidth_table() {
-        assert_eq!(gpu_bandwidth("NVIDIA GeForce RTX 5070 Ti Laptop GPU"), (672.0, true));
+        assert_eq!(
+            gpu_bandwidth("NVIDIA GeForce RTX 5070 Ti Laptop GPU"),
+            (672.0, true)
+        );
         assert_eq!(gpu_bandwidth("NVIDIA GeForce RTX 4090"), (1008.0, true));
         assert_eq!(gpu_bandwidth("NVIDIA RTX 5090"), (1792.0, true));
         assert_eq!(gpu_bandwidth("NVIDIA GeForce GTX 1080"), (700.0, false)); // no match → fallback
@@ -701,11 +788,26 @@ mod tests {
 
     #[test]
     fn test_parse_params_from_name() {
-        assert_eq!(parse_params_from_name("unsloth/Qwen3.8-27B-GGUF"), Some(27.0));
-        assert_eq!(parse_params_from_name("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"), Some(8.0));
-        assert_eq!(parse_params_from_name("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"), Some(1.5));
-        assert_eq!(parse_params_from_name("Qwen/Qwen2.5-0.5B-Instruct"), Some(0.5));
-        assert_eq!(parse_params_from_name("TheBloke/Llama-2-70B-Chat-GGUF"), Some(70.0));
+        assert_eq!(
+            parse_params_from_name("unsloth/Qwen3.8-27B-GGUF"),
+            Some(27.0)
+        );
+        assert_eq!(
+            parse_params_from_name("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"),
+            Some(8.0)
+        );
+        assert_eq!(
+            parse_params_from_name("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"),
+            Some(1.5)
+        );
+        assert_eq!(
+            parse_params_from_name("Qwen/Qwen2.5-0.5B-Instruct"),
+            Some(0.5)
+        );
+        assert_eq!(
+            parse_params_from_name("TheBloke/Llama-2-70B-Chat-GGUF"),
+            Some(70.0)
+        );
         assert_eq!(parse_params_from_name("google/gemma-2-27b-it"), Some(27.0));
         assert_eq!(parse_params_from_name("google/gemma-2-9b"), Some(9.0));
         assert_eq!(parse_params_from_name("microsoft/phi-4"), None);
@@ -738,8 +840,8 @@ mod tests {
     #[test]
     fn test_context_fit_tiered_vram_and_swap() {
         let bpt = kv_bytes_per_token(32, 8, 128); // 7B model KV cache rate (~131072 bytes/tok)
-        // 12GB GPU (util 0.92 = 11048MB), 4.4GB weights, 2500MB overhead -> ~4048MB VRAM for KV (~32k tokens)
-        // Model max context: 131,072. Usable RAM: 16,384 MB (16 GB)
+                                                  // 12GB GPU (util 0.92 = 11048MB), 4.4GB weights, 2500MB overhead -> ~4048MB VRAM for KV (~32k tokens)
+                                                  // Model max context: 131,072. Usable RAM: 16,384 MB (16 GB)
         let res = context_fit_tiered(12000.0, 0.92, 16384.0, 4.4, bpt, 2500.0, 131072, true);
         assert!(res.vram_context > 30000 && res.vram_context < 35000);
         assert!(res.extended_context > res.vram_context);
@@ -800,10 +902,26 @@ mod tests {
     #[test]
     fn test_context_fit_tiered_zero_kv_or_max_ctx() {
         let res1 = context_fit_tiered(12000.0, 0.92, 16384.0, 4.4, 0.0, 2500.0, 32768, true);
-        assert_eq!(res1, TieredContextFit { vram_context: 0, extended_context: 0, swap_space_gb: 0, cpu_offload_gb: 0 });
+        assert_eq!(
+            res1,
+            TieredContextFit {
+                vram_context: 0,
+                extended_context: 0,
+                swap_space_gb: 0,
+                cpu_offload_gb: 0
+            }
+        );
 
         let res2 = context_fit_tiered(12000.0, 0.92, 16384.0, 4.4, 131072.0, 2500.0, 0, true);
-        assert_eq!(res2, TieredContextFit { vram_context: 0, extended_context: 0, swap_space_gb: 0, cpu_offload_gb: 0 });
+        assert_eq!(
+            res2,
+            TieredContextFit {
+                vram_context: 0,
+                extended_context: 0,
+                swap_space_gb: 0,
+                cpu_offload_gb: 0
+            }
+        );
     }
 
     #[test]
@@ -822,7 +940,15 @@ mod tests {
         let bpt = kv_bytes_per_token(40, 8, 128);
         // 15GB model on 12GB GPU with allow_weight_offload = false -> Does not fit
         let res = context_fit_tiered(12000.0, 0.92, 32768.0, 15.0, bpt, 2500.0, 32768, false);
-        assert_eq!(res, TieredContextFit { vram_context: 0, extended_context: 0, swap_space_gb: 0, cpu_offload_gb: 0 });
+        assert_eq!(
+            res,
+            TieredContextFit {
+                vram_context: 0,
+                extended_context: 0,
+                swap_space_gb: 0,
+                cpu_offload_gb: 0
+            }
+        );
     }
 
     #[test]
@@ -847,8 +973,8 @@ mod tests {
     #[test]
     fn test_context_fit_tiered_extended_tokens_zero_swap_zero() {
         let bpt = kv_bytes_per_token(32, 8, 128); // 131072 bytes/tok
-        // 12GB GPU, 4.4GB weights, 2500MB overhead -> ~32k tokens VRAM context.
-        // ram_usable_mb is tiny (e.g. 0.01 MB), not enough for even 1 token.
+                                                  // 12GB GPU, 4.4GB weights, 2500MB overhead -> ~32k tokens VRAM context.
+                                                  // ram_usable_mb is tiny (e.g. 0.01 MB), not enough for even 1 token.
         let res = context_fit_tiered(12000.0, 0.92, 0.01, 4.4, bpt, 2500.0, 131072, true);
         assert!(res.vram_context > 30000);
         assert_eq!(res.extended_context, res.vram_context);
@@ -861,13 +987,15 @@ mod tests {
         let bpt = kv_bytes_per_token(40, 8, 128);
         // Case A: ram has only 0.0001 MB remaining above offload -> ram_tokens == 0
         // 15GB model requires ~7GB (7168MB) offload. ram_usable_mb = 7168.0001
-        let res_zero_tokens = context_fit_tiered(12000.0, 0.92, 7168.0001, 15.0, bpt, 2500.0, 32768, true);
+        let res_zero_tokens =
+            context_fit_tiered(12000.0, 0.92, 7168.0001, 15.0, bpt, 2500.0, 32768, true);
         assert_eq!(res_zero_tokens.extended_context, 0);
         assert_eq!(res_zero_tokens.swap_space_gb, 0);
         assert!(res_zero_tokens.cpu_offload_gb >= 6);
 
         // Case B: max_context is 256 (< 512)
-        let res_small_ctx = context_fit_tiered(12000.0, 0.92, 32768.0, 15.0, bpt, 2500.0, 256, true);
+        let res_small_ctx =
+            context_fit_tiered(12000.0, 0.92, 32768.0, 15.0, bpt, 2500.0, 256, true);
         assert_eq!(res_small_ctx.extended_context, 256);
         assert!(res_small_ctx.extended_context <= 256);
     }

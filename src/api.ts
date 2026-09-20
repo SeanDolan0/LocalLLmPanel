@@ -70,7 +70,7 @@ export const api = {
   serversRestart: (id: string) => invoke<void>("servers_restart", { id }),
   serversLogs: (id: string, since: number) => invoke<string>("servers_logs", { id, since }),
   serversMetrics: (id: string) => invoke<MetricsSnapshot | null>("servers_metrics", { id }),
-  serversChat: (id: string, messages: { role: string; content: string }[]) =>
+  serversChat: (id: string, messages: ChatMessage[]) =>
     invoke<Record<string, unknown>>("servers_chat", { id, messages }),
   serversChatStream: (
     requestId: string,
@@ -248,7 +248,7 @@ export function bytesPerParam(quant: string): number {
     case "awq":
     case "gptq":
     case "int4":
-      return 1.1;
+      return 0.55;
     default:
       return 2.0; // fp16 / bf16
   }

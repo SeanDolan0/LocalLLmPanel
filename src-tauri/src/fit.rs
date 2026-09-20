@@ -2,14 +2,21 @@
 //!
 //! Pure functions composing `estimate.rs`. No I/O, fully unit-testable.
 
-use serde::{Deserialize, Serialize};
 use crate::estimate;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-pub enum FitVerdict { Comfortable, Constrained, DoesNotFit }
+pub enum FitVerdict {
+    Comfortable,
+    Constrained,
+    DoesNotFit,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-pub enum FormatSupport { Native, Experimental }
+pub enum FormatSupport {
+    Native,
+    Experimental,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub enum RunMode {
@@ -87,9 +94,9 @@ pub struct FitResult {
 /// is the subset fit.rs needs — keeps fit.rs free of HF-API concerns).
 #[derive(Debug, Clone, Serialize)]
 pub struct VariantInput {
-    pub quant_str: String,       // "fp16", "fp8", "awq", "gptq", "bnb", "gguf"
+    pub quant_str: String, // "fp16", "fp8", "awq", "gptq", "bnb", "gguf"
     pub weight_bytes: Option<u64>,
-    pub params_b: Option<f64>,   // override if different from base model
+    pub params_b: Option<f64>, // override if different from base model
     pub is_gguf: bool,
 }
 
@@ -161,12 +168,26 @@ pub fn score_variant(
             true,
         );
         (
-            potential_tiered.extended_context.max(tiered.extended_context),
-            if tiered.swap_space_gb > 0 { tiered.swap_space_gb } else { potential_tiered.swap_space_gb },
-            if tiered.cpu_offload_gb > 0 { tiered.cpu_offload_gb } else { potential_tiered.cpu_offload_gb },
+            potential_tiered
+                .extended_context
+                .max(tiered.extended_context),
+            if tiered.swap_space_gb > 0 {
+                tiered.swap_space_gb
+            } else {
+                potential_tiered.swap_space_gb
+            },
+            if tiered.cpu_offload_gb > 0 {
+                tiered.cpu_offload_gb
+            } else {
+                potential_tiered.cpu_offload_gb
+            },
         )
     } else {
-        (tiered.extended_context, tiered.swap_space_gb, tiered.cpu_offload_gb)
+        (
+            tiered.extended_context,
+            tiered.swap_space_gb,
+            tiered.cpu_offload_gb,
+        )
     };
 
     // Determine RunMode
@@ -185,7 +206,10 @@ pub fn score_variant(
         FitVerdict::DoesNotFit
     } else if run_mode == RunMode::Gpu && vram_ratio <= COMFORTABLE_MAX_RATIO {
         FitVerdict::Comfortable
-    } else if run_mode == RunMode::GpuRamSwap || run_mode == RunMode::CpuOffload || vram_ratio <= CONSTRAINED_MAX_RATIO {
+    } else if run_mode == RunMode::GpuRamSwap
+        || run_mode == RunMode::CpuOffload
+        || vram_ratio <= CONSTRAINED_MAX_RATIO
+    {
         FitVerdict::Constrained
     } else {
         FitVerdict::DoesNotFit
@@ -194,7 +218,9 @@ pub fn score_variant(
     // Percentage of usable RAM used by swap and offload
     let ram_used_mb = ((tiered.swap_space_gb + tiered.cpu_offload_gb) * 1024) as f64;
     let ram_pct = if hw.ram_usable_mb > 0 {
-        ((ram_used_mb / hw.ram_usable_mb as f64) * 100.0).round().min(255.0) as u8
+        ((ram_used_mb / hw.ram_usable_mb as f64) * 100.0)
+            .round()
+            .min(255.0) as u8
     } else {
         0
     };
@@ -231,7 +257,9 @@ pub fn score_variant(
 
     // Composite score: fit (40%), speed (30%), context utilization (30%)
     let fit_pillar = match verdict {
-        FitVerdict::Comfortable => 90.0 + 10.0 * (1.0 - (vram_ratio / COMFORTABLE_MAX_RATIO).min(1.0)),
+        FitVerdict::Comfortable => {
+            90.0 + 10.0 * (1.0 - (vram_ratio / COMFORTABLE_MAX_RATIO).min(1.0))
+        }
         FitVerdict::Constrained => {
             let range = CONSTRAINED_MAX_RATIO - COMFORTABLE_MAX_RATIO;
             let pos = ((vram_ratio - COMFORTABLE_MAX_RATIO) / range).clamp(0.0, 1.0);
@@ -324,12 +352,19 @@ pub fn score_variant(
         reason: reason.clone(),
         usable_context: tiered.vram_context.max(tiered.extended_context),
         score_components: None,
-        runtime: Some(if variant.is_gguf { "llama.cpp".into() } else { "vLLM".into() }),
+        runtime: Some(if variant.is_gguf {
+            "llama.cpp".into()
+        } else {
+            "vLLM".into()
+        }),
         notes: vec![reason],
     }
 }
 
-pub fn compare_variant_fit(a: (&VariantInput, &FitResult), b: (&VariantInput, &FitResult)) -> std::cmp::Ordering {
+pub fn compare_variant_fit(
+    a: (&VariantInput, &FitResult),
+    b: (&VariantInput, &FitResult),
+) -> std::cmp::Ordering {
     b.1.score.cmp(&a.1.score).then_with(|| {
         let a_native = !a.0.is_gguf;
         let b_native = !b.0.is_gguf;
@@ -411,7 +446,16 @@ mod tests {
 
     #[test]
     fn test_run_mode_gpu() {
-        let r = score_variant(&hw_12gb(), &variant("fp16", false), &arch_0_5b(), None, 0.92, 2500.0, true, None);
+        let r = score_variant(
+            &hw_12gb(),
+            &variant("fp16", false),
+            &arch_0_5b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
         assert_eq!(r.run_mode, RunMode::Gpu);
         assert_eq!(r.verdict, FitVerdict::Comfortable);
         assert_eq!(r.swap_space_gb, 0);
@@ -431,7 +475,13 @@ mod tests {
             ram_potential_mb: 4096,
             ram_bandwidth_gbs: 65.0,
         };
-        let arch_70b = ModelArchInfo { params_b: Some(70.0), context: 8192, n_layers: Some(80), n_kv_heads: Some(8), head_dim: Some(128) };
+        let arch_70b = ModelArchInfo {
+            params_b: Some(70.0),
+            context: 8192,
+            n_layers: Some(80),
+            n_kv_heads: Some(8),
+            head_dim: Some(128),
+        };
         let v = variant("fp16", false);
         let r = score_variant(&hw, &v, &arch_70b, None, 0.92, 2500.0, true, None);
         assert_eq!(r.run_mode, RunMode::DoesNotFit);
@@ -455,28 +505,65 @@ mod tests {
     }
 
     fn arch_0_5b() -> ModelArchInfo {
-        ModelArchInfo { params_b: Some(0.494), context: 32768, n_layers: Some(24), n_kv_heads: Some(2), head_dim: Some(64) }
+        ModelArchInfo {
+            params_b: Some(0.494),
+            context: 32768,
+            n_layers: Some(24),
+            n_kv_heads: Some(2),
+            head_dim: Some(64),
+        }
     }
 
     fn arch_7b() -> ModelArchInfo {
-        ModelArchInfo { params_b: Some(7.6), context: 32768, n_layers: Some(32), n_kv_heads: Some(8), head_dim: Some(128) }
+        ModelArchInfo {
+            params_b: Some(7.6),
+            context: 32768,
+            n_layers: Some(32),
+            n_kv_heads: Some(8),
+            head_dim: Some(128),
+        }
     }
 
     fn arch_14b() -> ModelArchInfo {
-        ModelArchInfo { params_b: Some(14.7), context: 32768, n_layers: Some(40), n_kv_heads: Some(8), head_dim: Some(128) }
+        ModelArchInfo {
+            params_b: Some(14.7),
+            context: 32768,
+            n_layers: Some(40),
+            n_kv_heads: Some(8),
+            head_dim: Some(128),
+        }
     }
 
     fn variant(quant: &str, is_gguf: bool) -> VariantInput {
-        VariantInput { quant_str: quant.into(), weight_bytes: None, params_b: None, is_gguf }
+        VariantInput {
+            quant_str: quant.into(),
+            weight_bytes: None,
+            params_b: None,
+            is_gguf,
+        }
     }
 
     fn variant_gguf_sized(quant: &str, size_bytes: u64) -> VariantInput {
-        VariantInput { quant_str: quant.into(), weight_bytes: Some(size_bytes), params_b: None, is_gguf: true }
+        VariantInput {
+            quant_str: quant.into(),
+            weight_bytes: Some(size_bytes),
+            params_b: None,
+            is_gguf: true,
+        }
     }
 
     #[test]
     fn test_comfortable_small_model() {
-        let r = score_variant(&hw_12gb(), &variant("fp16", false), &arch_0_5b(), None, 0.92, 2500.0, true, None);
+        let r = score_variant(
+            &hw_12gb(),
+            &variant("fp16", false),
+            &arch_0_5b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
         assert_eq!(r.verdict, FitVerdict::Comfortable);
         assert_eq!(r.run_mode, RunMode::Gpu);
         assert!(r.score > 70, "score = {}", r.score);
@@ -487,7 +574,16 @@ mod tests {
     #[test]
     fn test_doesnt_fit_7b_fp16() {
         // 7.6B fp16 = ~15.2 GB weights. On 12 GB GPU without offload → DoesNotFit.
-        let r = score_variant(&hw_12gb(), &variant("fp16", false), &arch_7b(), None, 0.92, 2500.0, false, None);
+        let r = score_variant(
+            &hw_12gb(),
+            &variant("fp16", false),
+            &arch_7b(),
+            None,
+            0.92,
+            2500.0,
+            false,
+            None,
+        );
         assert_eq!(r.verdict, FitVerdict::DoesNotFit);
         assert_eq!(r.run_mode, RunMode::DoesNotFit);
     }
@@ -506,14 +602,32 @@ mod tests {
         };
         // 7.6B AWQ on 8GB GPU: ~4.18 GB weights + 2.5 overhead = ~6.68 GB.
         // VRAM ratio = 6.68 / 8.192 = 0.815 → Constrained (0.60 < ratio ≤ 0.95)
-        let r = score_variant(&hw_8gb, &variant("awq", false), &arch_7b(), None, 0.92, 2500.0, true, None);
+        let r = score_variant(
+            &hw_8gb,
+            &variant("awq", false),
+            &arch_7b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
         assert_eq!(r.verdict, FitVerdict::Constrained);
         assert!(r.score > 30 && r.score < 80, "score = {}", r.score);
     }
 
     #[test]
     fn test_doesnt_fit_14b_fp16() {
-        let r = score_variant(&hw_12gb(), &variant("fp16", false), &arch_14b(), None, 0.92, 2500.0, true, None);
+        let r = score_variant(
+            &hw_12gb(),
+            &variant("fp16", false),
+            &arch_14b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
         assert_eq!(r.verdict, FitVerdict::DoesNotFit);
         assert_eq!(r.run_mode, RunMode::DoesNotFit);
         assert!(r.score <= 25, "score = {} (should be crushed)", r.score);
@@ -522,11 +636,23 @@ mod tests {
     #[test]
     fn test_gguf_uses_exact_weight() {
         // GGUF file of 4.5 GB = 4_831_838_208 bytes
-        let r = score_variant(&hw_12gb(), &variant_gguf_sized("gguf", 4_831_838_208), &arch_7b(), None, 0.92, 2500.0, true, None);
+        let r = score_variant(
+            &hw_12gb(),
+            &variant_gguf_sized("gguf", 4_831_838_208),
+            &arch_7b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
         // 4.5 GB + 2.5 GB overhead = 7 GB → 7/12.227 = 0.572 → Comfortable
         assert_eq!(r.verdict, FitVerdict::Comfortable);
         assert_eq!(r.format_support, FormatSupport::Experimental);
-        assert!(r.extended_context > 0, "GGUF comfortable fit must have positive context");
+        assert!(
+            r.extended_context > 0,
+            "GGUF comfortable fit must have positive context"
+        );
     }
 
     #[test]
@@ -609,8 +735,26 @@ mod tests {
     fn test_compare_variant_fit() {
         let v_native = variant("fp16", false);
         let v_gguf = variant("gguf", true);
-        let mut r1 = score_variant(&hw_12gb(), &v_native, &arch_0_5b(), None, 0.92, 2500.0, true, None);
-        let mut r2 = score_variant(&hw_12gb(), &v_gguf, &arch_0_5b(), None, 0.92, 2500.0, true, None);
+        let mut r1 = score_variant(
+            &hw_12gb(),
+            &v_native,
+            &arch_0_5b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
+        let mut r2 = score_variant(
+            &hw_12gb(),
+            &v_gguf,
+            &arch_0_5b(),
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+        );
 
         // Higher score comes first
         r1.score = 90;
@@ -676,7 +820,10 @@ mod tests {
         let res = score_variant(&hw, &v_gguf, &arch, None, 0.92, 2500.0, true, None);
         assert!(res.vram_context > 0, "usable context should not be 0");
         assert!(res.est_tok_s.is_some(), "est speed should be present");
-        assert!(res.est_tok_s.unwrap() > 10.0, "est speed should be reasonable");
+        assert!(
+            res.est_tok_s.unwrap() > 10.0,
+            "est speed should be reasonable"
+        );
     }
 
     #[test]
@@ -689,7 +836,7 @@ mod tests {
             bandwidth_gbs: 672.0,
             bandwidth_known: true,
             ram_total_mb: 24576,
-            ram_usable_mb: 0, // Disabled in active settings
+            ram_usable_mb: 0,        // Disabled in active settings
             ram_potential_mb: 20480, // Physical system usable RAM
             ram_bandwidth_gbs: 65.0,
         };

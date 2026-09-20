@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::estimate;
 use crate::state::AppState;
-use tauri::Emitter;
 use std::sync::Arc as StdArc;
+use tauri::Emitter;
 
 pub const HF_API: &str = "https://huggingface.co/api/models";
 
@@ -39,7 +39,10 @@ pub struct EnrichedStats {
     pub torch_dtype: Option<String>,
 }
 
-pub fn apply_auth(mut req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+pub fn apply_auth(
+    mut req: reqwest::RequestBuilder,
+    token: Option<&str>,
+) -> reqwest::RequestBuilder {
     if let Some(t) = token.map(str::trim).filter(|s| !s.is_empty()) {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
@@ -94,9 +97,15 @@ pub async fn search(
                     if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
                         let downloads = m.get("downloads").and_then(|v| v.as_i64()).unwrap_or(0);
                         let likes = m.get("likes").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let trending = m.get("trendingScore").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let trending = m
+                            .get("trendingScore")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
                         let private = m.get("private").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let pipeline = m.get("pipeline_tag").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        let pipeline = m
+                            .get("pipeline_tag")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                         out.push(HfModel {
                             id: id.to_string(),
                             downloads,
@@ -112,8 +121,11 @@ pub async fn search(
         }
     }
 
-    let url = reqwest::Url::parse_with_params(HF_API, &[("search", query.as_str()), ("limit", &limit.to_string())])
-        .map_err(|e| anyhow!("build url: {e}"))?;
+    let url = reqwest::Url::parse_with_params(
+        HF_API,
+        &[("search", query.as_str()), ("limit", &limit.to_string())],
+    )
+    .map_err(|e| anyhow!("build url: {e}"))?;
     let resp = apply_auth(client.get(url), token)
         .send()
         .await
@@ -138,7 +150,10 @@ pub async fn search(
         }
         let downloads = m.get("downloads").and_then(|v| v.as_i64()).unwrap_or(0);
         let likes = m.get("likes").and_then(|v| v.as_i64()).unwrap_or(0);
-        let trending = m.get("trendingScore").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let trending = m
+            .get("trendingScore")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let private = m.get("private").and_then(|v| v.as_bool()).unwrap_or(false);
         let pipeline = m
             .get("pipeline_tag")
@@ -179,7 +194,9 @@ async fn fetch_raw(
 pub async fn enrich(
     client: &reqwest::Client,
     model_id: &str,
-    cache: Option<&std::sync::Mutex<std::collections::HashMap<String, crate::state::CachedEnrichment>>>,
+    cache: Option<
+        &std::sync::Mutex<std::collections::HashMap<String, crate::state::CachedEnrichment>>,
+    >,
     token: Option<&str>,
 ) -> Option<EnrichedStats> {
     // 1. Check cache first (return if TTL < 1 hour / 3600 seconds)
@@ -197,12 +214,11 @@ pub async fn enrich(
     let mut cfg = fetch_raw(client, model_id, "config.json", token).await;
     if cfg.is_none() {
         let base_name = extract_base_name(model_id);
-        let clean_base = base_name.trim_end_matches("-GGUF").trim_end_matches("-gguf");
+        let clean_base = base_name
+            .trim_end_matches("-GGUF")
+            .trim_end_matches("-gguf");
         let org = model_id.split('/').next().unwrap_or("");
-        let candidates = [
-            format!("{org}/{clean_base}"),
-            clean_base.to_string(),
-        ];
+        let candidates = [format!("{org}/{clean_base}"), clean_base.to_string()];
         for cand in candidates {
             if cand != model_id {
                 if let Some(c) = fetch_raw(client, &cand, "config.json", token).await {
@@ -213,7 +229,16 @@ pub async fn enrich(
         }
     }
 
-    let (params_b, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads, torch_dtype) = if let Some(cfg) = &cfg {
+    let (
+        params_b,
+        context,
+        context_source,
+        context_estimated,
+        head_dim,
+        n_layers,
+        n_kv_heads,
+        torch_dtype,
+    ) = if let Some(cfg) = &cfg {
         let (context_config, _src) = estimate::parse_context(cfg);
         let (context, context_source, context_estimated) = if context_config > 0 {
             (context_config, "config.json", false)
@@ -226,16 +251,21 @@ pub async fn enrich(
         let head_dim = estimate::head_dim_from_config(cfg);
         let n_layers = cfg
             .get("num_hidden_layers")
-            .or_else(|| cfg.get("text_config").and_then(|t| t.get("num_hidden_layers")))
+            .or_else(|| {
+                cfg.get("text_config")
+                    .and_then(|t| t.get("num_hidden_layers"))
+            })
             .and_then(usize_of);
         let n_kv_heads = cfg
             .get("num_key_value_heads")
             .or_else(|| cfg.get("num_attention_heads"))
-            .or_else(|| cfg.get("text_config").and_then(|t| {
-                t.get("num_key_value_heads")
-                    .or_else(|| t.get("num_attention_heads"))
-                    .or_else(|| t.get("num_kv_heads"))
-            }))
+            .or_else(|| {
+                cfg.get("text_config").and_then(|t| {
+                    t.get("num_key_value_heads")
+                        .or_else(|| t.get("num_attention_heads"))
+                        .or_else(|| t.get("num_kv_heads"))
+                })
+            })
             .and_then(usize_of);
         let torch_dtype = cfg
             .get("torch_dtype")
@@ -258,7 +288,8 @@ pub async fn enrich(
         if pb.is_none() {
             for index_file in ["safetensors.index.json", "pytorch_model.bin.index.json"] {
                 if let Some(idx) = fetch_raw(client, model_id, index_file, token).await {
-                    if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref()) {
+                    if let Some(p) = estimate::parse_params_from_index(&idx, torch_dtype.as_deref())
+                    {
                         pb = Some(p);
                         break;
                     }
@@ -276,15 +307,34 @@ pub async fn enrich(
             pb = estimate::parse_params_from_name(model_id);
         }
 
-        (pb, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads, torch_dtype)
+        (
+            pb,
+            context,
+            context_source,
+            context_estimated,
+            head_dim,
+            n_layers,
+            n_kv_heads,
+            torch_dtype,
+        )
     } else {
-        let (context, context_source, context_estimated) = if let Some(fam) = estimate::family_fallback(model_id) {
-            (fam, "family default", true)
-        } else {
-            (estimate::DEFAULT_CONTEXT, "generic default", true)
-        };
+        let (context, context_source, context_estimated) =
+            if let Some(fam) = estimate::family_fallback(model_id) {
+                (fam, "family default", true)
+            } else {
+                (estimate::DEFAULT_CONTEXT, "generic default", true)
+            };
         let pb = estimate::parse_params_from_name(model_id);
-        (pb, context, context_source, context_estimated, None, None, None, None)
+        (
+            pb,
+            context,
+            context_source,
+            context_estimated,
+            None,
+            None,
+            None,
+            None,
+        )
     };
 
     let stats = EnrichedStats {
@@ -315,7 +365,14 @@ pub async fn enrich(
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub enum QuantFormat { FP16, FP8, AWQ, GPTQ, BNB, GGUF }
+pub enum QuantFormat {
+    FP16,
+    FP8,
+    AWQ,
+    GPTQ,
+    BNB,
+    GGUF,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantVariant {
@@ -405,10 +462,18 @@ pub fn extract_base_name(model_id: &str) -> &str {
 /// Detect quant format from repo name suffix.
 pub fn format_from_repo_suffix(name: &str) -> Option<QuantFormat> {
     let n = name.to_lowercase();
-    if n.ends_with("-awq") || n.contains("-awq-") || n.contains("-awq_") { return Some(QuantFormat::AWQ); }
-    if n.contains("-gptq") { return Some(QuantFormat::GPTQ); }
-    if n.ends_with("-fp8") || n.ends_with("-fp8-dynamic") { return Some(QuantFormat::FP8); }
-    if n.ends_with("-bnb-4bit") { return Some(QuantFormat::BNB); }
+    if n.ends_with("-awq") || n.contains("-awq-") || n.contains("-awq_") {
+        return Some(QuantFormat::AWQ);
+    }
+    if n.contains("-gptq") {
+        return Some(QuantFormat::GPTQ);
+    }
+    if n.ends_with("-fp8") || n.ends_with("-fp8-dynamic") {
+        return Some(QuantFormat::FP8);
+    }
+    if n.ends_with("-bnb-4bit") {
+        return Some(QuantFormat::BNB);
+    }
     None
 }
 
@@ -451,10 +516,13 @@ pub async fn discover_quant_variants(
         }];
         if let Some(c) = cache {
             if let Ok(mut guard) = c.lock() {
-                guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
-                    variants: res.clone(),
-                    fetched_at: std::time::Instant::now(),
-                });
+                guard.insert(
+                    base_model_id.to_string(),
+                    crate::state::CachedQuants {
+                        variants: res.clone(),
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
             }
         }
         return res;
@@ -464,14 +532,19 @@ pub async fn discover_quant_variants(
     let org = base_model_id.split('/').next().unwrap_or("");
 
     // 3. If it is a GGUF repo, inspect it directly without searching other publishers
-    if base_model_id.to_lowercase().ends_with("-gguf") || base_model_id.to_lowercase().contains(".gguf") {
+    if base_model_id.to_lowercase().ends_with("-gguf")
+        || base_model_id.to_lowercase().contains(".gguf")
+    {
         let res = check_gguf_repo(client, base_model_id, sem, token).await;
         if let Some(c) = cache {
             if let Ok(mut guard) = c.lock() {
-                guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
-                    variants: res.clone(),
-                    fetched_at: std::time::Instant::now(),
-                });
+                guard.insert(
+                    base_model_id.to_string(),
+                    crate::state::CachedQuants {
+                        variants: res.clone(),
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
             }
         }
         return res;
@@ -491,14 +564,51 @@ pub async fn discover_quant_variants(
     });
 
     // 5. Run cross-repo candidate, publisher, and GGUF queries concurrently
-    let suffixes = ["-AWQ", "-GPTQ-Int4", "-GPTQ", "-FP8", "-FP8-dynamic", "-bnb-4bit"];
+    let suffixes = [
+        "-AWQ",
+        "-GPTQ-Int4",
+        "-GPTQ",
+        "-FP8",
+        "-FP8-dynamic",
+        "-bnb-4bit",
+    ];
     let (c0, c1, c2, c3, c4, c5, p0, p1, p2, p3, g0, g1, g2) = tokio::join!(
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[0]), sem, token),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[1]), sem, token),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[2]), sem, token),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[3]), sem, token),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[4]), sem, token),
-        check_candidate(client, format!("{org}/{base_name}{}", suffixes[5]), sem, token),
+        check_candidate(
+            client,
+            format!("{org}/{base_name}{}", suffixes[0]),
+            sem,
+            token
+        ),
+        check_candidate(
+            client,
+            format!("{org}/{base_name}{}", suffixes[1]),
+            sem,
+            token
+        ),
+        check_candidate(
+            client,
+            format!("{org}/{base_name}{}", suffixes[2]),
+            sem,
+            token
+        ),
+        check_candidate(
+            client,
+            format!("{org}/{base_name}{}", suffixes[3]),
+            sem,
+            token
+        ),
+        check_candidate(
+            client,
+            format!("{org}/{base_name}{}", suffixes[4]),
+            sem,
+            token
+        ),
+        check_candidate(
+            client,
+            format!("{org}/{base_name}{}", suffixes[5]),
+            sem,
+            token
+        ),
         check_publisher(client, "neuralmagic", base_name, sem, token),
         check_publisher(client, "hugging-quants", base_name, sem, token),
         check_publisher(client, "ISTA-DASLab", base_name, sem, token),
@@ -508,7 +618,10 @@ pub async fn discover_quant_variants(
         check_gguf(client, "TheBloke", base_name, sem, token),
     );
 
-    for repo_id in [c0, c1, c2, c3, c4, c5, p0, p1, p2, p3].into_iter().flatten() {
+    for repo_id in [c0, c1, c2, c3, c4, c5, p0, p1, p2, p3]
+        .into_iter()
+        .flatten()
+    {
         if let Some(fmt) = format_from_repo_suffix(&repo_id) {
             variants.push(QuantVariant {
                 repo_id: repo_id.clone(),
@@ -535,17 +648,23 @@ pub async fn discover_quant_variants(
     // Deduplicate by format+label
     let mut unique = Vec::new();
     for v in variants {
-        if !unique.iter().any(|u: &QuantVariant| u.format == v.format && u.label == v.label) {
+        if !unique
+            .iter()
+            .any(|u: &QuantVariant| u.format == v.format && u.label == v.label)
+        {
             unique.push(v);
         }
     }
 
     if let Some(c) = cache {
         if let Ok(mut guard) = c.lock() {
-            guard.insert(base_model_id.to_string(), crate::state::CachedQuants {
-                variants: unique.clone(),
-                fetched_at: std::time::Instant::now(),
-            });
+            guard.insert(
+                base_model_id.to_string(),
+                crate::state::CachedQuants {
+                    variants: unique.clone(),
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
         }
     }
 
@@ -612,7 +731,8 @@ pub async fn check_gguf_repo(
         if resp.status().is_success() {
             if let Ok(info) = resp.json::<Value>().await {
                 if let Some(siblings) = info.get("siblings").and_then(|v| v.as_array()) {
-                    let mut variant_map: std::collections::BTreeMap<String, QuantVariant> = std::collections::BTreeMap::new();
+                    let mut variant_map: std::collections::BTreeMap<String, QuantVariant> =
+                        std::collections::BTreeMap::new();
                     for sib in siblings {
                         let fname = sib.get("rfilename").and_then(|v| v.as_str()).unwrap_or("");
                         if let Some(quant_label) = parse_gguf_quant_label(fname) {
@@ -631,7 +751,8 @@ pub async fn check_gguf_repo(
                                 }
                                 std::collections::btree_map::Entry::Occupied(mut e) => {
                                     let v = e.get_mut();
-                                    if let (Some(existing), Some(addition)) = (v.weight_bytes, size) {
+                                    if let (Some(existing), Some(addition)) = (v.weight_bytes, size)
+                                    {
                                         v.weight_bytes = Some(existing + addition);
                                     }
                                 }
@@ -663,7 +784,6 @@ async fn check_gguf(
     check_gguf_repo(client, &repo_id, sem, token).await
 }
 
-
 fn usize_of(v: &Value) -> Option<usize> {
     v.as_u64()
         .map(|n| n as usize)
@@ -687,11 +807,7 @@ pub struct PullStatus {
 ///
 /// `app.state()` is NOT usable from the spawned thread, so we hand it a clone
 /// of the pulling map Arc + the AppHandle (for emitting events).
-pub fn pull_model(
-    state: &StdArc<AppState>,
-    app: tauri::AppHandle,
-    model_id: &str,
-) -> Result<()> {
+pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &str) -> Result<()> {
     {
         let mut pulling = state.pulling.lock().unwrap();
         if *pulling.get(model_id).unwrap_or(&false) {
@@ -768,7 +884,9 @@ pub fn pull_model(
             }
         }
 
-        let state_label = if out.ok && !out.stdout.contains("__HF_PULL_FAILED__") && !out.stderr.contains("__HF_PULL_FAILED__")
+        let state_label = if out.ok
+            && !out.stdout.contains("__HF_PULL_FAILED__")
+            && !out.stderr.contains("__HF_PULL_FAILED__")
         {
             "complete"
         } else {
@@ -793,7 +911,12 @@ pub fn pull_model(
         };
         let _ = app.emit(
             "pull-progress",
-            PullStatus { model: model_id.clone(), state: state_label.into(), file: err_msg, percent: None },
+            PullStatus {
+                model: model_id.clone(),
+                state: state_label.into(),
+                file: err_msg,
+                percent: None,
+            },
         );
         let mut pulling = pulling_arc.lock().unwrap();
         pulling.remove(&model_id);
@@ -868,10 +991,16 @@ mod tests {
     #[test]
     fn test_apply_auth_header() {
         let client = reqwest::Client::new();
-        let req = apply_auth(client.get("https://huggingface.co/api/models"), Some("hf_test123"));
+        let req = apply_auth(
+            client.get("https://huggingface.co/api/models"),
+            Some("hf_test123"),
+        );
         let built = req.build().unwrap();
         assert_eq!(
-            built.headers().get("Authorization").and_then(|v| v.to_str().ok()),
+            built
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok()),
             Some("Bearer hf_test123")
         );
 
@@ -909,30 +1038,72 @@ mod tests {
                 .get("dummy/model-expired-xyz")
                 .map(|entry| entry.fetched_at.elapsed() < Duration::from_secs(3600))
                 .unwrap_or(false);
-            assert!(!is_hit, "Expired cache entry (>3600s) should not count as a cache hit");
+            assert!(
+                !is_hit,
+                "Expired cache entry (>3600s) should not count as a cache hit"
+            );
         }
     }
 
     #[test]
     fn test_parse_gguf_quant_label() {
-        assert_eq!(parse_gguf_quant_label("model-Q4_K_M.gguf"), Some("Q4_K_M".to_string()));
-        assert_eq!(parse_gguf_quant_label("Qwen2.5-7B-Instruct-Q8_0.gguf"), Some("Q8_0".to_string()));
-        assert_eq!(parse_gguf_quant_label("model-Q4_1.gguf"), Some("Q4_1".to_string()));
-        assert_eq!(parse_gguf_quant_label("model-Q5_1.gguf"), Some("Q5_1".to_string()));
-        assert_eq!(parse_gguf_quant_label("model-IQ4_NL.gguf"), Some("IQ4_NL".to_string()));
-        assert_eq!(parse_gguf_quant_label("model-UD-Q4_K_XL.gguf"), Some("UD-Q4_K_XL".to_string()));
-        assert_eq!(parse_gguf_quant_label("model-Q3_K_S-00001-of-00003.gguf"), Some("Q3_K_S".to_string()));
-        assert_eq!(parse_gguf_quant_label("BF16/Qwen3.8-Flash-Next-BF16-00001-of-00008.gguf"), Some("BF16".to_string()));
+        assert_eq!(
+            parse_gguf_quant_label("model-Q4_K_M.gguf"),
+            Some("Q4_K_M".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("Qwen2.5-7B-Instruct-Q8_0.gguf"),
+            Some("Q8_0".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-Q4_1.gguf"),
+            Some("Q4_1".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-Q5_1.gguf"),
+            Some("Q5_1".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-IQ4_NL.gguf"),
+            Some("IQ4_NL".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-UD-Q4_K_XL.gguf"),
+            Some("UD-Q4_K_XL".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-Q3_K_S-00001-of-00003.gguf"),
+            Some("Q3_K_S".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("BF16/Qwen3.8-Flash-Next-BF16-00001-of-00008.gguf"),
+            Some("BF16".to_string())
+        );
         assert_eq!(parse_gguf_quant_label("model.safetensors"), None);
         assert_eq!(parse_gguf_quant_label("README.md"), None);
         assert_eq!(parse_gguf_quant_label("model.gguf"), None);
-        assert_eq!(parse_gguf_quant_label("model-Q5_K_M.gguf"), Some("Q5_K_M".to_string()));
-        assert_eq!(parse_gguf_quant_label("model-IQ2_XXS.gguf"), Some("IQ2_XXS".to_string()));
+        assert_eq!(
+            parse_gguf_quant_label("model-Q5_K_M.gguf"),
+            Some("Q5_K_M".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-IQ2_XXS.gguf"),
+            Some("IQ2_XXS".to_string())
+        );
 
         // MTP helper files should be excluded
-        assert_eq!(parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf"), None);
-        assert_eq!(parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-BF16.gguf"), None);
-        assert_eq!(parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"), None);
+        assert_eq!(
+            parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf"),
+            None
+        );
+        assert_eq!(
+            parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-BF16.gguf"),
+            None
+        );
+        assert_eq!(
+            parse_gguf_quant_label("MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"),
+            None
+        );
         assert_eq!(parse_gguf_quant_label("mtp-Qwen3.8-27B-Q4_0.gguf"), None);
 
         // Vision projectors and imatrix should be excluded
@@ -943,20 +1114,47 @@ mod tests {
 
     #[test]
     fn test_extract_base_model_name() {
-        assert_eq!(extract_base_name("Qwen/Qwen2.5-7B-Instruct"), "Qwen2.5-7B-Instruct");
-        assert_eq!(extract_base_name("meta-llama/Meta-Llama-3.1-8B-Instruct"), "Meta-Llama-3.1-8B-Instruct");
+        assert_eq!(
+            extract_base_name("Qwen/Qwen2.5-7B-Instruct"),
+            "Qwen2.5-7B-Instruct"
+        );
+        assert_eq!(
+            extract_base_name("meta-llama/Meta-Llama-3.1-8B-Instruct"),
+            "Meta-Llama-3.1-8B-Instruct"
+        );
         assert_eq!(extract_base_name("gpt2"), "gpt2");
     }
 
     #[test]
     fn test_quant_format_from_repo_id() {
-        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-AWQ"), Some(QuantFormat::AWQ));
-        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-AWQ-INT4"), Some(QuantFormat::AWQ));
-        assert_eq!(format_from_repo_suffix("Meta-Llama-3-8B-awq_int4"), Some(QuantFormat::AWQ));
-        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-GPTQ-Int4"), Some(QuantFormat::GPTQ));
-        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-FP8"), Some(QuantFormat::FP8));
-        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-FP8-dynamic"), Some(QuantFormat::FP8));
-        assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-bnb-4bit"), Some(QuantFormat::BNB));
+        assert_eq!(
+            format_from_repo_suffix("Qwen2.5-7B-Instruct-AWQ"),
+            Some(QuantFormat::AWQ)
+        );
+        assert_eq!(
+            format_from_repo_suffix("Qwen2.5-7B-Instruct-AWQ-INT4"),
+            Some(QuantFormat::AWQ)
+        );
+        assert_eq!(
+            format_from_repo_suffix("Meta-Llama-3-8B-awq_int4"),
+            Some(QuantFormat::AWQ)
+        );
+        assert_eq!(
+            format_from_repo_suffix("Qwen2.5-7B-Instruct-GPTQ-Int4"),
+            Some(QuantFormat::GPTQ)
+        );
+        assert_eq!(
+            format_from_repo_suffix("Qwen2.5-7B-Instruct-FP8"),
+            Some(QuantFormat::FP8)
+        );
+        assert_eq!(
+            format_from_repo_suffix("Qwen2.5-7B-Instruct-FP8-dynamic"),
+            Some(QuantFormat::FP8)
+        );
+        assert_eq!(
+            format_from_repo_suffix("Qwen2.5-7B-Instruct-bnb-4bit"),
+            Some(QuantFormat::BNB)
+        );
         assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct-GGUF"), None); // GGUF handled separately via file siblings
         assert_eq!(format_from_repo_suffix("Qwen2.5-7B-Instruct"), None);
     }
@@ -985,7 +1183,11 @@ mod tests {
     #[test]
     fn test_pull_cancellation_map() {
         let state = Arc::new(AppState::new());
-        state.pulling.lock().unwrap().insert("test/model".into(), true);
+        state
+            .pulling
+            .lock()
+            .unwrap()
+            .insert("test/model".into(), true);
         assert!(state.pulling.lock().unwrap().contains_key("test/model"));
         state.pulling.lock().unwrap().remove("test/model");
         assert!(!state.pulling.lock().unwrap().contains_key("test/model"));

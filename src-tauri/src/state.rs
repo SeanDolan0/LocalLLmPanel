@@ -15,6 +15,29 @@ pub const BENCHMARKS_FILE_NAME: &str = "benchmarks.json";
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Base64-encoded data URLs of attached images for vision-capable (VLM) models.
+    /// When present, the message is sent to the backend as a multimodal content array.
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
+}
+
+impl ChatMessage {
+    /// Build the OpenAI-compatible message body. When `images` are present, `content`
+    /// becomes a multimodal array of `{"type": "text"}` + `{"type": "image_url"}` parts.
+    pub fn payload_body(&self) -> serde_json::Value {
+        if let Some(imgs) = &self.images {
+            let mut parts = vec![serde_json::json!({"type": "text", "text": self.content})];
+            for img in imgs {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": img}
+                }));
+            }
+            serde_json::json!({"role": self.role, "content": parts})
+        } else {
+            serde_json::json!({"role": self.role, "content": self.content})
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -497,7 +520,9 @@ impl ConfigExportPackage {
 
 fn chrono_or_simple_timestamp() -> String {
     let now = std::time::SystemTime::now();
-    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let dur = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{}", dur.as_secs())
 }
 
@@ -556,7 +581,10 @@ pub struct VecDequeLog {
 
 impl VecDequeLog {
     pub fn new() -> Self {
-        VecDequeLog { lines: std::collections::VecDeque::new(), total: 0 }
+        VecDequeLog {
+            lines: std::collections::VecDeque::new(),
+            total: 0,
+        }
     }
     pub fn push(&mut self, line: String) {
         if self.lines.len() >= 2000 {
@@ -567,7 +595,12 @@ impl VecDequeLog {
     }
     pub fn tail(&self, n: usize) -> String {
         let start = self.lines.len().saturating_sub(n);
-        self.lines.iter().skip(start).cloned().collect::<Vec<_>>().join("\n")
+        self.lines
+            .iter()
+            .skip(start)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
     pub fn since_line(&self, line: usize) -> String {
         let idx = line.saturating_sub(self.total.saturating_sub(self.lines.len()));
@@ -693,7 +726,9 @@ impl AppState {
 
     pub fn record_server_metric(&self, server_id: &str, pt: ServerMetricPoint) {
         let mut sm = self.server_metrics.lock().unwrap();
-        let q = sm.entry(server_id.to_string()).or_insert_with(VecDeque::new);
+        let q = sm
+            .entry(server_id.to_string())
+            .or_insert_with(VecDeque::new);
         if q.len() >= METRICS_SERIES_CAPACITY {
             q.pop_front();
         }
@@ -727,7 +762,10 @@ impl AppState {
         if !t.is_empty() {
             Some(t)
         } else {
-            std::env::var("HF_TOKEN").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            std::env::var("HF_TOKEN")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         }
     }
 
@@ -766,14 +804,20 @@ mod tests {
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
-            MeasuredStats { tokens_per_sec: Some(123.4), ..Default::default() },
+            MeasuredStats {
+                tokens_per_sec: Some(123.4),
+                ..Default::default()
+            },
         );
         let text = serde_json::to_string_pretty(&cfg).unwrap();
         let back: PersistedConfig = serde_json::from_str(&text).unwrap();
         assert_eq!(back.distro, "Ubuntu-22.04");
         assert_eq!(back.servers.len(), 1);
         assert_eq!(back.servers[0].port, 8000);
-        assert_eq!(back.measured["Qwen/Qwen2.5-0.5B-Instruct"].tokens_per_sec, Some(123.4));
+        assert_eq!(
+            back.measured["Qwen/Qwen2.5-0.5B-Instruct"].tokens_per_sec,
+            Some(123.4)
+        );
     }
 
     #[test]
@@ -896,14 +940,17 @@ mod tests {
                 ChatMessage {
                     role: "system".to_string(),
                     content: "You are an assistant.".to_string(),
+                    images: None,
                 },
                 ChatMessage {
                     role: "user".to_string(),
                     content: "Hello!".to_string(),
+                    images: None,
                 },
                 ChatMessage {
                     role: "assistant".to_string(),
                     content: "Hi there!".to_string(),
+                    images: None,
                 },
             ],
         };
@@ -911,6 +958,30 @@ mod tests {
         let parsed: Conversation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, c);
         assert_eq!(parsed.messages.len(), 3);
+    }
+
+    #[test]
+    fn test_multimodal_message_serialization() {
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: "Describe this image".to_string(),
+            images: Some(vec![
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                    .to_string(),
+            ]),
+        };
+        let val = serde_json::to_value(&msg).unwrap();
+        assert!(val.get("images").is_some());
+
+        let body = msg.payload_body();
+        assert_eq!(body["role"], "user");
+        assert!(body["content"].is_array());
+        assert_eq!(body["content"][0]["type"], "text");
+        assert_eq!(body["content"][1]["type"], "image_url");
+        assert!(body["content"][1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
     }
 
     #[test]
@@ -968,7 +1039,10 @@ mod tests {
         let srv_m = app_state.server_metrics.lock().unwrap();
         let q = srv_m.get("test-server").unwrap();
         assert_eq!(q.len(), METRICS_SERIES_CAPACITY);
-        assert_eq!(q.back().unwrap().tok_s, 40.0 + ((METRICS_SERIES_CAPACITY + 14) as f64));
+        assert_eq!(
+            q.back().unwrap().tok_s,
+            40.0 + ((METRICS_SERIES_CAPACITY + 14) as f64)
+        );
     }
 
     #[test]

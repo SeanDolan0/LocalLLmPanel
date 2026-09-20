@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::estimate;
-use crate::state::{AppState, LiveServer, ServerDef, ServerStatus, VecDequeLog};
 pub use crate::state::MetricsSnapshot;
+use crate::state::{AppState, LiveServer, ServerDef, ServerStatus, VecDequeLog};
 use crate::wsl;
 use tauri::Emitter;
 
@@ -67,7 +67,11 @@ fn launch_script(
     args.push("--model".into());
     args.push(shell_quote(&def.model_id));
     args.push("--host".into());
-    let host = if adv.host.trim().is_empty() { "127.0.0.1" } else { adv.host.trim() };
+    let host = if adv.host.trim().is_empty() {
+        "127.0.0.1"
+    } else {
+        adv.host.trim()
+    };
     args.push(host.into());
     args.push("--port".into());
     args.push(def.port.to_string());
@@ -154,7 +158,10 @@ fn launch_script(
     let preamble = "export VLLM_WSL2_ENABLE_PIN_MEMORY=1";
     parts.insert(0, preamble.into());
     if !adv.log_level.trim().is_empty() {
-        parts.insert(0, format!("export VLLM_LOGGING_LEVEL='{}'", adv.log_level.trim()));
+        parts.insert(
+            0,
+            format!("export VLLM_LOGGING_LEVEL='{}'", adv.log_level.trim()),
+        );
     }
     if adv.hf_offline {
         parts.insert(0, "export HF_HUB_OFFLINE=1".into());
@@ -162,7 +169,10 @@ fn launch_script(
     if let Some(home) = &adv.hf_home {
         let home_trim = home.trim();
         if !home_trim.is_empty() {
-            parts.insert(0, format!("mkdir -p {home_trim} && export HF_HOME={home_trim}"));
+            parts.insert(
+                0,
+                format!("mkdir -p {home_trim} && export HF_HOME={home_trim}"),
+            );
         }
     }
     if let Some(custom_envs) = &adv.custom_env_vars {
@@ -180,7 +190,10 @@ fn launch_script(
     if token_ok {
         parts.insert(0, format!("export HF_TOKEN='{}'", hf_token));
     }
-    parts.push(format!("exec python -m vllm.entrypoints.openai.api_server {}", args.join(" ")));
+    parts.push(format!(
+        "exec python -m vllm.entrypoints.openai.api_server {}",
+        args.join(" ")
+    ));
     parts.join(" && ")
 }
 
@@ -196,7 +209,6 @@ pub fn build_start_command_with_advanced(
 ) -> String {
     launch_script("~/llm-lp/.venv", def, hf_token, adv)
 }
-
 
 // ---------------------------------------------------------------------------
 // Events
@@ -215,7 +227,12 @@ struct ServerLogEvent {
     line: String,
 }
 
-fn emit_status(app: Option<&tauri::AppHandle>, id: &str, status: ServerStatus, error: Option<String>) {
+fn emit_status(
+    app: Option<&tauri::AppHandle>,
+    id: &str,
+    status: ServerStatus,
+    error: Option<String>,
+) {
     let payload = ServerStatusEvent {
         id: id.to_string(),
         status: status.label().to_string(),
@@ -233,11 +250,7 @@ fn emit_status(app: Option<&tauri::AppHandle>, id: &str, status: ServerStatus, e
 /// Start one server. Health is polled asynchronously; a monitor task follows
 /// lifecycle and emits events. `state` is an Arc so the monitor task can hold
 /// it beyond the command call.
-pub fn start_server(
-    state: &Arc<AppState>,
-    app: Option<&tauri::AppHandle>,
-    id: &str,
-) -> Result<()> {
+pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
     let distro = state.resolve_distro();
     let def = cfg
@@ -262,7 +275,13 @@ pub fn start_server(
             ls.log_ring.lock().unwrap().push(line.clone());
         }
         if let Some(app) = &app_ev {
-            let _ = app.emit("server-log", ServerLogEvent { id: id_log.clone(), line });
+            let _ = app.emit(
+                "server-log",
+                ServerLogEvent {
+                    id: id_log.clone(),
+                    line,
+                },
+            );
         }
     };
     let child = wsl::WslChild::spawn(&distro, &script, log_cb)
@@ -320,7 +339,12 @@ pub fn start_server(
             tokio::time::sleep(HEALTH_POLL).await;
         }
         if !ok {
-            emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some("health check timed out".into()));
+            emit_status(
+                app.as_ref(),
+                &id_task,
+                ServerStatus::Error,
+                Some("health check timed out".into()),
+            );
             update_status(&state_task, &id_task, ServerStatus::Error);
             return;
         }
@@ -402,8 +426,12 @@ pub fn start_server(
                         } else {
                             let dt = (now_ms() - last_measured_at).max(1000) as f64 / 1000.0;
                             Some(crate::state::MeasuredStats {
-                                tokens_per_sec: Some(((m.total_generation_tokens - last_gen) as f64) / dt),
-                                prompt_tokens_per_sec: Some(((m.total_prompt_tokens - last_prompt) as f64) / dt),
+                                tokens_per_sec: Some(
+                                    ((m.total_generation_tokens - last_gen) as f64) / dt,
+                                ),
+                                prompt_tokens_per_sec: Some(
+                                    ((m.total_prompt_tokens - last_prompt) as f64) / dt,
+                                ),
                                 total_prompt_tokens: m.total_prompt_tokens,
                                 total_generation_tokens: m.total_generation_tokens,
                                 requests: m.requests,
@@ -422,8 +450,14 @@ pub fn start_server(
                             requests: m.requests,
                             measured: measured.clone(),
                         };
-                        let tok_s = measured.as_ref().and_then(|ms| ms.tokens_per_sec).unwrap_or(0.0);
-                        let prompt_tok_s = measured.as_ref().and_then(|ms| ms.prompt_tokens_per_sec).unwrap_or(0.0);
+                        let tok_s = measured
+                            .as_ref()
+                            .and_then(|ms| ms.tokens_per_sec)
+                            .unwrap_or(0.0);
+                        let prompt_tok_s = measured
+                            .as_ref()
+                            .and_then(|ms| ms.prompt_tokens_per_sec)
+                            .unwrap_or(0.0);
                         state_task.record_server_metric(
                             &id_task,
                             crate::state::ServerMetricPoint {
@@ -491,7 +525,10 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
     );
     let mut term_ok = false;
     if let Some(pid) = pid_from_file.stdout.trim().parse::<u32>().ok() {
-        let kill = wsl::run_script(&distro, &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"));
+        let kill = wsl::run_script(
+            &distro,
+            &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"),
+        );
         term_ok = kill.stdout.contains("killed");
     }
 
@@ -574,7 +611,11 @@ pub async fn resume_servers_if_configured(state: &Arc<AppState>, app: Option<&ta
 }
 
 /// Restart = tolerant stop then start.
-pub fn restart_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
+pub fn restart_server(
+    state: &Arc<AppState>,
+    app: Option<&tauri::AppHandle>,
+    id: &str,
+) -> Result<()> {
     let _ = stop_server(state, app, id);
     start_server(state, app, id)
 }
@@ -643,7 +684,10 @@ pub fn parse_metrics(text: &str) -> Option<Metrics> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +696,12 @@ fn now_ms() -> u64 {
 
 pub fn list_servers(
     state: &Arc<AppState>,
-) -> Vec<(ServerDef, ServerStatus, Option<String>, Option<MetricsSnapshot>)> {
+) -> Vec<(
+    ServerDef,
+    ServerStatus,
+    Option<String>,
+    Option<MetricsSnapshot>,
+)> {
     let defs = state.config().servers.clone();
     let servers = state.servers.lock().unwrap();
     defs.into_iter()
@@ -799,7 +848,10 @@ pub async fn chat_stream(
         let url = format!("http://127.0.0.1:{}/v1/chat/completions", def.port);
         let mut body = serde_json::json!({
             "model": def.effective_model_name(),
-            "messages": messages,
+            "messages": messages
+                .iter()
+                .map(|m| m.payload_body())
+                .collect::<Vec<_>>(),
             "stream": true,
         });
         if let Some(temp) = temperature {
@@ -857,11 +909,14 @@ pub async fn chat_stream(
         if !buffer.is_empty() {
             if let Some(token) = parse_sse_token(&buffer) {
                 if let Some(ref a) = app {
-                    let _ = a.emit("chat-token", ChatTokenPayload {
-                        request_id: request_id.clone(),
-                        server_id: server_id.clone(),
-                        token,
-                    });
+                    let _ = a.emit(
+                        "chat-token",
+                        ChatTokenPayload {
+                            request_id: request_id.clone(),
+                            server_id: server_id.clone(),
+                            token,
+                        },
+                    );
                 }
             }
         }
@@ -939,11 +994,7 @@ pub fn standardized_benchmark_prompts() -> [&'static str; 3] {
     ]
 }
 
-pub async fn run_benchmark(
-    app: Option<tauri::AppHandle>,
-    state: Arc<AppState>,
-    server_id: String,
-) {
+pub async fn run_benchmark(app: Option<tauri::AppHandle>, state: Arc<AppState>, server_id: String) {
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     state
         .benchmark_cancels
@@ -1004,10 +1055,19 @@ pub async fn run_benchmark(
             let latency_ms = t0.elapsed().as_millis() as f64;
 
             let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(60) as f64;
-            let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(64) as f64;
+            let completion_tokens =
+                json["usage"]["completion_tokens"].as_u64().unwrap_or(64) as f64;
 
-            let gen_tok_s = if elapsed_s > 0.0 { completion_tokens / elapsed_s } else { 0.0 };
-            let prompt_tok_s = if elapsed_s > 0.0 { prompt_tokens / (elapsed_s * 0.25).max(0.01) } else { 0.0 };
+            let gen_tok_s = if elapsed_s > 0.0 {
+                completion_tokens / elapsed_s
+            } else {
+                0.0
+            };
+            let prompt_tok_s = if elapsed_s > 0.0 {
+                prompt_tokens / (elapsed_s * 0.25).max(0.01)
+            } else {
+                0.0
+            };
 
             step_results.push((prompt_tok_s, gen_tok_s, latency_ms));
 
@@ -1031,7 +1091,10 @@ pub async fn run_benchmark(
         let avg_gen_tok_s = step_results.iter().map(|(_, g, _)| g).sum::<f64>() / n;
         let avg_latency_ms = step_results.iter().map(|(_, _, l)| l).sum::<f64>() / n;
 
-        let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now_sec = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let run = crate::state::BenchmarkRun {
             id: format!("bm_{now_sec}_{}", def.port),
             server_id: server_id.clone(),
@@ -1102,7 +1165,9 @@ pub fn server_logs(state: &Arc<AppState>, server_id: &str, since: usize) -> Stri
 
 pub fn server_metrics(state: &Arc<AppState>, server_id: &str) -> Option<MetricsSnapshot> {
     let servers = state.servers.lock().unwrap();
-    servers.get(server_id).and_then(|ls| ls.last_metrics.clone())
+    servers
+        .get(server_id)
+        .and_then(|ls| ls.last_metrics.clone())
 }
 
 #[cfg(test)]
@@ -1166,7 +1231,13 @@ mod tests {
     fn launch_script_embed_with_quant_and_served() {
         let script = launch_script(
             "~/llm-lp/.venv",
-            &def("BAAI/bge-small-en-v1.5", "embed", 8020, "fp8", Some("embedder")),
+            &def(
+                "BAAI/bge-small-en-v1.5",
+                "embed",
+                8020,
+                "fp8",
+                Some("embedder"),
+            ),
             "hf_secret_123",
             &crate::state::AdvancedSettings::default(),
         );
@@ -1197,7 +1268,13 @@ mod tests {
         };
         let script = launch_script(
             "~/llm-lp/.venv",
-            &def("meta-llama/Llama-3-8B-Instruct", "instruct", 8000, "fp16", None),
+            &def(
+                "meta-llama/Llama-3-8B-Instruct",
+                "instruct",
+                8000,
+                "fp16",
+                None,
+            ),
             "hf_token_xyz",
             &adv,
         );
@@ -1223,8 +1300,14 @@ mod tests {
         d.swap_space_gb = Some(8);
         d.cpu_offload_gb = Some(4);
         let cmd = build_start_command(&d, "");
-        assert!(cmd.contains("--swap-space 8"), "command must include --swap-space 8: {cmd}");
-        assert!(cmd.contains("--cpu-offload-gb 4"), "command must include --cpu-offload-gb 4: {cmd}");
+        assert!(
+            cmd.contains("--swap-space 8"),
+            "command must include --swap-space 8: {cmd}"
+        );
+        assert!(
+            cmd.contains("--cpu-offload-gb 4"),
+            "command must include --cpu-offload-gb 4: {cmd}"
+        );
         assert!(cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY=1"));
     }
 
@@ -1234,16 +1317,27 @@ mod tests {
         d.swap_space_gb = Some(0);
         d.cpu_offload_gb = Some(0);
         let cmd_zero = build_start_command(&d, "");
-        assert!(!cmd_zero.contains("--swap-space"), "command must not include --swap-space: {cmd_zero}");
-        assert!(!cmd_zero.contains("--cpu-offload-gb"), "command must not include --cpu-offload-gb: {cmd_zero}");
+        assert!(
+            !cmd_zero.contains("--swap-space"),
+            "command must not include --swap-space: {cmd_zero}"
+        );
+        assert!(
+            !cmd_zero.contains("--cpu-offload-gb"),
+            "command must not include --cpu-offload-gb: {cmd_zero}"
+        );
 
         d.swap_space_gb = None;
         d.cpu_offload_gb = None;
         let cmd_none = build_start_command(&d, "");
-        assert!(!cmd_none.contains("--swap-space"), "command must not include --swap-space: {cmd_none}");
-        assert!(!cmd_none.contains("--cpu-offload-gb"), "command must not include --cpu-offload-gb: {cmd_none}");
+        assert!(
+            !cmd_none.contains("--swap-space"),
+            "command must not include --swap-space: {cmd_none}"
+        );
+        assert!(
+            !cmd_none.contains("--cpu-offload-gb"),
+            "command must not include --cpu-offload-gb: {cmd_none}"
+        );
     }
-
 
     #[test]
     fn metrics_parse_both_generations() {
@@ -1300,7 +1394,12 @@ mod tests {
         let req = client.post("http://127.0.0.1:8000/v1/chat/completions");
         let req_with_auth = apply_vllm_auth(req, Some("sk-secret-123")).build().unwrap();
         assert_eq!(
-            req_with_auth.headers().get("Authorization").unwrap().to_str().unwrap(),
+            req_with_auth
+                .headers()
+                .get("Authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer sk-secret-123"
         );
 
@@ -1308,4 +1407,4 @@ mod tests {
         let req_no_auth = apply_vllm_auth(req_blank, None).build().unwrap();
         assert!(req_no_auth.headers().get("Authorization").is_none());
     }
-}
+}

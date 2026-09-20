@@ -332,6 +332,7 @@ export interface ModelWithFit {
 export interface ChatMessage {
   role: string; // "system" | "user" | "assistant"
   content: string;
+  images?: string[]; // base64 data URLs for vision-capable (VLM) models
 }
 
 export interface Conversation {

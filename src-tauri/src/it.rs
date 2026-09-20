@@ -73,8 +73,8 @@ fn wsl_it() {
     assert!(rep1.vllm_version.is_some(), "vllm must be importable");
 
     let t1 = Instant::now();
-    let _rep2 = provision::provision_all(DISTRO, VENV_DIR, |_p, _l| {})
-        .expect("provision #2 (idempotent)");
+    let _rep2 =
+        provision::provision_all(DISTRO, VENV_DIR, |_p, _l| {}).expect("provision #2 (idempotent)");
     println!("provision #2 ok in {:?} (idempotent path)", t1.elapsed());
 
     // --- 2. Two servers: instruct (0.5B) + embed (bge-small) ---
@@ -215,16 +215,26 @@ fn wsl_it() {
 
     // --- 8. Stop both via server::stop_server (SIGTERM→taskkill fallback) ---
     for id in ["it-qwen", "it-bge"] {
-        let pidline = wsl::run_script(DISTRO, &format!("cat ~/llm-lp/run/{id}.pid 2>/dev/null || true"))
-            .stdout;
+        let pidline = wsl::run_script(
+            DISTRO,
+            &format!("cat ~/llm-lp/run/{id}.pid 2>/dev/null || true"),
+        )
+        .stdout;
         let pid: Option<u32> = pidline.trim().parse().ok();
         println!("{id} pidfile: '{pidline:?}'");
         server::stop_server(&state, None, id).expect("stop");
         if let Some(pid) = pid {
             std::thread::sleep(Duration::from_millis(1500));
-            let alive = wsl::run_script(DISTRO, &format!("kill -0 {pid} 2>/dev/null && echo alive || echo gone"));
+            let alive = wsl::run_script(
+                DISTRO,
+                &format!("kill -0 {pid} 2>/dev/null && echo alive || echo gone"),
+            );
             println!("{id} pid {pid}: {}", alive.stdout.trim());
-            assert_eq!(alive.stdout.trim(), "gone", "{id} pid still running after stop");
+            assert_eq!(
+                alive.stdout.trim(),
+                "gone",
+                "{id} pid still running after stop"
+            );
         }
     }
 

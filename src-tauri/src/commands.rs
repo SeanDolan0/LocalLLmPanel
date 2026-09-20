@@ -10,7 +10,9 @@ use crate::fit::{self, FitResult, HardwareProfile, ModelArchInfo, VariantInput};
 use crate::hf::{self, HfModel, QuantFormat, QuantVariant};
 use crate::provision::{self, ProvisionReport};
 use crate::server;
-use crate::state::{AppState, GpuSnapshot, MeasuredStats, MemorySettings, PersistedConfig, ServerDef};
+use crate::state::{
+    AppState, GpuSnapshot, MeasuredStats, MemorySettings, PersistedConfig, ServerDef,
+};
 use tokio::sync::Semaphore;
 
 // ---------------------------------------------------------------------------
@@ -52,7 +54,12 @@ fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
     let total = it.next()?.trim().parse::<u64>().ok()?;
     let free = it.next()?.trim().parse::<u64>().ok()?;
     let util = it.next()?.trim().parse::<u32>().ok().unwrap_or(0);
-    Some(GpuSnapshot { name, vram_total_mb: total, vram_free_mb: free, util_percent: util })
+    Some(GpuSnapshot {
+        name,
+        vram_total_mb: total,
+        vram_free_mb: free,
+        util_percent: util,
+    })
 }
 
 #[tauri::command]
@@ -61,7 +68,10 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
     tauri::async_runtime::spawn_blocking(move || {
         let distro_detected = st.resolve_distro();
         let wsl_ok = crate::wsl::run_script(&distro_detected, "echo ok").ok;
-        let prov_out = crate::wsl::run_script(&distro_detected, "cat ~/llm-lp/.provisioned 2>/dev/null || true");
+        let prov_out = crate::wsl::run_script(
+            &distro_detected,
+            "cat ~/llm-lp/.provisioned 2>/dev/null || true",
+        );
         let gpu = gpu_snapshot(&distro_detected);
         if let Some(g) = &gpu {
             *st.gpu.lock().unwrap() = Some(g.clone());
@@ -73,44 +83,48 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             .unwrap_or((700.0, false));
         let running = {
             let servers = st.servers.lock().unwrap();
-            servers.values().filter(|ls| ls.status == crate::state::ServerStatus::Running).count()
+            servers
+                .values()
+                .filter(|ls| ls.status == crate::state::ServerStatus::Running)
+                .count()
         };
         let running_weight_gb = server::running_weight_gb(&st);
         let apt_based = crate::wsl::is_apt_distro(&distro_detected);
 
-        let (provisioned, env_report) = if let Ok(rep) = serde_json::from_str::<ProvisionReport>(&prov_out.stdout) {
-            (true, Some(rep))
-        } else if prov_out.stdout.contains("\"provisioned\": true") {
-            let vllm = prov_out
-                .stdout
-                .split("\"vllm\":")
-                .nth(1)
-                .and_then(|s| s.split('"').nth(1))
-                .map(|s| s.to_string());
-            (
-                true,
-                Some(ProvisionReport {
-                    phases_completed: vec![
-                        "distro".into(),
-                        "sudo".into(),
-                        "apt".into(),
-                        "uv".into(),
-                        "venv".into(),
-                        "vllm".into(),
-                        "verify".into(),
-                    ],
-                    distro: distro_detected.clone(),
-                    vllm_version: vllm,
-                    torch_version: Some("torch (CUDA)".into()),
-                    cuda_available: gpu.is_some(),
-                    gpu_name: gpu.as_ref().map(|g| g.name.clone()),
-                    vram_mb: gpu.as_ref().map(|g| g.vram_total_mb),
-                    bf16_supported: true,
-                }),
-            )
-        } else {
-            (false, None)
-        };
+        let (provisioned, env_report) =
+            if let Ok(rep) = serde_json::from_str::<ProvisionReport>(&prov_out.stdout) {
+                (true, Some(rep))
+            } else if prov_out.stdout.contains("\"provisioned\": true") {
+                let vllm = prov_out
+                    .stdout
+                    .split("\"vllm\":")
+                    .nth(1)
+                    .and_then(|s| s.split('"').nth(1))
+                    .map(|s| s.to_string());
+                (
+                    true,
+                    Some(ProvisionReport {
+                        phases_completed: vec![
+                            "distro".into(),
+                            "sudo".into(),
+                            "apt".into(),
+                            "uv".into(),
+                            "venv".into(),
+                            "vllm".into(),
+                            "verify".into(),
+                        ],
+                        distro: distro_detected.clone(),
+                        vllm_version: vllm,
+                        torch_version: Some("torch (CUDA)".into()),
+                        cuda_available: gpu.is_some(),
+                        gpu_name: gpu.as_ref().map(|g| g.name.clone()),
+                        vram_mb: gpu.as_ref().map(|g| g.vram_total_mb),
+                        bf16_supported: true,
+                    }),
+                )
+            } else {
+                (false, None)
+            };
 
         let llmfit_specs = crate::llmfit_adapter::get_system_specs();
         let cpu_name = Some(llmfit_specs.cpu_name.clone());
@@ -128,7 +142,11 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
         if llmfit_core::providers::ModelProvider::is_available(&ollama) {
             providers_detected.push("Ollama".to_string());
         }
-        if env_report.as_ref().map(|r| r.vllm_version.is_some()).unwrap_or(false) {
+        if env_report
+            .as_ref()
+            .map(|r| r.vllm_version.is_some())
+            .unwrap_or(false)
+        {
             providers_detected.push("vLLM (WSL)".to_string());
         }
 
@@ -156,7 +174,10 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
 }
 
 #[tauri::command]
-pub async fn provision(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<ProvisionReport, String> {
+pub async fn provision(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProvisionReport, String> {
     let st = (*state).clone();
     let app = app.clone();
     let cfg = st.config();
@@ -164,7 +185,10 @@ pub async fn provision(app: AppHandle, state: State<'_, Arc<AppState>>) -> Resul
     let venv = cfg.venv_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let on_log = |phase: &str, line: &str| {
-            let _ = app.emit("wsl-log", serde_json::json!({ "phase": phase, "line": line }));
+            let _ = app.emit(
+                "wsl-log",
+                serde_json::json!({ "phase": phase, "line": line }),
+            );
         };
         provision::provision_all(&distro, &venv, on_log)
     })
@@ -208,9 +232,21 @@ pub async fn search_models(
     // Parallel enrichment, bounded at 12.
     let mut enriched: Vec<ModelWithStats> = Vec::with_capacity(results.len());
     for m in results {
-        let stats = hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache), token.as_deref()).await;
+        let stats = hf::enrich(
+            &st.http,
+            &m.id,
+            Some(&st.enrichment_cache),
+            token.as_deref(),
+        )
+        .await;
         let (params_b, context, context_source, context_estimated, head_dim) = match &stats {
-            Some(s) => (s.params_b, Some(s.context), Some(s.context_source), s.context_estimated, s.head_dim),
+            Some(s) => (
+                s.params_b,
+                Some(s.context),
+                Some(s.context_source),
+                s.context_estimated,
+                s.head_dim,
+            ),
             None => (None, None, None, false, None),
         };
         let bandwidth = st
@@ -242,12 +278,18 @@ pub async fn search_models(
     Ok(enriched)
 }
 
-pub use crate::llmfit_adapter::{GgufSourceDto, ModelWithFit, QuantVariantWithFit, ScoreComponentsDto};
+pub use crate::llmfit_adapter::{
+    GgufSourceDto, ModelWithFit, QuantVariantWithFit, ScoreComponentsDto,
+};
 
 fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     let gpu = state.gpu.lock().unwrap().clone()?;
     let (bw, known) = estimate::gpu_bandwidth(&gpu.name);
-    let vram = if gpu.vram_total_mb > 0 { gpu.vram_total_mb } else { 16384 };
+    let vram = if gpu.vram_total_mb > 0 {
+        gpu.vram_total_mb
+    } else {
+        16384
+    };
     let cfg = state.config();
     let mem = &cfg.memory_settings;
     let distro = if cfg.distro.starts_with("__test_") {
@@ -299,7 +341,10 @@ struct SimpleJoinAll<'a, T> {
 impl<'a, T: Unpin> std::future::Future for SimpleJoinAll<'a, T> {
     type Output = Vec<T>;
 
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
         let mut all_done = true;
         let len = this.tasks.len();
@@ -317,7 +362,11 @@ impl<'a, T: Unpin> std::future::Future for SimpleJoinAll<'a, T> {
             }
         }
         if all_done {
-            let res = this.results.iter_mut().map(|opt| opt.take().unwrap()).collect();
+            let res = this
+                .results
+                .iter_mut()
+                .map(|opt| opt.take().unwrap())
+                .collect();
             std::task::Poll::Ready(res)
         } else {
             std::task::Poll::Pending
@@ -336,10 +385,7 @@ fn join_all<'a, T: 'a>(
     }
 }
 
-async fn process_models_with_fit(
-    st: &AppState,
-    models: Vec<HfModel>,
-) -> Vec<ModelWithFit> {
+async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<ModelWithFit> {
     let enrich_sem = Arc::new(Semaphore::new(10));
     let disc_sem = Arc::new(Semaphore::new(6));
     let hw = hardware_profile(st).unwrap_or_else(fallback_hardware_profile);
@@ -347,7 +393,9 @@ async fn process_models_with_fit(
     let token = st.hf_token();
     let mem_settings = st.config().memory_settings;
 
-    let futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>>> = models
+    let futures: Vec<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>>,
+    > = models
         .into_iter()
         .map(|m| {
             let enrich_sem = Arc::clone(&enrich_sem);
@@ -356,16 +404,32 @@ async fn process_models_with_fit(
             let preferred = preferred.clone();
             let token = token.clone();
             let mem_settings = mem_settings.clone();
-            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>> = Box::pin(async move {
+            let fut: std::pin::Pin<
+                Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>,
+            > = Box::pin(async move {
                 let token_ref = token.as_deref();
                 let enrich_fut = async {
                     let _permit = enrich_sem.acquire().await.ok();
                     hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache), token_ref).await
                 };
-                let disc_fut = hf::discover_quant_variants(&st.http, &m.id, &disc_sem, Some(&st.quant_cache), token_ref);
+                let disc_fut = hf::discover_quant_variants(
+                    &st.http,
+                    &m.id,
+                    &disc_sem,
+                    Some(&st.quant_cache),
+                    token_ref,
+                );
                 let (stats, variants) = tokio::join!(enrich_fut, disc_fut);
 
-                let (params_b, context, context_source, context_estimated, head_dim, n_layers, n_kv_heads) = match &stats {
+                let (
+                    params_b,
+                    context,
+                    context_source,
+                    context_estimated,
+                    head_dim,
+                    n_layers,
+                    n_kv_heads,
+                ) = match &stats {
                     Some(s) => (
                         s.params_b,
                         Some(s.context),
@@ -427,9 +491,12 @@ async fn process_models_with_fit(
                     })
                     .collect();
 
-                items.sort_by(|a, b| fit::compare_variant_fit((&a.1.0, &a.1.1), (&b.1.0, &b.1.1)));
+                items.sort_by(|a, b| {
+                    fit::compare_variant_fit((&a.1 .0, &a.1 .1), (&b.1 .0, &b.1 .1))
+                });
 
-                let scored: Vec<(VariantInput, FitResult)> = items.iter().map(|(_, p)| p.clone()).collect();
+                let scored: Vec<(VariantInput, FitResult)> =
+                    items.iter().map(|(_, p)| p.clone()).collect();
                 let best_variant_idx = fit::best_variant(&scored, Some(&preferred));
 
                 let final_variants: Vec<QuantVariantWithFit> = items
@@ -440,7 +507,9 @@ async fn process_models_with_fit(
                 let best_fit = final_variants.get(best_variant_idx).map(|v| &v.fit);
                 let score = best_fit.map(|f| f.score as f64).unwrap_or(0.0);
                 let score_components = best_fit.and_then(|f| f.score_components);
-                let best_quant = final_variants.get(best_variant_idx).map(|v| v.variant.label.clone());
+                let best_quant = final_variants
+                    .get(best_variant_idx)
+                    .map(|v| v.variant.label.clone());
                 let runtime = best_fit.and_then(|f| f.runtime.clone());
                 let run_mode = best_fit.map(|f| format!("{:?}", f.run_mode));
                 let usable_context = best_fit.map(|f| f.usable_context);
@@ -493,9 +562,19 @@ async fn process_models_with_fit(
     let mut out = join_all(futures).await;
 
     out.sort_by(|a, b| {
-        let score_a = a.variants.get(a.best_variant_idx).map(|v| v.fit.score).unwrap_or(0);
-        let score_b = b.variants.get(b.best_variant_idx).map(|v| v.fit.score).unwrap_or(0);
-        score_b.cmp(&score_a).then_with(|| b.downloads.cmp(&a.downloads))
+        let score_a = a
+            .variants
+            .get(a.best_variant_idx)
+            .map(|v| v.fit.score)
+            .unwrap_or(0);
+        let score_b = b
+            .variants
+            .get(b.best_variant_idx)
+            .map(|v| v.fit.score)
+            .unwrap_or(0);
+        score_b
+            .cmp(&score_a)
+            .then_with(|| b.downloads.cmp(&a.downloads))
     });
 
     out
@@ -519,8 +598,12 @@ pub async fn search_models_with_fit(
         let st = (*state).clone();
         let token = st.hf_token();
         if let Ok(hf_results) = hf::search(&st.http, q, 12, token.as_deref()).await {
-            let existing_ids: std::collections::HashSet<String> = results.iter().map(|m| m.id.to_lowercase()).collect();
-            let new_hf: Vec<_> = hf_results.into_iter().filter(|m| !existing_ids.contains(&m.id.to_lowercase())).collect();
+            let existing_ids: std::collections::HashSet<String> =
+                results.iter().map(|m| m.id.to_lowercase()).collect();
+            let new_hf: Vec<_> = hf_results
+                .into_iter()
+                .filter(|m| !existing_ids.contains(&m.id.to_lowercase()))
+                .collect();
             if !new_hf.is_empty() {
                 let mut hf_scored = process_models_with_fit(&st, new_hf).await;
                 results.append(&mut hf_scored);
@@ -542,7 +625,9 @@ pub async fn recommended_models(
     {
         let mut cache = st.rec_cache.lock().unwrap();
         if let Some((ref cached_models, cached_at, cached_vram)) = *cache {
-            if cached_vram == hw.vram_total_mb && cached_at.elapsed() < std::time::Duration::from_secs(600) {
+            if cached_vram == hw.vram_total_mb
+                && cached_at.elapsed() < std::time::Duration::from_secs(600)
+            {
                 return Ok(cached_models.clone());
             }
             if cached_vram != hw.vram_total_mb {
@@ -600,9 +685,14 @@ pub async fn model_stats(
     let st = (*state).clone();
     let quant = quant.unwrap_or_else(|| st.config().default_quant);
     let token = st.hf_token();
-    let stats = hf::enrich(&st.http, &model_id, Some(&st.enrichment_cache), token.as_deref())
-        .await
-        .ok_or_else(|| format!("could not enrich {model_id}"))?;
+    let stats = hf::enrich(
+        &st.http,
+        &model_id,
+        Some(&st.enrichment_cache),
+        token.as_deref(),
+    )
+    .await
+    .ok_or_else(|| format!("could not enrich {model_id}"))?;
     let (gpu_name, vram_mb) = {
         let gpu = st.gpu.lock().unwrap().clone();
         gpu.map(|g| (g.name, g.vram_total_mb)).unwrap_or_default()
@@ -623,10 +713,20 @@ pub async fn model_stats(
             let wb = estimate::weight_gb(pb, &quant);
             (
                 Some(wb),
-                Some(estimate::context_fit(vram as f64, gpu_util, pb, &quant, kb, 2500.0)),
+                Some(estimate::context_fit(
+                    vram as f64,
+                    gpu_util,
+                    pb,
+                    &quant,
+                    kb,
+                    2500.0,
+                )),
             )
         }
-        _ => (stats.params_b.map(|pb| estimate::weight_gb(pb, &quant)), None),
+        _ => (
+            stats.params_b.map(|pb| estimate::weight_gb(pb, &quant)),
+            None,
+        ),
     };
     let (bw, _) = if gpu_name.is_empty() {
         (700.0, false)
@@ -695,7 +795,11 @@ pub async fn model_stats(
 }
 
 #[tauri::command]
-pub fn pull_model(state: State<'_, Arc<AppState>>, app: AppHandle, model_id: String) -> Result<(), String> {
+pub fn pull_model(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    model_id: String,
+) -> Result<(), String> {
     let st = (*state).clone();
     hf::pull_model(&st, app, &model_id).map_err(|e| e.to_string())
 }
@@ -709,14 +813,13 @@ pub struct PullState {
 pub fn pull_status(state: State<'_, Arc<AppState>>) -> PullState {
     let st = (*state).clone();
     let pulling = st.pulling.lock().unwrap();
-    PullState { pulling: pulling.keys().cloned().collect() }
+    PullState {
+        pulling: pulling.keys().cloned().collect(),
+    }
 }
 
 #[tauri::command]
-pub async fn pull_cancel(
-    state: State<'_, Arc<AppState>>,
-    model_id: String,
-) -> Result<(), String> {
+pub async fn pull_cancel(state: State<'_, Arc<AppState>>, model_id: String) -> Result<(), String> {
     let st = (*state).clone();
     let distro = st.resolve_distro();
     // Kill any hf download processes matching this model id
@@ -788,7 +891,9 @@ pub async fn servers_create(
         }
         None => server::alloc_port(&existing).map_err(|e| e.to_string())?,
     };
-    let quant = input.quant.unwrap_or_else(|| st.config().default_quant.clone());
+    let quant = input
+        .quant
+        .unwrap_or_else(|| st.config().default_quant.clone());
     let task = input.task.unwrap_or_else(|| "instruct".into());
     let token = st.hf_token();
     // Local model folders (imported WSL paths) have no HF metadata to enrich.
@@ -798,17 +903,27 @@ pub async fn servers_create(
         Some(l) => Some(l),
         None if is_local_path => None,
         None => {
-            let stats = hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await;
+            let stats = hf::enrich(
+                &st.http,
+                &input.model_id,
+                Some(&st.enrichment_cache),
+                token.as_deref(),
+            )
+            .await;
             let gpu = st.gpu.lock().unwrap().clone();
             let fit = match (&stats, gpu.as_ref()) {
                 (Some(s), Some(g))
                     if s.n_layers.is_some()
                         && s.n_kv_heads.is_some()
                         && s.head_dim.is_some()
-                        && s.params_b.is_some() &&
-                        g.vram_total_mb > 0 =>
+                        && s.params_b.is_some()
+                        && g.vram_total_mb > 0 =>
                 {
-                    let kvb = estimate::kv_bytes_per_token(s.n_layers.unwrap(), s.n_kv_heads.unwrap(), s.head_dim.unwrap());
+                    let kvb = estimate::kv_bytes_per_token(
+                        s.n_layers.unwrap(),
+                        s.n_kv_heads.unwrap(),
+                        s.head_dim.unwrap(),
+                    );
                     Some(estimate::context_fit(
                         g.vram_total_mb as f64,
                         input.gpu_mem_util.unwrap_or(0.92),
@@ -827,7 +942,14 @@ pub async fn servers_create(
     let params_b = if is_local_path {
         None
     } else {
-        hf::enrich(&st.http, &input.model_id, Some(&st.enrichment_cache), token.as_deref()).await.and_then(|s| s.params_b)
+        hf::enrich(
+            &st.http,
+            &input.model_id,
+            Some(&st.enrichment_cache),
+            token.as_deref(),
+        )
+        .await
+        .and_then(|s| s.params_b)
     };
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -856,7 +978,11 @@ pub async fn servers_create(
 }
 
 #[tauri::command]
-pub fn servers_delete(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
+pub fn servers_delete(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
     let st = (*state).clone();
     server::stop_server(&st, Some(&app), &id).ok();
     st.server_metrics.lock().unwrap().remove(&id);
@@ -867,19 +993,31 @@ pub fn servers_delete(state: State<'_, Arc<AppState>>, app: AppHandle, id: Strin
 }
 
 #[tauri::command]
-pub fn servers_start(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
+pub fn servers_start(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
     let st = (*state).clone();
     server::start_server(&st, Some(&app), &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn servers_stop(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
+pub fn servers_stop(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
     let st = (*state).clone();
     server::stop_server(&st, Some(&app), &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn servers_restart(state: State<'_, Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
+pub fn servers_restart(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
     let st = (*state).clone();
     server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
 }
@@ -891,7 +1029,10 @@ pub fn servers_logs(state: State<'_, Arc<AppState>>, id: String, since: usize) -
 }
 
 #[tauri::command]
-pub fn servers_metrics(state: State<'_, Arc<AppState>>, id: String) -> Option<server::MetricsSnapshot> {
+pub fn servers_metrics(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Option<server::MetricsSnapshot> {
     let st = (*state).clone();
     server::server_metrics(&st, &id)
 }
@@ -903,7 +1044,9 @@ pub async fn servers_chat(
     messages: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     let st = (*state).clone();
-    server::chat(&st, &id, messages).await.map_err(|e| e.to_string())
+    server::chat(&st, &id, messages)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -934,7 +1077,9 @@ pub fn servers_chat_cancel(
 }
 
 #[tauri::command]
-pub fn conversations_list(state: State<'_, Arc<AppState>>) -> Result<Vec<crate::state::Conversation>, String> {
+pub fn conversations_list(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::state::Conversation>, String> {
     Ok(state.conversations.lock().unwrap().clone())
 }
 
@@ -953,10 +1098,7 @@ pub fn conversations_save(
 }
 
 #[tauri::command]
-pub fn conversations_delete(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub fn conversations_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     let mut convs = state.conversations.lock().unwrap();
     convs.retain(|c| c.id != id);
     crate::state::Conversation::save_all(&convs)
@@ -976,10 +1118,7 @@ pub async fn benchmarks_run(
 }
 
 #[tauri::command]
-pub fn benchmarks_cancel(
-    state: State<'_, Arc<AppState>>,
-    server_id: String,
-) -> Result<(), String> {
+pub fn benchmarks_cancel(state: State<'_, Arc<AppState>>, server_id: String) -> Result<(), String> {
     if let Some(notify) = state.benchmark_cancels.lock().unwrap().get(&server_id) {
         notify.notify_waiters();
     }
@@ -1031,7 +1170,11 @@ pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
     } else {
         false
     };
-    GatewayStatus { enabled, port, running }
+    GatewayStatus {
+        enabled,
+        port,
+        running,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1049,7 +1192,10 @@ pub struct SettingsPatch {
 }
 
 #[tauri::command]
-pub fn settings_set(state: State<'_, Arc<AppState>>, patch: SettingsPatch) -> Result<PersistedConfig, String> {
+pub fn settings_set(
+    state: State<'_, Arc<AppState>>,
+    patch: SettingsPatch,
+) -> Result<PersistedConfig, String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
     if let Some(d) = patch.distro {
@@ -1098,10 +1244,16 @@ pub fn autostart_get() -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
         let output = std::process::Command::new("reg")
-            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "LocalLLmPanel"])
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LocalLLmPanel",
+            ])
             .output()
             .map_err(|e| e.to_string())?;
-        Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("LocalLLmPanel"))
+        Ok(output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("LocalLLmPanel"))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1162,7 +1314,10 @@ pub fn config_export(state: State<'_, Arc<AppState>>) -> Result<String, String> 
 }
 
 #[tauri::command]
-pub fn config_import(state: State<'_, Arc<AppState>>, json: String) -> Result<PersistedConfig, String> {
+pub fn config_import(
+    state: State<'_, Arc<AppState>>,
+    json: String,
+) -> Result<PersistedConfig, String> {
     let pkg: crate::state::ConfigExportPackage = serde_json::from_str(&json)
         .map_err(|e| format!("Invalid configuration JSON format: {e}"))?;
 
@@ -1180,20 +1335,28 @@ pub fn config_import(state: State<'_, Arc<AppState>>, json: String) -> Result<Pe
     cfg.launch_at_login = pkg.launch_at_login;
 
     // For imported servers, ensure they start with was_running = false
-    cfg.servers = pkg.servers.into_iter().map(|mut s| {
-        s.was_running = false;
-        s
-    }).collect();
+    cfg.servers = pkg
+        .servers
+        .into_iter()
+        .map(|mut s| {
+            s.was_running = false;
+            s
+        })
+        .collect();
 
     cfg.save().map_err(|e| e.to_string())?;
     Ok(cfg.clone())
 }
 
 #[tauri::command]
-pub fn server_recipe_export(state: State<'_, Arc<AppState>>, server_id: String) -> Result<String, String> {
+pub fn server_recipe_export(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<String, String> {
     let st = (*state).clone();
     let cfg = st.config.lock().unwrap();
-    let srv = cfg.find_server(&server_id)
+    let srv = cfg
+        .find_server(&server_id)
         .ok_or_else(|| format!("Server not found: {server_id}"))?;
     let recipe = crate::state::ServerRecipe::from_server_def(srv);
     serde_json::to_string_pretty(&recipe).map_err(|e| format!("Failed to serialize recipe: {e}"))
@@ -1201,8 +1364,8 @@ pub fn server_recipe_export(state: State<'_, Arc<AppState>>, server_id: String) 
 
 #[tauri::command]
 pub fn server_recipe_parse(json: String) -> Result<crate::state::ServerRecipe, String> {
-    let recipe: crate::state::ServerRecipe = serde_json::from_str(&json)
-        .map_err(|e| format!("Invalid server recipe JSON: {e}"))?;
+    let recipe: crate::state::ServerRecipe =
+        serde_json::from_str(&json).map_err(|e| format!("Invalid server recipe JSON: {e}"))?;
     Ok(recipe)
 }
 
@@ -1258,7 +1421,10 @@ pub fn get_memory_settings(state: State<'_, Arc<AppState>>) -> MemorySettings {
 }
 
 #[tauri::command]
-pub fn update_memory_settings(state: State<'_, Arc<AppState>>, settings: MemorySettings) -> Result<(), String> {
+pub fn update_memory_settings(
+    state: State<'_, Arc<AppState>>,
+    settings: MemorySettings,
+) -> Result<(), String> {
     update_memory_settings_impl(&state, settings)
 }
 
@@ -1277,10 +1443,16 @@ pub struct WslConfigInfo {
 pub fn wslconfig_get() -> WslConfigInfo {
     let path = dirs::home_dir().map(|h| h.join(".wslconfig"));
     let Some(p) = path else {
-        return WslConfigInfo { path: None, content: None };
+        return WslConfigInfo {
+            path: None,
+            content: None,
+        };
     };
     let content = std::fs::read_to_string(&p).ok();
-    WslConfigInfo { path: Some(p.display().to_string()), content }
+    WslConfigInfo {
+        path: Some(p.display().to_string()),
+        content,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1686,7 +1858,9 @@ pub fn get_server_metrics_series(
     server_id: &str,
 ) -> Vec<crate::state::ServerMetricPoint> {
     let sm = state.server_metrics.lock().unwrap();
-    sm.get(server_id).map(|q| q.iter().cloned().collect()).unwrap_or_default()
+    sm.get(server_id)
+        .map(|q| q.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1786,7 +1960,11 @@ mod tests {
     fn test_hardware_profile_manual_ram_limit() {
         let st = AppState::new();
         st.config.lock().unwrap().distro = "__test_nonexistent_distro__".to_string();
-        st.config.lock().unwrap().memory_settings.manual_ram_limit_mb = Some(32768);
+        st.config
+            .lock()
+            .unwrap()
+            .memory_settings
+            .manual_ram_limit_mb = Some(32768);
         *st.gpu.lock().unwrap() = Some(GpuSnapshot {
             name: "NVIDIA GeForce RTX 4090".to_string(),
             vram_total_mb: 24576,
@@ -1861,7 +2039,10 @@ mod tests {
         let res = update_memory_settings_impl(&st, custom.clone());
         assert!(res.is_ok());
         assert_eq!(get_memory_settings_impl(&st), custom);
-        assert!(st.rec_cache.lock().unwrap().is_none(), "rec_cache must be invalidated");
+        assert!(
+            st.rec_cache.lock().unwrap().is_none(),
+            "rec_cache must be invalidated"
+        );
     }
 
     #[test]
@@ -1876,12 +2057,20 @@ mod tests {
         assert_eq!(sys_mem.safety_reserve_mb, 4096);
         assert_eq!(sys_mem.manual_override_mb, None);
 
-        st.config.lock().unwrap().memory_settings.manual_ram_limit_mb = Some(14000);
+        st.config
+            .lock()
+            .unwrap()
+            .memory_settings
+            .manual_ram_limit_mb = Some(14000);
         let sys_mem2 = get_system_memory_impl(&st);
         assert_eq!(sys_mem2.usable_budget_mb, 14000);
         assert_eq!(sys_mem2.manual_override_mb, Some(14000));
 
-        st.config.lock().unwrap().memory_settings.enable_ram_overflow = false;
+        st.config
+            .lock()
+            .unwrap()
+            .memory_settings
+            .enable_ram_overflow = false;
         let sys_mem3 = get_system_memory_impl(&st);
         assert_eq!(sys_mem3.usable_budget_mb, 0);
     }
@@ -1938,7 +2127,9 @@ mod tests {
         }
 
         // Expired entry
-        if let Some(past) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(601)) {
+        if let Some(past) =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(601))
+        {
             *st.rec_cache.lock().unwrap() = Some((dummy, past, 16384));
             {
                 let cache = st.rec_cache.lock().unwrap();
@@ -1988,40 +2179,38 @@ mod tests {
             use_case: Some("Chat".into()),
             category: Some("Chat".into()),
             release_date: None,
-            variants: vec![
-                QuantVariantWithFit {
-                    variant: QuantVariant {
-                        repo_id: "Qwen/Qwen2.5-7B".into(),
-                        format: QuantFormat::FP16,
-                        label: "FP16".into(),
-                        weight_bytes: None,
-                        params_b: None,
-                        gguf_file: None,
-                        vllm_native: true,
-                    },
-                    fit: FitResult {
-                        verdict: fit::FitVerdict::Constrained,
-                        run_mode: fit::RunMode::GpuRamSwap,
-                        score: 75,
-                        weight_gb: 15.2,
-                        vram_context: 8192,
-                        extended_context: 16384,
-                        native_context: 32768,
-                        usable_context: 16384,
-                        swap_space_gb: 2,
-                        cpu_offload_gb: 0,
-                        est_tok_s: Some(45.0),
-                        measured_tok_s: None,
-                        vram_pct: 85,
-                        ram_pct: 20,
-                        format_support: fit::FormatSupport::Native,
-                        reason: "Constrained fit".into(),
-                        score_components: None,
-                        runtime: Some("vLLM".into()),
-                        notes: vec![],
-                    },
+            variants: vec![QuantVariantWithFit {
+                variant: QuantVariant {
+                    repo_id: "Qwen/Qwen2.5-7B".into(),
+                    format: QuantFormat::FP16,
+                    label: "FP16".into(),
+                    weight_bytes: None,
+                    params_b: None,
+                    gguf_file: None,
+                    vllm_native: true,
                 },
-            ],
+                fit: FitResult {
+                    verdict: fit::FitVerdict::Constrained,
+                    run_mode: fit::RunMode::GpuRamSwap,
+                    score: 75,
+                    weight_gb: 15.2,
+                    vram_context: 8192,
+                    extended_context: 16384,
+                    native_context: 32768,
+                    usable_context: 16384,
+                    swap_space_gb: 2,
+                    cpu_offload_gb: 0,
+                    est_tok_s: Some(45.0),
+                    measured_tok_s: None,
+                    vram_pct: 85,
+                    ram_pct: 20,
+                    format_support: fit::FormatSupport::Native,
+                    reason: "Constrained fit".into(),
+                    score_components: None,
+                    runtime: Some("vLLM".into()),
+                    notes: vec![],
+                },
+            }],
             best_variant_idx: 0,
             score: 75.0,
             score_components: None,
@@ -2053,12 +2242,13 @@ mod tests {
     async fn test_simple_join_all_preserves_order() {
         let futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>>> = (0..10)
             .map(|i| {
-                let fut: std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>> = Box::pin(async move {
-                    if i % 2 == 0 {
-                        tokio::task::yield_now().await;
-                    }
-                    i * 10
-                });
+                let fut: std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>> =
+                    Box::pin(async move {
+                        if i % 2 == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                        i * 10
+                    });
                 fut
             })
             .collect();
@@ -2133,9 +2323,17 @@ mod tests {
     fn test_recommendations_url_params() {
         let url = reqwest::Url::parse_with_params(
             hf::HF_API,
-            &[("sort", "trendingScore"), ("pipeline_tag", "text-generation"), ("limit", "16")],
-        ).unwrap();
-        assert_eq!(url.query(), Some("sort=trendingScore&pipeline_tag=text-generation&limit=16"));
+            &[
+                ("sort", "trendingScore"),
+                ("pipeline_tag", "text-generation"),
+                ("limit", "16"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            url.query(),
+            Some("sort=trendingScore&pipeline_tag=text-generation&limit=16")
+        );
     }
 
     #[test]
@@ -2247,4 +2445,4 @@ mod tests {
         let script = format!("pkill -f 'hf download.*[ /]{}(\\s|$)' || true", model_id);
         assert!(script.contains("[ /]meta-llama/Llama-3.1-8B(\\s|$)"));
     }
-}
+}

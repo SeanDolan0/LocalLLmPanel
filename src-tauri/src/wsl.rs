@@ -48,7 +48,11 @@ pub fn wsl_command() -> Command {
 
 /// List all installed WSL distros cleanly.
 pub fn installed_distros() -> Vec<String> {
-    let out = match wsl_command().env("WSL_UTF8", "1").args(["-l", "-q"]).output() {
+    let out = match wsl_command()
+        .env("WSL_UTF8", "1")
+        .args(["-l", "-q"])
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -77,7 +81,11 @@ pub fn installed_distros() -> Vec<String> {
 /// 3. Falls back to any installed distro that responds to `echo ok`
 pub fn detect_default_distro() -> Option<String> {
     // 1. Check wsl -l -v to find the default distro (marked with '*')
-    if let Ok(out) = wsl_command().env("WSL_UTF8", "1").args(["-l", "-v"]).output() {
+    if let Ok(out) = wsl_command()
+        .env("WSL_UTF8", "1")
+        .args(["-l", "-v"])
+        .output()
+    {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let clean: String = line.chars().filter(|c| *c != '\u{0}').collect();
@@ -124,9 +132,17 @@ pub fn parse_meminfo(content: &str) -> (u64, u64) {
     let mut avail_kb = 0u64;
     for line in content.lines() {
         if line.starts_with("MemTotal:") {
-            total_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            total_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         } else if line.starts_with("MemAvailable:") {
-            avail_kb = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            avail_kb = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         }
     }
     (total_kb / 1024, avail_kb / 1024)
@@ -181,7 +197,12 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
             stdout: String::from_utf8_lossy(&o.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
         },
-        Err(e) => RunOutput { ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {e}") },
+        Err(e) => RunOutput {
+            ok: false,
+            code: -1,
+            stdout: String::new(),
+            stderr: format!("spawn error: {e}"),
+        },
     }
 }
 
@@ -198,16 +219,17 @@ pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
             stdout: String::from_utf8_lossy(&o.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
         },
-        Err(e) => RunOutput { ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {e}") },
+        Err(e) => RunOutput {
+            ok: false,
+            code: -1,
+            stdout: String::new(),
+            stderr: format!("spawn error: {e}"),
+        },
     }
 }
 
 /// Run a script synchronously, streaming each output line to `on_line`.
-pub fn run_script_stream(
-    distro: &str,
-    script: &str,
-    mut on_line: impl FnMut(&str),
-) -> RunOutput {
+pub fn run_script_stream(distro: &str, script: &str, mut on_line: impl FnMut(&str)) -> RunOutput {
     let mut child = match wsl_command()
         .env("WSL_UTF8", "1")
         .args(["-d", distro, "--", "bash", "-lc", script])
@@ -217,7 +239,12 @@ pub fn run_script_stream(
     {
         Ok(c) => c,
         Err(e) => {
-            return RunOutput { ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {e}") };
+            return RunOutput {
+                ok: false,
+                code: -1,
+                stdout: String::new(),
+                stderr: format!("spawn error: {e}"),
+            };
         }
     };
 
@@ -311,9 +338,12 @@ impl WslChild {
         let stderr = child.stderr.take();
         let mut handles = Vec::new();
         let on_line = std::sync::Arc::new(std::sync::Mutex::new(on_line));
-        for stream in [stdout.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), stderr.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)]
-            .into_iter()
-            .flatten()
+        for stream in [
+            stdout.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            stderr.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
         {
             let cb = on_line.clone();
             handles.push(std::thread::spawn(move || {
@@ -370,11 +400,17 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_conversion() {
-        assert_eq!(windows_to_wsl_path(r"C:\Models\Llama"), "/mnt/c/Models/Llama");
+        assert_eq!(
+            windows_to_wsl_path(r"C:\Models\Llama"),
+            "/mnt/c/Models/Llama"
+        );
         assert_eq!(windows_to_wsl_path(r"D:\AI\qwen"), "/mnt/d/AI/qwen");
         assert_eq!(windows_to_wsl_path(r"D:\AI\qwen\"), "/mnt/d/AI/qwen");
         assert_eq!(windows_to_wsl_path("D:/AI/qwen"), "/mnt/d/AI/qwen");
-        assert_eq!(windows_to_wsl_path("/mnt/d/Models/Llama"), "/mnt/d/Models/Llama");
+        assert_eq!(
+            windows_to_wsl_path("/mnt/d/Models/Llama"),
+            "/mnt/d/Models/Llama"
+        );
         assert_eq!(windows_to_wsl_path("~/models/qwen"), "~/models/qwen");
         assert_eq!(windows_to_wsl_path("  D:/AI/qwen  "), "/mnt/d/AI/qwen");
     }

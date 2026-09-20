@@ -12,8 +12,8 @@ pub mod server;
 pub mod state;
 pub mod wsl;
 
-use std::sync::Arc;
 use state::AppState;
+use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
@@ -28,7 +28,8 @@ pub fn run() {
         .setup(|app| {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Open Panel", true, None::<&str>)?;
-            let stop_all_i = MenuItem::with_id(app, "stop_all", "Stop All Servers", true, None::<&str>)?;
+            let stop_all_i =
+                MenuItem::with_id(app, "stop_all", "Stop All Servers", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &stop_all_i, &quit_i])?;
 
             if let Some(icon) = app.default_window_icon().cloned() {

@@ -830,6 +830,8 @@ function ChatDrawer({
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingTitleText, setEditingTitleText] = useState("");
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeRequestIdRef = useRef<string | null>(null);
   activeRequestIdRef.current = activeRequestId;
@@ -1006,9 +1008,29 @@ function ChatDrawer({
     setEditingTitleId(null);
   };
 
+  const handleFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const readers = Array.from(files).map(
+      (f) =>
+        new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(new Error(`Failed to read ${f.name}`));
+          r.readAsDataURL(f);
+        })
+    );
+    Promise.all(readers)
+      .then((urls) => setPendingImages((prev) => [...prev, ...urls].slice(0, 4)))
+      .catch(console.error);
+  };
+
   const handleSend = async () => {
-    if (!input.trim() || streaming || !activeConv) return;
-    const userMsg: ChatMessage = { role: "user", content: input.trim() };
+    if ((!input.trim() && pendingImages.length === 0) || streaming || !activeConv) return;
+    const userMsg: ChatMessage = {
+      role: "user",
+      content: input.trim() || "What do you see in this image?",
+      ...(pendingImages.length > 0 ? { images: [...pendingImages] } : {}),
+    };
     const assistantMsg: ChatMessage = { role: "assistant", content: "" };
 
     const nextMessages = [...activeConv.messages, userMsg, assistantMsg];
@@ -1028,6 +1050,7 @@ function ChatDrawer({
       prev.map((c) => (c.id === activeConv.id ? updatedConv : c))
     );
     setInput("");
+    setPendingImages([]);
 
     const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     setActiveRequestId(reqId);
@@ -1226,6 +1249,18 @@ function ChatDrawer({
                         : "border border-edge bg-surface-2 text-slate-200 rounded-bl-xs"
                     }`}
                   >
+                    {m.images && m.images.length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-2">
+                        {m.images.map((src, k) => (
+                          <img
+                            key={k}
+                            src={src}
+                            alt={`attachment ${k + 1}`}
+                            className="h-24 w-24 rounded-lg border border-white/20 object-cover"
+                          />
+                        ))}
+                      </div>
+                    )}
                     <MarkdownContent
                       content={
                         m.content ||
@@ -1246,8 +1281,49 @@ function ChatDrawer({
             <div ref={messagesEndRef} />
           </div>
 
+          {/* Pending image previews */}
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap gap-2 border-t border-edge bg-surface-2/30 px-3 pt-2">
+              {pendingImages.map((src, i) => (
+                <div key={i} className="relative">
+                  <img
+                    src={src}
+                    alt={`pending ${i + 1}`}
+                    className="h-14 w-14 rounded-lg border border-edge object-cover"
+                  />
+                  <button
+                    onClick={() => setPendingImages((prev) => prev.filter((_, k) => k !== i))}
+                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-surface-3 text-[10px] text-slate-300 hover:text-red-400 border border-edge"
+                    title="Remove image"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Input Bar */}
           <div className="flex items-center gap-2 border-t border-edge bg-surface-2/30 p-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                handleFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded border border-edge bg-surface-3 px-2.5 py-1.5 text-sm text-slate-300 hover:text-white hover:bg-surface-3/80"
+              title="Attach image for vision models (Qwen2-VL, Pixtral)"
+              disabled={streaming}
+            >
+              📎
+            </button>
             <input
               className={`${inputCls} flex-1`}
               placeholder="Ask anything... (Press Enter to send)"
@@ -1266,7 +1342,7 @@ function ChatDrawer({
                 ⏹ Stop
               </Button>
             ) : (
-              <Button onClick={handleSend} disabled={!input.trim()}>
+              <Button onClick={handleSend} disabled={!input.trim() && pendingImages.length === 0}>
                 Send
               </Button>
             )}

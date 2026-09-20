@@ -5,8 +5,16 @@ pub fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
         out.push(CHARSET[(triple >> 18) & 0x3F] as char);
@@ -124,7 +132,8 @@ pub fn encrypt_token(plain: &str) -> Result<String, String> {
         if ret == 0 {
             return Err("CryptProtectData failed".to_string());
         }
-        let slice = unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize) };
+        let slice =
+            unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize) };
         let encoded = base64_encode(slice);
         unsafe { LocalFree(data_out.pbData as *mut _) };
         Ok(format!("dpapi:{encoded}"))
@@ -179,7 +188,8 @@ pub fn decrypt_token(cipher: &str) -> Result<String, String> {
         if ret == 0 {
             return Err("CryptUnprotectData failed to decrypt token".to_string());
         }
-        let slice = unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize) };
+        let slice =
+            unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize) };
         let text = String::from_utf8(slice.to_vec()).map_err(|e| e.to_string());
         unsafe { LocalFree(data_out.pbData as *mut _) };
         text
@@ -203,7 +213,12 @@ mod tests {
 
     #[test]
     fn test_base64_roundtrip() {
-        let cases = ["", "hello", "hf_1234567890abcdef", "a very long token with symbols: !@#$%^&*()_+{}[]|:;<>?,./~`"];
+        let cases = [
+            "",
+            "hello",
+            "hf_1234567890abcdef",
+            "a very long token with symbols: !@#$%^&*()_+{}[]|:;<>?,./~`",
+        ];
         for c in cases {
             let enc = base64_encode(c.as_bytes());
             let dec = base64_decode(&enc).expect("decode");

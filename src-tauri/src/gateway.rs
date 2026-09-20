@@ -75,9 +75,7 @@ pub fn find_server_port_for_model(
 
 /// OpenAI-style `data` rows for `GET /v1/models`. Prefer the served model
 /// name when present (that is the name a client would pass in `"model"`).
-pub fn model_rows(
-    servers: &BTreeMap<String, crate::state::LiveServer>,
-) -> Vec<serde_json::Value> {
+pub fn model_rows(servers: &BTreeMap<String, crate::state::LiveServer>) -> Vec<serde_json::Value> {
     running_instruct_servers(servers)
         .into_iter()
         .map(|ls| {
@@ -100,7 +98,10 @@ pub fn model_rows(
 /// Extract the requested model id from a chat/completions JSON body.
 pub fn model_from_body(body: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    value.get("model").and_then(|m| m.as_str()).map(str::to_string)
+    value
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
 }
 
 /// Is the chunk of bytes between the request line and the blank line a
@@ -158,10 +159,7 @@ fn not_found_payload(model: &str) -> String {
 // Connection serving
 // ---------------------------------------------------------------------------
 
-async fn serve_connection(
-    stream: &mut TcpStream,
-    state: &Arc<AppState>,
-) -> Result<(), String> {
+async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Result<(), String> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 8192];
     loop {
@@ -174,7 +172,8 @@ async fn serve_connection(
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(sep) = is_head_terminated(&buf) {
-            let head = parse_head(&buf[..sep]).ok_or_else(|| "malformed request head".to_string())?;
+            let head =
+                parse_head(&buf[..sep]).ok_or_else(|| "malformed request head".to_string())?;
             if head.content_length > MAX_BODY_BYTES {
                 return Err("request body too large".into());
             }
@@ -222,7 +221,15 @@ async fn route(
             };
             match port {
                 Some(port) => proxy_chat(stream, state, port, body).await,
-                None => write_response(stream, 404, "application/json", not_found_payload(&model).as_bytes()).await,
+                None => {
+                    write_response(
+                        stream,
+                        404,
+                        "application/json",
+                        not_found_payload(&model).as_bytes(),
+                    )
+                    .await
+                }
             }
         }
         (method, "/v1/models") if method != "GET" => {
@@ -249,7 +256,10 @@ async fn write_response(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     stream.write_all(body).await.map_err(|e| e.to_string())?;
     stream.flush().await.map_err(|e| e.to_string())
 }
@@ -286,14 +296,20 @@ async fn proxy_chat(
         let head = format!(
             "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
         );
-        stream.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
+        stream
+            .write_all(head.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
         let mut upstream = resp;
         loop {
             match upstream.chunk().await {
                 Ok(Some(chunk)) => {
                     // Chunked framing: <hex size>\r\n<data>\r\n
                     let size = format!("{:x}\r\n", chunk.len());
-                    stream.write_all(size.as_bytes()).await.map_err(|e| e.to_string())?;
+                    stream
+                        .write_all(size.as_bytes())
+                        .await
+                        .map_err(|e| e.to_string())?;
                     stream.write_all(&chunk).await.map_err(|e| e.to_string())?;
                     stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
                 }
@@ -303,7 +319,10 @@ async fn proxy_chat(
                 }
             }
         }
-        stream.write_all(b"0\r\n\r\n").await.map_err(|e| e.to_string())?;
+        stream
+            .write_all(b"0\r\n\r\n")
+            .await
+            .map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())
     } else {
         let body_bytes = resp
@@ -317,7 +336,13 @@ async fn proxy_chat(
 async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) {
     let result = serve_connection(&mut stream, &state).await;
     if let Err(e) = result {
-        let _ = write_response(&mut stream, 500, "text/plain", format!("gateway error: {e}").as_bytes()).await;
+        let _ = write_response(
+            &mut stream,
+            500,
+            "text/plain",
+            format!("gateway error: {e}").as_bytes(),
+        )
+        .await;
     }
     let _ = stream.shutdown().await;
 }
@@ -495,15 +520,24 @@ mod tests {
     fn test_route_fuzzy_suffix_match() {
         let servers = running_map();
         // Client asks for just the tail of the HF id
-        assert_eq!(find_server_port_for_model(&servers, "Qwen2.5-7B-Instruct"), Some(8001));
-        assert_eq!(find_server_port_for_model(&servers, "Llama-3.1-8B-Instruct"), Some(8002));
+        assert_eq!(
+            find_server_port_for_model(&servers, "Qwen2.5-7B-Instruct"),
+            Some(8001)
+        );
+        assert_eq!(
+            find_server_port_for_model(&servers, "Llama-3.1-8B-Instruct"),
+            Some(8002)
+        );
     }
 
     #[test]
     fn test_route_ignores_embed_and_stopped_servers() {
         let servers = running_map();
         // Embed server must not be routed for chat
-        assert_eq!(find_server_port_for_model(&servers, "BAAI/bge-small-en"), None);
+        assert_eq!(
+            find_server_port_for_model(&servers, "BAAI/bge-small-en"),
+            None
+        );
         // Stopped instruct server must not be routed
         assert_eq!(
             find_server_port_for_model(&servers, "mistralai/Mistral-7B-Instruct-v0.3"),
@@ -526,7 +560,9 @@ mod tests {
         // 2 running instruct servers, prefer the served_model_name for display
         let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
         assert_eq!(ids, vec!["qwen-7b", "meta-llama/Llama-3.1-8B-Instruct"]);
-        assert!(rows.iter().all(|r| r["object"] == serde_json::json!("model")));
+        assert!(rows
+            .iter()
+            .all(|r| r["object"] == serde_json::json!("model")));
     }
 
     #[test]

@@ -35,7 +35,10 @@ pub fn provision_all(
     let report = phase_verify(distro, venv_dir, &mut on_log)?;
 
     // Marker file so later skips are quick.
-    let full_report = ProvisionReport { phases_completed: phases, ..report };
+    let full_report = ProvisionReport {
+        phases_completed: phases,
+        ..report
+    };
     if let Ok(json) = serde_json::to_string(&full_report) {
         let marker = format!(
             "mkdir -p ~/llm-lp && cat << 'EOF' > ~/llm-lp/.provisioned\n{}\nEOF",
@@ -82,9 +85,18 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
     }
     let safe_user: String = user
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    on_log("sudo", &format!("configuring passwordless sudo for user '{user}' (via wsl --user root)…"));
+    on_log(
+        "sudo",
+        &format!("configuring passwordless sudo for user '{user}' (via wsl --user root)…"),
+    );
     let script = format!(
         "echo '{user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/llm-panel-{safe_user} && chmod 440 /etc/sudoers.d/llm-panel-{safe_user} && echo ok"
     );
@@ -94,7 +106,10 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
     }
     let verify = wsl::run_script(distro, "sudo -n true 2>/dev/null && echo ok || echo needs");
     if verify.stdout.trim() != "ok" {
-        bail!("passwordless sudo still not working after config: {}", verify.combined());
+        bail!(
+            "passwordless sudo still not working after config: {}",
+            verify.combined()
+        );
     }
     Ok("sudo".into())
 }
@@ -103,7 +118,10 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
 /// a separate Linux). uv makes the big vLLM install dramatically faster and
 /// the plan pins it as the venv/installer of choice. Idempotent.
 fn phase_uv(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
-    let has = wsl::run_script(distro, "command -v uv >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/uv\" ] && echo yes || echo no");
+    let has = wsl::run_script(
+        distro,
+        "command -v uv >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/uv\" ] && echo yes || echo no",
+    );
     if has.stdout.trim() == "yes" {
         on_log("uv", "uv already installed (skipping).");
         return Ok("uv".into());
@@ -149,7 +167,9 @@ pub fn apt_done_script() -> &'static str {
 
 fn apt_done(distro: &str) -> bool {
     let out = wsl::run_script(distro, apt_done_script());
-    out.stdout.trim() == "yes" || out.stdout.trim().contains(".apt-done") || out.ok && !out.stdout.contains("no")
+    out.stdout.trim() == "yes"
+        || out.stdout.trim().contains(".apt-done")
+        || out.ok && !out.stdout.contains("no")
 }
 
 fn mark_apt_done(distro: &str) {
@@ -227,16 +247,26 @@ fn phase_vllm(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str))
 fn vllm_installed(distro: &str, venv_dir: &str) -> bool {
     let out = wsl::run_script(
         distro,
-        &format!("{venv}/bin/python -c 'import vllm; print(vllm.__version__)' 2>/dev/null || true", venv = venv_dir),
+        &format!(
+            "{venv}/bin/python -c 'import vllm; print(vllm.__version__)' 2>/dev/null || true",
+            venv = venv_dir
+        ),
     );
     out.ok && !out.stdout.trim().is_empty()
 }
 
-fn phase_verify(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<ProvisionReport> {
+fn phase_verify(
+    distro: &str,
+    venv_dir: &str,
+    on_log: &mut impl FnMut(&str, &str),
+) -> Result<ProvisionReport> {
     on_log("verify", "verifying vllm + torch/CUDA…");
     let vllm_out = wsl::run_script(
         distro,
-        &format!("{venv}/bin/python -c 'import vllm; print(vllm.__version__)'", venv = venv_dir),
+        &format!(
+            "{venv}/bin/python -c 'import vllm; print(vllm.__version__)'",
+            venv = venv_dir
+        ),
     );
     let vllm_version = vllm_out.ok.then(|| vllm_out.stdout.trim().to_string());
 
@@ -250,7 +280,10 @@ fn phase_verify(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str
     let lines: Vec<&str> = torch_out.stdout.lines().collect();
     let torch_version = lines.first().map(|s| s.to_string());
     let cuda_available = lines.get(1).map(|s| *s == "True").unwrap_or(false);
-    let gpu_name = lines.get(2).filter(|s| !s.is_empty() && **s != "n/a").map(|s| s.to_string());
+    let gpu_name = lines
+        .get(2)
+        .filter(|s| !s.is_empty() && **s != "n/a")
+        .map(|s| s.to_string());
     let vram_mb = lines
         .get(3)
         .and_then(|s| s.parse::<u64>().ok())
