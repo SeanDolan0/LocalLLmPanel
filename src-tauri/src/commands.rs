@@ -212,14 +212,20 @@ pub async fn install_llamacpp(
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::llamacpp_install::InstallStatus, String> {
     let st = (*state).clone();
-    let destination = PathBuf::from(st.config().llamacpp_dir);
+    let cfg = st.config();
+    let destination = PathBuf::from(cfg.llamacpp_dir);
+    let github_token = (!cfg.hf_token.trim().is_empty()).then_some(cfg.hf_token);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::llamacpp_install::install(&destination, |file, done, total| {
-            let _ = app.emit(
-                "llamacpp-install-progress",
-                serde_json::json!({"file": file, "done": done, "total": total}),
-            );
-        })
+        crate::llamacpp_install::install(
+            &destination,
+            |file, done, total| {
+                let _ = app.emit(
+                    "llamacpp-install-progress",
+                    serde_json::json!({"file": file, "done": done, "total": total}),
+                );
+            },
+            github_token.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("llama.cpp install task error: {e}"))?
@@ -1226,9 +1232,11 @@ pub async fn servers_test_tool_call(
         .map_err(|e| e.to_string())?;
     let passed = body["choices"][0]["message"]["tool_calls"]
         .as_array()
-        .map(|calls| calls.iter().any(|call| {
-            call["function"]["name"].as_str() == Some("get_weather")
-        }))
+        .map(|calls| {
+            calls
+                .iter()
+                .any(|call| call["function"]["name"].as_str() == Some("get_weather"))
+        })
         .unwrap_or(false);
     Ok(serde_json::json!({
         "passed": passed,
@@ -1793,10 +1801,7 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
     .map_err(|e| e.to_string())
 }
 
-fn scan_native_gguf_library(
-    root: &str,
-    running_servers: &[(String, String)],
-) -> Vec<LibraryEntry> {
+fn scan_native_gguf_library(root: &str, running_servers: &[(String, String)]) -> Vec<LibraryEntry> {
     let mut entries = Vec::new();
     let Ok(repos) = std::fs::read_dir(root) else {
         return entries;
@@ -1812,7 +1817,9 @@ fn scan_native_gguf_library(
             continue;
         }
         files.sort_by_key(|f| f.path());
-        let main_file = files.first().map(|f| f.path().to_string_lossy().into_owned());
+        let main_file = files
+            .first()
+            .map(|f| f.path().to_string_lossy().into_owned());
         let size_mb = files
             .iter()
             .filter_map(|e| e.metadata().ok())
@@ -2214,10 +2221,8 @@ pub async fn library_disk_usage(state: State<'_, Arc<AppState>>) -> Result<u64, 
         } else {
             "~/.cache/huggingface/hub".to_string()
         };
-        let out = crate::wsl::run_script(
-            &distro,
-            &format!("du -sm {hub_dir} 2>/dev/null | cut -f1"),
-        );
+        let out =
+            crate::wsl::run_script(&distro, &format!("du -sm {hub_dir} 2>/dev/null | cut -f1"));
         let mb: u64 = out.stdout.trim().parse().unwrap_or(0);
         Ok(mb)
     })

@@ -114,7 +114,17 @@ export default function Dashboard() {
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{provisionErr}</div>
       )}
       {llamacppErr && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{llamacppErr}</div>
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
+          <div className="whitespace-pre-wrap">{llamacppErr}</div>
+          <div className="mt-2 flex gap-2">
+            <Button variant="ghost" onClick={() => void navigator.clipboard?.writeText(llamacppErr)}>
+              Copy diagnostics
+            </Button>
+            <Button variant="ghost" onClick={() => void api.openUrl("https://github.com/ggml-org/llama.cpp/releases")}>
+              Open releases
+            </Button>
+          </div>
+        </div>
       )}
 
       {/* VRAM Pressure Alert */}

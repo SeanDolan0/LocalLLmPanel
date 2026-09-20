@@ -1,15 +1,23 @@
 //! Native Windows llama.cpp release installation and capability discovery.
 
 use anyhow::{anyhow, Context, Result};
+use regex_lite::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-const RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10";
+const RELEASES_PAGE: &str = "https://github.com/ggml-org/llama.cpp/releases";
 
 #[derive(Debug, Clone, Deserialize)]
 struct Release {
     tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
     assets: Vec<Asset>,
 }
 
@@ -37,6 +45,29 @@ pub struct LlamaDevice {
     pub backend: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CudaVersion(pub u32, pub u32);
+
+impl std::fmt::Display for CudaVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.0, self.1)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CudaCandidate {
+    main: Asset,
+    runtime: Option<Asset>,
+    version: CudaVersion,
+}
+
+#[derive(Debug, Clone)]
+struct Selection {
+    tag: String,
+    candidate: CudaCandidate,
+    warning: Option<String>,
+}
+
 fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(windows)]
@@ -48,72 +79,104 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 pub fn choose_assets(assets: &[Asset]) -> Result<(Asset, Option<Asset>)> {
-    let mut candidates: Vec<&Asset> = assets
-        .iter()
-        .filter(|a| {
-            let n = a.name.to_ascii_lowercase();
-            n.ends_with(".zip")
-                && (n.contains("win") || n.contains("windows"))
-                && n.contains("cuda")
-                && !n.contains("vulkan")
-                && !n.contains("cpu")
-        })
-        .collect();
-    candidates.sort_by(|a, b| cuda_asset_version(&b.name).cmp(&cuda_asset_version(&a.name)));
-    let main = candidates
-        .first()
-        .ok_or_else(|| anyhow!("latest llama.cpp release has no Windows CUDA archive (Vulkan/CPU builds are not supported)"))?;
-    let main_cuda = cuda_asset_version(&main.name);
-    if main_cuda < (12, 8) {
-        return Err(anyhow!(
-            "latest llama.cpp release has no Windows CUDA 12.8+ archive required for Blackwell GPUs"
-        ));
-    }
-    let mut runtimes: Vec<&Asset> = assets
-        .iter()
-        .filter(|a| {
-            let n = a.name.to_ascii_lowercase();
-            n.ends_with(".zip")
-                && (n.contains("cudart") || n.contains("cuda-runtime"))
-                && (n.contains("win") || n.contains("windows"))
-        })
-        .collect();
-    runtimes.sort_by(|a, b| cuda_asset_version(&b.name).cmp(&cuda_asset_version(&a.name)));
-    let runtime = runtimes
-        .into_iter()
-        .find(|asset| cuda_asset_version(&asset.name) <= main_cuda);
-    Ok(((*main).clone(), runtime.cloned()))
+    let selection = choose_assets_for_machine(assets, None, None)?;
+    Ok((selection.candidate.main, selection.candidate.runtime))
 }
 
-fn cuda_asset_version(name: &str) -> (u32, u32) {
-    let lower = name.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == b'c' && i + 4 < bytes.len() && bytes[i + 1] == b'u' {
-            let digits = &lower[i + 2..];
-            let digits: String = digits.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.len() >= 2 {
-                if let Ok(value) = digits.parse::<u32>() {
-                    if digits.len() == 2 {
-                        return (value, 0);
-                    }
-                    return (value / 10, value % 10);
-                }
-            }
-        }
+fn parse_main(name: &str) -> Option<CudaVersion> {
+    let re = Regex::new(r"^llama-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").ok()?;
+    let captures = re.captures(name)?;
+    Some(CudaVersion(
+        captures.get(1)?.as_str().parse().ok()?,
+        captures.get(2)?.as_str().parse().ok()?,
+    ))
+}
+
+fn parse_runtime(name: &str) -> Option<CudaVersion> {
+    let re = Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").ok()?;
+    let captures = re.captures(name)?;
+    Some(CudaVersion(
+        captures.get(1)?.as_str().parse().ok()?,
+        captures.get(2)?.as_str().parse().ok()?,
+    ))
+}
+
+fn diagnostic(assets: &[Asset], driver: Option<CudaVersion>) -> String {
+    let mut lines = vec![format!(
+        "No suitable Windows x64 CUDA archive found (driver CUDA: {}).",
+        driver.map_or_else(|| "unknown".into(), |v| v.to_string())
+    )];
+    for asset in assets
+        .iter()
+        .filter(|a| a.name.to_ascii_lowercase().contains("win"))
+    {
+        let reason = if asset.name.to_ascii_lowercase().contains("arm64") {
+            "rejected: arm64"
+        } else if parse_main(&asset.name).is_some() {
+            "rejected: CUDA version is newer than the driver"
+        } else if !asset.name.to_ascii_lowercase().contains("cuda") {
+            "rejected: non-CUDA variant"
+        } else {
+            "rejected: not an exact Windows x64 CUDA archive"
+        };
+        lines.push(format!(
+            "  {} ({}; {} bytes total assets)",
+            asset.name,
+            reason,
+            assets.len()
+        ));
     }
-    if let Some(pos) = lower.find("cuda") {
-        let suffix = lower[pos + 4..].trim_start_matches(['-', '_', '.']);
-        let digits: String = suffix
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .take(3)
-            .collect();
-        if let Ok(value) = digits.parse::<u32>() {
-            return (value / 10, value % 10);
-        }
-    }
-    (0, 0)
+    lines.push(format!("Releases: {}", RELEASES_PAGE));
+    lines.join("\n")
+}
+
+fn choose_assets_for_machine(
+    assets: &[Asset],
+    driver: Option<CudaVersion>,
+    compute_cap: Option<(u32, u32)>,
+) -> Result<Selection> {
+    let mut mains: Vec<(CudaVersion, &Asset)> = assets
+        .iter()
+        .filter_map(|asset| parse_main(&asset.name).map(|version| (version, asset)))
+        .collect();
+    mains.sort_by(|a, b| b.0.cmp(&a.0));
+    let usable = mains
+        .iter()
+        .filter(|(version, _)| driver.map_or(true, |max| *version <= max));
+    let (version, main) = usable
+        .clone()
+        .find(|(version, _)| {
+            compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version >= CudaVersion(12, 8)
+        })
+        .or_else(|| usable.clone().next())
+        .ok_or_else(|| anyhow!(diagnostic(assets, driver)))?;
+    let runtime = assets
+        .iter()
+        .find(|asset| parse_runtime(&asset.name) == Some(*version))
+        .cloned();
+    let warning = if compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version < CudaVersion(12, 8)
+    {
+        Some(format!("CUDA {} predates Blackwell native support; it may be slow or fail. Update the NVIDIA driver to use CUDA 12.8 or newer.", version))
+    } else {
+        None
+    };
+    Ok(Selection {
+        tag: parse_main_tag(&main.name),
+        candidate: CudaCandidate {
+            main: (*main).clone(),
+            runtime,
+            version: *version,
+        },
+        warning,
+    })
+}
+
+fn parse_main_tag(name: &str) -> String {
+    name.split("-bin-")
+        .next()
+        .unwrap_or("unknown")
+        .trim_start_matches("llama-")
+        .to_string()
 }
 
 fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Result<()> {
@@ -171,46 +234,154 @@ fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn latest_release() -> Result<(String, Asset, Option<Asset>)> {
-    let release: Release = reqwest::blocking::Client::new()
-        .get(RELEASES_API)
-        .header("User-Agent", "LocalLLmPanel")
-        .send()?
+fn driver_cuda_version() -> Option<CudaVersion> {
+    let output = hidden_command("nvidia-smi").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let re = Regex::new(r"CUDA Version:\s*(\d+)\.(\d+)").ok()?;
+    let c = re.captures(&text)?;
+    Some(CudaVersion(
+        c.get(1)?.as_str().parse().ok()?,
+        c.get(2)?.as_str().parse().ok()?,
+    ))
+}
+
+fn compute_capability() -> Option<(u32, u32)> {
+    let output = hidden_command("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    let value = output_text.trim().split('.').collect::<Vec<_>>();
+    Some((
+        value.first()?.parse().ok()?,
+        value.get(1).unwrap_or(&"0").parse().ok()?,
+    ))
+}
+
+fn releases(token: Option<&str>) -> Result<Vec<Release>> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<Release>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if token.is_none() {
+        if let Some((when, releases)) = cache.lock().unwrap().as_ref() {
+            if when.elapsed() < Duration::from_secs(300) {
+                return Ok(releases.clone());
+            }
+        }
+    }
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("LocalLLmPanel/1.0 (llama.cpp installer)")
+        .build()?;
+    let mut request = client.get(RELEASES_API);
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    let releases: Vec<Release> = request
+        .send()
+        .context("querying GitHub llama.cpp releases (rate limit may have been reached)")?
         .error_for_status()?
         .json()?;
-    let (main, runtime) = choose_assets(&release.assets)?;
-    Ok((release.tag_name, main, runtime))
+    if token.is_none() {
+        *cache.lock().unwrap() = Some((Instant::now(), releases.clone()));
+    }
+    Ok(releases)
+}
+
+fn latest_release(token: Option<&str>) -> Result<Selection> {
+    let driver = driver_cuda_version();
+    let cc = compute_capability();
+    select_release(&releases(token)?, driver, cc)
+}
+
+fn select_release(
+    releases: &[Release],
+    driver: Option<CudaVersion>,
+    cc: Option<(u32, u32)>,
+) -> Result<Selection> {
+    let mut examined = Vec::new();
+    for release in releases.iter().filter(|release| !release.draft) {
+        let windows_count = release
+            .assets
+            .iter()
+            .filter(|asset| asset.name.to_ascii_lowercase().contains("win"))
+            .count();
+        match choose_assets_for_machine(&release.assets, driver, cc) {
+            Ok(mut selection) => {
+                selection.tag = release.tag_name.clone();
+                if !examined.is_empty() {
+                    let fallback_warning = format!(
+                        "Using {} because newer releases were skipped: {}.",
+                        selection.tag,
+                        examined.join(", ")
+                    );
+                    selection.warning = Some(match selection.warning {
+                        Some(existing) => format!("{fallback_warning} {existing}"),
+                        None => fallback_warning,
+                    });
+                }
+                return Ok(selection);
+            }
+            Err(error) => examined.push(format!(
+                "{} ({} Windows assets: {})",
+                release.tag_name, windows_count, error
+            )),
+        }
+    }
+    Err(anyhow!(
+        "No suitable llama.cpp release was found.\nExamined releases:\n{}\n{}",
+        examined.join("\n"),
+        RELEASES_PAGE
+    ))
 }
 
 pub fn install(
     destination: &Path,
     progress: impl Fn(&str, u64, Option<u64>) + Copy,
+    token: Option<&str>,
 ) -> Result<(String, PathBuf, String, String)> {
-    let (tag, main, runtime) = latest_release()?;
-    std::fs::create_dir_all(destination)?;
+    let selection = latest_release(token)?;
+    let tag = selection.tag;
+    let main = selection.candidate.main;
+    let runtime = selection.candidate.runtime;
+    let install_dir = destination.join(format!("{}-cuda-{}", tag, selection.candidate.version));
+    std::fs::create_dir_all(&install_dir)?;
     let temp = destination.join(format!(".llamacpp-{}.zip", std::process::id()));
-    progress(&format!("downloading {}", main.name), 0, None);
-    download(&main.browser_download_url, &temp, |done, total| {
-        progress(&main.name, done, total)
-    })?;
-    expand_archive(&temp, destination)?;
-    let _ = std::fs::remove_file(&temp);
-
-    if let Some(runtime) = runtime {
-        let runtime_zip =
-            destination.join(format!(".llamacpp-cudart-{}.zip", std::process::id()));
-        download(&runtime.browser_download_url, &runtime_zip, |done, total| {
-            progress(&runtime.name, done, total)
+    let download_label = selection.warning.as_ref().map_or_else(
+        || format!("downloading {}", main.name),
+        |warning| format!("downloading {} ({warning})", main.name),
+    );
+    progress(&download_label, 0, None);
+    let result = (|| {
+        download(&main.browser_download_url, &temp, |done, total| {
+            progress(&main.name, done, total)
         })?;
-        expand_archive(&runtime_zip, destination)?;
-        let _ = std::fs::remove_file(runtime_zip);
-    }
+        expand_archive(&temp, &install_dir)?;
+        let _ = std::fs::remove_file(&temp);
 
-    let exe = find_file(destination, "llama-server.exe")
-        .ok_or_else(|| anyhow!("archive did not contain llama-server.exe"))?;
-    let version = command_output(&exe, &["--version"])?;
-    let help = command_output(&exe, &["--help"])?;
-    Ok((tag, exe, version, help))
+        if let Some(runtime) = runtime {
+            let runtime_zip =
+                destination.join(format!(".llamacpp-cudart-{}.zip", std::process::id()));
+            let runtime_result = (|| {
+                download(
+                    &runtime.browser_download_url,
+                    &runtime_zip,
+                    |done, total| progress(&runtime.name, done, total),
+                )?;
+                expand_archive(&runtime_zip, &install_dir)
+            })();
+            let _ = std::fs::remove_file(runtime_zip);
+            runtime_result?;
+        }
+
+        let exe = find_file(&install_dir, "llama-server.exe")
+            .ok_or_else(|| anyhow!("archive did not contain llama-server.exe"))?;
+        let version = command_output(&exe, &["--version"])?;
+        let help = command_output(&exe, &["--help"])?;
+        Ok((tag, exe, version, help))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 pub fn command_output(exe: &Path, args: &[&str]) -> Result<String> {
@@ -275,14 +446,15 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_assets, executable_from_config, parse_devices, Asset};
+    use super::{
+        choose_assets, choose_assets_for_machine, executable_from_config, parse_devices,
+        select_release, Asset, CudaVersion, Release, RELEASES_API,
+    };
     use crate::state::PersistedConfig;
 
     #[test]
     fn detects_llama_server_from_path_when_not_configured() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join(format!(
+        let root = std::env::current_dir().unwrap().join(format!(
             "local-llm-panel-llama-path-test-{}",
             std::process::id()
         ));
@@ -315,11 +487,26 @@ mod tests {
     #[test]
     fn selects_highest_cuda_asset_and_matching_runtime() {
         let assets = vec![
-            Asset { name: "llama-b123-win-cuda-12.4-x64.zip".into(), browser_download_url: "old".into() },
-            Asset { name: "llama-b123-win-cuda-12.8-x64.zip".into(), browser_download_url: "main".into() },
-            Asset { name: "cudart-12.8-win-x64.zip".into(), browser_download_url: "runtime".into() },
-            Asset { name: "llama-b123-win-vulkan-x64.zip".into(), browser_download_url: "vulkan".into() },
-            Asset { name: "llama-b123-win-x64.zip".into(), browser_download_url: "cpu".into() },
+            Asset {
+                name: "llama-b123-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "old".into(),
+            },
+            Asset {
+                name: "llama-b123-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "main".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "runtime".into(),
+            },
+            Asset {
+                name: "llama-b123-win-vulkan-x64.zip".into(),
+                browser_download_url: "vulkan".into(),
+            },
+            Asset {
+                name: "llama-b123-win-x64.zip".into(),
+                browser_download_url: "cpu".into(),
+            },
         ];
         let (main, runtime) = choose_assets(&assets).unwrap();
         assert_eq!(main.browser_download_url, "main");
@@ -336,12 +523,106 @@ mod tests {
     }
 
     #[test]
-    fn refuses_cuda_archive_before_blackwell_minimum() {
+    fn allows_older_cuda_with_blackwell_warning() {
         let assets = vec![Asset {
-            name: "llama-win-cuda-12.4-x64.zip".into(),
+            name: "llama-b123-bin-win-cuda-12.4-x64.zip".into(),
             browser_download_url: "old".into(),
         }];
-        assert!(choose_assets(&assets).is_err());
+        let selected =
+            choose_assets_for_machine(&assets, Some(CudaVersion(12, 4)), Some((12, 0))).unwrap();
+        assert!(selected.warning.is_some());
+    }
+
+    #[test]
+    fn parses_numeric_cuda_versions_and_untagged_cudart() {
+        let assets = vec![
+            Asset {
+                name: "llama-b10456-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "old".into(),
+            },
+            Asset {
+                name: "llama-b10456-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "new".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "rt".into(),
+            },
+        ];
+        let selected =
+            choose_assets_for_machine(&assets, Some(CudaVersion(13, 3)), Some((8, 9))).unwrap();
+        assert_eq!(selected.candidate.version, CudaVersion(13, 3));
+        assert_eq!(
+            selected.candidate.runtime.unwrap().browser_download_url,
+            "rt"
+        );
+        assert!(CudaVersion(12, 4) < CudaVersion(12, 8));
+        assert!(CudaVersion(12, 8) < CudaVersion(13, 3));
+        assert!(CudaVersion(13, 3) < CudaVersion(13, 4));
+    }
+
+    #[test]
+    fn diagnostic_lists_rejected_windows_assets() {
+        let assets = vec![
+            Asset {
+                name: "llama-b1-bin-win-cuda-13.4-arm64.zip".into(),
+                browser_download_url: "arm".into(),
+            },
+            Asset {
+                name: "llama-b1-bin-win-vulkan-x64.zip".into(),
+                browser_download_url: "vulkan".into(),
+            },
+        ];
+        let error = choose_assets(&assets).unwrap_err().to_string();
+        assert!(error.contains("arm64"));
+        assert!(error.contains("non-CUDA"));
+    }
+
+    #[test]
+    fn falls_back_when_newest_release_has_no_windows_assets() {
+        let releases = vec![
+            Release {
+                tag_name: "b2".into(),
+                draft: false,
+                prerelease: false,
+                assets: vec![Asset {
+                    name: "llama-b2-bin-win-vulkan-x64.zip".into(),
+                    browser_download_url: "v".into(),
+                }],
+            },
+            Release {
+                tag_name: "b1".into(),
+                draft: false,
+                prerelease: false,
+                assets: vec![Asset {
+                    name: "llama-b1-bin-win-cuda-13.3-x64.zip".into(),
+                    browser_download_url: "cuda".into(),
+                }],
+            },
+        ];
+        let selection = select_release(&releases, Some(CudaVersion(13, 3)), None).unwrap();
+        assert_eq!(selection.tag, "b1");
+        assert!(selection.warning.unwrap().contains("b2"));
+    }
+
+    #[test]
+    #[ignore]
+    fn finds_cuda_asset_in_live_github_release() {
+        let releases: Vec<Release> = reqwest::blocking::Client::builder()
+            .user_agent("LocalLLmPanel/1.0")
+            .build()
+            .unwrap()
+            .get(RELEASES_API)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(releases
+            .iter()
+            .flat_map(|release| release.assets.iter())
+            .any(|asset| super::parse_main(&asset.name).is_some()));
     }
 
     #[test]

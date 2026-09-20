@@ -78,7 +78,7 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `download_gguf` — native Windows, bearer-authenticated, resumable shard download into `gguf_dir`, emitting `pull-progress`.
 
 ### `llamacpp_install.rs`
-- Queries the latest `ggml-org/llama.cpp` release, selects a Windows CUDA archive, extracts optional CUDA runtime assets, and probes `--version`/`--help`.
+- Lists and caches recent `ggml-org/llama.cpp` releases, parses anchored Windows x64 CUDA/cudart names, selects a driver-compatible numeric CUDA version (with Blackwell warnings), falls back across incomplete releases, extracts both archives into a tag/version directory, and probes `--version`/`--help`.
 - Stores the installed tag, version, executable override, and help text in the persisted config. Windows `nvidia-smi` is used as a native GPU fallback.
 
 ### `server.rs`
@@ -90,7 +90,7 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `chat(id, messages)` — POST `:port/v1/chat/completions` (instruct servers only) from Rust (avoids webview CORS).
 - `build_llamacpp_args` — pure mapping of persisted llama.cpp settings to `llama-server` flags; the runtime filters flags against the installed `--help` output.
 - Native launch fitting is capability-gated: `--fit on/off` and `--fit-target` are emitted only when supported, while `n_cpu_moe` remains the manual fallback. Structured settings take precedence over arbitrary extra flags, and all `--override-kv` entries (including the AgentWorld metadata workaround) are merged into one last-wins list.
-- `llamacpp_install.rs` selects live Windows CUDA release assets, installs the matching runtime archive, and probes `--list-devices`; Vulkan/CPU archives are not fallback builds. Native server requests use per-server API keys when configured.
+- `llamacpp_install.rs` selects live Windows CUDA release assets using `nvidia-smi`, installs the matching runtime archive, and probes `--list-devices`; Vulkan/CPU archives are not fallback builds. GitHub diagnostics include examined tags and rejected Windows assets. Native server requests use per-server API keys when configured.
 - Native servers use `NativeChild`, localhost health polling, persisted Windows logs, Prometheus metrics, and `servers_test_tool_call` for a small OpenAI tool-call smoke test.
 
 ### `state.rs`
