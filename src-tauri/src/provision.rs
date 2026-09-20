@@ -143,8 +143,13 @@ fn phase_apt(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String
     Ok("apt".into())
 }
 
+pub fn apt_done_script() -> &'static str {
+    "[ -f ~/llm-lp/.apt-done ] || (command -v pip3 >/dev/null && command -v curl >/dev/null && python3 -c 'import venv' 2>/dev/null && echo yes) || echo no"
+}
+
 fn apt_done(distro: &str) -> bool {
-    wsl::run_script(distro, "command -v python3-venv >/dev/null && command -v pip3 >/dev/null && command -v curl >/dev/null && echo yes").stdout == "yes"
+    let out = wsl::run_script(distro, apt_done_script());
+    out.stdout.trim() == "yes" || out.stdout.trim().contains(".apt-done") || out.ok && !out.stdout.contains("no")
 }
 
 fn mark_apt_done(distro: &str) {
@@ -267,4 +272,16 @@ fn phase_verify(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str
         bf16_supported,
     };
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apt_done_command_format() {
+        let cmd = apt_done_script();
+        assert!(cmd.contains(".apt-done"));
+        assert!(cmd.contains("python3"));
+    }
 }
