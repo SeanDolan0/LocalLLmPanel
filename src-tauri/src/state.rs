@@ -210,7 +210,7 @@ pub struct MemorySettings {
 }
 
 fn default_gpu_mem_util() -> f64 {
-    0.92
+    0.85
 }
 
 fn default_vram_overhead() -> f64 {
@@ -224,7 +224,7 @@ fn default_safety_reserve() -> u64 {
 impl Default for MemorySettings {
     fn default() -> Self {
         Self {
-            default_gpu_mem_util: 0.92,
+            default_gpu_mem_util: 0.85,
             vram_overhead_mb: 2500.0,
             enable_ram_overflow: true,
             manual_ram_limit_mb: None,
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn test_memory_settings_default_and_roundtrip() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.memory_settings.default_gpu_mem_util, 0.92);
+        assert_eq!(cfg.memory_settings.default_gpu_mem_util, 0.85);
         assert_eq!(cfg.memory_settings.vram_overhead_mb, 2500.0);
         assert!(cfg.memory_settings.enable_ram_overflow);
         assert_eq!(cfg.memory_settings.safety_reserve_mb, 4096);
@@ -849,7 +849,7 @@ mod tests {
 
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.memory_settings.default_gpu_mem_util, 0.92);
+        assert_eq!(parsed.memory_settings.default_gpu_mem_util, 0.85);
         assert_eq!(parsed.memory_settings, cfg.memory_settings);
 
         // Verify partial/missing JSON defaults

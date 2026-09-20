@@ -518,7 +518,7 @@ function NewServerForm({
   const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
   const [task, setTask] = useState<"instruct" | "embed">(initialTask || "instruct");
   const [quant, setQuant] = useState(initialQuant || "fp16");
-  const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.92");
+  const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.85");
   const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
   const [swapSpaceGb, setSwapSpaceGb] = useState<string>(
     initialSwapSpace !== undefined ? String(initialSwapSpace) : ""
@@ -582,7 +582,7 @@ function NewServerForm({
         name: name.trim() || modelId.split("/").pop() || "server",
         task,
         quant,
-        gpu_mem_util: parseFloat(gpuUtil) || 0.92,
+        gpu_mem_util: parseFloat(gpuUtil) || 0.85,
         max_model_len: maxLen ? parseInt(maxLen, 10) : undefined,
         swap_space_gb: parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
         cpu_offload_gb: parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,

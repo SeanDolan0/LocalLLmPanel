@@ -4,6 +4,8 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
+use crate::state::GpuSnapshot;
+
 /// Convert a Windows (or already-WSL) path to the WSL mount path.
 ///
 /// `D:\AI\qwen` -> `/mnt/d/AI/qwen`. Paths already inside WSL
@@ -404,6 +406,30 @@ impl WslChild {
             let _ = h.join();
         }
     }
+}
+
+/// Query the primary GPU's name, total VRAM (MB), free VRAM (MB), and utilization (%) via nvidia-smi inside WSL.
+pub fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
+    let out = run_script(
+        distro,
+        "nvidia-smi --query-gpu=name,memory.total,memory.free,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1",
+    );
+    let line = out.stdout.trim();
+    if line.is_empty() {
+        return None;
+    }
+    // "NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12227, 8456, 12"
+    let mut it = line.split(',');
+    let name = it.next()?.trim().to_string();
+    let total = it.next()?.trim().parse::<u64>().ok()?;
+    let free = it.next()?.trim().parse::<u64>().ok()?;
+    let util = it.next()?.trim().parse::<u32>().ok().unwrap_or(0);
+    Some(GpuSnapshot {
+        name,
+        vram_total_mb: total,
+        vram_free_mb: free,
+        util_percent: util,
+    })
 }
 
 #[cfg(test)]

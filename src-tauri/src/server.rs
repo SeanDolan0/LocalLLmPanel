@@ -185,9 +185,9 @@ fn launch_script(
         }
     }
 
-    // Environment variables
-    let preamble = "export VLLM_WSL2_ENABLE_PIN_MEMORY=1";
-    parts.insert(0, preamble.into());
+    // Environment variables (WSL2 vLLM requirements: bypass UVA pin-memory bug & use spawn workers)
+    parts.insert(0, "export VLLM_WORKER_MULTIPROC_METHOD=spawn".into());
+    parts.insert(0, "export VLLM_WSL2_ENABLE_PIN_MEMORY=1".into());
     if !adv.log_level.trim().is_empty() {
         parts.insert(
             0,
@@ -284,7 +284,7 @@ fn emit_status(
 pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
     let distro = state.resolve_distro();
-    let def = cfg
+    let mut def = cfg
         .find_server(id)
         .cloned()
         .ok_or_else(|| anyhow!("no server with id {id}"))?;
@@ -293,6 +293,26 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         if let Some(ls) = servers.get(id) {
             if ls.status == ServerStatus::Running || ls.status == ServerStatus::Starting {
                 bail!("server {} already {}", def.name, ls.status.label());
+            }
+        }
+    }
+
+    // Dynamically clamp GPU memory utilization based on currently available VRAM
+    // to prevent vLLM startup ValueError when Windows/desktop processes occupy VRAM.
+    let mut vram_notice: Option<String> = None;
+    if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
+        if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
+            let free_ratio = snap.vram_free_mb as f64 / snap.vram_total_mb as f64;
+            // Reserve 4% safety margin below actual free VRAM for PyTorch/CUDA init context & desktop fluctuation
+            let safe_max = (free_ratio - 0.04).clamp(0.10, 0.95);
+            let safe_max_rounded = (safe_max * 100.0).floor() / 100.0;
+            if def.gpu_mem_util > safe_max_rounded {
+                let orig = def.gpu_mem_util;
+                def.gpu_mem_util = safe_max_rounded;
+                vram_notice = Some(format!(
+                    "[LocalLLmPanel] Free VRAM is {} MB / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} to prevent startup crash.",
+                    snap.vram_free_mb, snap.vram_total_mb, free_ratio * 100.0, orig, def.gpu_mem_util
+                ));
             }
         }
     }
@@ -326,6 +346,19 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
 
     {
         let mut servers = state.servers.lock().unwrap();
+        let mut log_ring = VecDequeLog::new();
+        if let Some(ref notice) = vram_notice {
+            log_ring.push(notice.clone());
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "server-log",
+                    ServerLogEvent {
+                        id: id.to_string(),
+                        line: notice.clone(),
+                    },
+                );
+            }
+        }
         servers.insert(
             id.to_string(),
             LiveServer {
@@ -334,7 +367,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 error: None,
                 wsl_child: Some(child),
                 wsl_pid: Some(wsl_pid),
-                log_ring: std::sync::Mutex::new(VecDequeLog::new()),
+                log_ring: std::sync::Mutex::new(log_ring),
                 last_metrics: None,
                 stopping: false,
                 crash_retry_count: existing_retry,
@@ -361,6 +394,23 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         let mut ok = false;
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         while Instant::now() < deadline {
+            let exited = {
+                let mut servers = state_task.servers.lock().unwrap();
+                servers
+                    .get_mut(&id_task)
+                    .and_then(|ls| ls.wsl_child.as_mut())
+                    .and_then(|c| c.try_wait().ok().flatten())
+            };
+            if let Some(exit) = exited {
+                emit_status(
+                    app.as_ref(),
+                    &id_task,
+                    ServerStatus::Error,
+                    Some(format!("vLLM process exited ({exit})")),
+                );
+                update_status(&state_task, &id_task, ServerStatus::Error);
+                return;
+            }
             if let Ok(resp) = http.get(&url).send().await {
                 if resp.status().is_success() {
                     ok = true;
@@ -1340,6 +1390,7 @@ mod tests {
             "command must include --cpu-offload-gb 4: {cmd}"
         );
         assert!(cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY=1"));
+        assert!(cmd.contains("export VLLM_WORKER_MULTIPROC_METHOD=spawn"));
     }
 
     #[test]

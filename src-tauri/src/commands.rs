@@ -40,26 +40,7 @@ pub struct EnvStatus {
 }
 
 fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
-    let out = crate::wsl::run_script(
-        distro,
-        "nvidia-smi --query-gpu=name,memory.total,memory.free,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1",
-    );
-    let line = out.stdout.trim();
-    if line.is_empty() {
-        return None;
-    }
-    // "NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12227, 8456, 12"
-    let mut it = line.split(',');
-    let name = it.next()?.trim().to_string();
-    let total = it.next()?.trim().parse::<u64>().ok()?;
-    let free = it.next()?.trim().parse::<u64>().ok()?;
-    let util = it.next()?.trim().parse::<u32>().ok().unwrap_or(0);
-    Some(GpuSnapshot {
-        name,
-        vram_total_mb: total,
-        vram_free_mb: free,
-        util_percent: util,
-    })
+    crate::wsl::gpu_snapshot(distro)
 }
 
 #[tauri::command]
@@ -707,7 +688,7 @@ pub async fn model_stats(
         .iter()
         .find(|s| s.model_id == model_id)
         .map(|s| s.gpu_mem_util)
-        .unwrap_or(0.92);
+        .unwrap_or(st.config().memory_settings.default_gpu_mem_util);
     let (weight_gb, context_fit) = match (stats.params_b, kv_bpt, vram_mb) {
         (Some(pb), Some(kb), vram) if vram > 0 => {
             let wb = estimate::weight_gb(pb, &quant);
@@ -964,7 +945,9 @@ pub async fn servers_create(
                     );
                     Some(estimate::context_fit(
                         g.vram_total_mb as f64,
-                        input.gpu_mem_util.unwrap_or(0.92),
+                        input
+                            .gpu_mem_util
+                            .unwrap_or(st.config().memory_settings.default_gpu_mem_util),
                         s.params_b.unwrap(),
                         &quant,
                         kvb,
@@ -999,7 +982,9 @@ pub async fn servers_create(
         model_id: input.model_id,
         task,
         port,
-        gpu_mem_util: input.gpu_mem_util.unwrap_or(0.92),
+        gpu_mem_util: input
+            .gpu_mem_util
+            .unwrap_or(st.config().memory_settings.default_gpu_mem_util),
         max_model_len,
         quant,
         served_model_name: input.served_model_name.filter(|s| !s.trim().is_empty()),
