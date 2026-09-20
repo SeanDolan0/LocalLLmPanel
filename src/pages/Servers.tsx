@@ -4,7 +4,7 @@ import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../a
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import { effectiveModelName } from "../types";
-import type { ServerListRow, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot } from "../types";
+import type { ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot } from "../types";
 
 export default function Servers() {
   const location = useLocation();
@@ -18,6 +18,15 @@ export default function Servers() {
   const [prefillCpuOffload, setPrefillCpuOffload] = useState<number | undefined>(undefined);
   const [prefillMaxLen, setPrefillMaxLen] = useState<number | undefined>(undefined);
   const [prefillVramContext, setPrefillVramContext] = useState<number | undefined>(undefined);
+  const [prefillGpuUtil, setPrefillGpuUtil] = useState<number | undefined>(undefined);
+  const [prefillServed, setPrefillServed] = useState<string | undefined>(undefined);
+  const [prefillTask, setPrefillTask] = useState<"instruct" | "embed" | undefined>(undefined);
+
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [showImportRecipe, setShowImportRecipe] = useState(false);
+  const [recipeInput, setRecipeInput] = useState("");
+  const [recipeErr, setRecipeErr] = useState<string | null>(null);
+
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
   // log buffers per server (event-driven + hydrated)
@@ -32,6 +41,41 @@ export default function Servers() {
     setPrefillCpuOffload(undefined);
     setPrefillMaxLen(undefined);
     setPrefillVramContext(undefined);
+    setPrefillGpuUtil(undefined);
+    setPrefillServed(undefined);
+    setPrefillTask(undefined);
+  };
+
+  const copyRecipe = async (def: ServerDef) => {
+    try {
+      const jsonStr = await api.serverRecipeExport(def.id);
+      await navigator.clipboard.writeText(jsonStr);
+      setCopiedId(def.id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (e) {
+      setErr(`Failed to copy recipe: ${e}`);
+    }
+  };
+
+  const applyRecipe = async () => {
+    setRecipeErr(null);
+    if (!recipeInput.trim()) return;
+    try {
+      const r = await api.serverRecipeParse(recipeInput.trim());
+      setPrefillModel(r.model_id);
+      setPrefillQuant(r.quant);
+      setPrefillSwapSpace(r.swap_space_gb ?? undefined);
+      setPrefillCpuOffload(r.cpu_offload_gb ?? undefined);
+      setPrefillMaxLen(r.max_model_len ?? undefined);
+      setPrefillGpuUtil(r.gpu_mem_util);
+      setPrefillServed(r.served_model_name ?? undefined);
+      setPrefillTask(r.task as "instruct" | "embed");
+      setShowImportRecipe(false);
+      setRecipeInput("");
+      setShowNew(true);
+    } catch (e) {
+      setRecipeErr(`Invalid recipe JSON: ${e}`);
+    }
   };
 
   // Check navigation state for prefill model, quant, swap, offload, and context (e.g. from Search or Library Deploy)
@@ -172,8 +216,54 @@ export default function Servers() {
 
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-100">Servers</h1>
-        <Button onClick={() => setShowNew((s) => !s)}>{showNew ? "Cancel" : "+ New server"}</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="subtle" onClick={() => setShowImportRecipe(true)}>
+            Import Recipe
+          </Button>
+          <Button onClick={() => setShowNew((s) => !s)}>{showNew ? "Cancel" : "+ New server"}</Button>
+        </div>
       </div>
+
+      {showImportRecipe && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-xl border border-edge bg-surface-1 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-bold text-slate-100">Import Server Recipe</h2>
+              <button
+                onClick={() => {
+                  setShowImportRecipe(false);
+                  setRecipeErr(null);
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Paste a portable server recipe JSON snippet to prefill all configuration fields for a new server.
+            </p>
+            {recipeErr && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-2.5 text-xs text-red-300">
+                {recipeErr}
+              </div>
+            )}
+            <textarea
+              className="w-full h-44 rounded-lg border border-edge bg-surface-2 p-3 font-mono text-xs text-slate-200 focus:border-indigo-500 focus:outline-none"
+              placeholder={'{\n  "schema": "local-llm-panel/server-recipe/v1",\n  "model_id": "meta-llama/Llama-3.1-8B-Instruct",\n  "task": "instruct",\n  "port": 8000,\n  "gpu_mem_util": 0.9,\n  "quant": "awq"\n}'}
+              value={recipeInput}
+              onChange={(e) => setRecipeInput(e.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setShowImportRecipe(false)}>
+                Cancel
+              </Button>
+              <Button onClick={applyRecipe} disabled={!recipeInput.trim()}>
+                Apply Recipe
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {err && <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{err}</div>}
 
@@ -186,6 +276,9 @@ export default function Servers() {
           initialCpuOffload={prefillCpuOffload}
           initialMaxLen={prefillMaxLen}
           initialVramContext={prefillVramContext}
+          initialGpuUtil={prefillGpuUtil}
+          initialServed={prefillServed}
+          initialTask={prefillTask}
           onDone={(s) => {
             setShowNew(false);
             clearPrefills();
@@ -274,6 +367,15 @@ export default function Servers() {
                       Restart
                     </Button>
                   )}
+                  <Button
+                    variant="ghost"
+                    title="Copy portable server recipe JSON to clipboard"
+                    onClick={() => {
+                      copyRecipe(r.def);
+                    }}
+                  >
+                    {copiedId === r.def.id ? "Copied!" : "Recipe"}
+                  </Button>
                   <Button variant="subtle" disabled={busy === r.def.id} onClick={() => { if (confirm(`Delete server "${r.def.name}"?`)) act(r.def.id, () => api.serversDelete(r.def.id)); }}>
                     ✕
                   </Button>
@@ -391,6 +493,9 @@ function NewServerForm({
   initialCpuOffload,
   initialMaxLen,
   initialVramContext,
+  initialGpuUtil,
+  initialServed,
+  initialTask,
   onDone,
   onCancel,
   onErr,
@@ -402,15 +507,18 @@ function NewServerForm({
   initialCpuOffload?: number;
   initialMaxLen?: number;
   initialVramContext?: number;
+  initialGpuUtil?: number;
+  initialServed?: string;
+  initialTask?: "instruct" | "embed";
   onDone: (s: { id: string }) => void;
   onCancel: () => void;
   onErr: (e: string) => void;
 }) {
   const [modelId, setModelId] = useState(initialModelId);
   const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
-  const [task, setTask] = useState<"instruct" | "embed">("instruct");
+  const [task, setTask] = useState<"instruct" | "embed">(initialTask || "instruct");
   const [quant, setQuant] = useState(initialQuant || "fp16");
-  const [gpuUtil, setGpuUtil] = useState("0.92");
+  const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.92");
   const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
   const [swapSpaceGb, setSwapSpaceGb] = useState<string>(
     initialSwapSpace !== undefined ? String(initialSwapSpace) : ""
@@ -419,7 +527,7 @@ function NewServerForm({
     initialCpuOffload !== undefined ? String(initialCpuOffload) : ""
   );
   const [vramContextLimit, setVramContextLimit] = useState<number | undefined>(initialVramContext);
-  const [served, setServed] = useState("");
+  const [served, setServed] = useState(initialServed || "");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -442,7 +550,26 @@ function NewServerForm({
     if (initialVramContext !== undefined) {
       setVramContextLimit(initialVramContext);
     }
-  }, [initialModelId, initialQuant, initialSwapSpace, initialCpuOffload, initialMaxLen, initialVramContext]);
+    if (initialGpuUtil !== undefined) {
+      setGpuUtil(String(initialGpuUtil));
+    }
+    if (initialServed !== undefined) {
+      setServed(initialServed);
+    }
+    if (initialTask !== undefined) {
+      setTask(initialTask);
+    }
+  }, [
+    initialModelId,
+    initialQuant,
+    initialSwapSpace,
+    initialCpuOffload,
+    initialMaxLen,
+    initialVramContext,
+    initialGpuUtil,
+    initialServed,
+    initialTask,
+  ]);
 
   const submit = async () => {
     if (!modelId.trim()) return;

@@ -132,6 +132,11 @@ export const api = {
   getSystemMemory: () => invoke<SystemMemoryInfo>("get_system_memory"),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   wslDistros: () => invoke<string[]>("wsl_distros"),
+  configExport: () => invoke<string>("config_export"),
+  configImport: (json: string) => invoke<Settings>("config_import", { json }),
+  serverRecipeExport: (serverId: string) => invoke<string>("server_recipe_export", { serverId }),
+  serverRecipeParse: (json: string) =>
+    invoke<import("./types").ServerRecipe>("server_recipe_parse", { json }),
 };
 
 export async function getMemorySettings(): Promise<MemorySettings> {

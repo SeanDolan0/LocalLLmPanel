@@ -401,3 +401,33 @@ export interface ServerMetricPoint {
   requests_running: number;
   requests_waiting: number;
 }
+
+export interface ServerRecipe {
+  schema?: string;
+  model_id: string;
+  task: string;
+  port: number;
+  gpu_mem_util: number;
+  quant: string;
+  max_model_len?: number | null;
+  served_model_name?: string | null;
+  enforce_eager: boolean;
+  swap_space_gb?: number | null;
+  cpu_offload_gb?: number | null;
+}
+
+export interface ConfigExportPackage {
+  schema: string;
+  exported_at: string;
+  distro: string;
+  llm_dir: string;
+  venv_dir: string;
+  default_quant: string;
+  servers: ServerDef[];
+  memory_settings: MemorySettings;
+  advanced_settings: AdvancedSettings;
+  minimize_to_tray: boolean;
+  resume_servers_on_launch: boolean;
+  auto_restart_crashed: boolean;
+  launch_at_login: boolean;
+}

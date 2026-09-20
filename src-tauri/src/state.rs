@@ -348,8 +348,8 @@ impl PersistedConfig {
 
     pub fn load() -> Self {
         let path = Self::path();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str(&text) {
+        let mut cfg = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<PersistedConfig>(&text) {
                 Ok(cfg) => cfg,
                 Err(_) => {
                     // Corrupt config: back it up and start fresh.
@@ -358,7 +358,13 @@ impl PersistedConfig {
                 }
             },
             Err(_) => Self::default(),
+        };
+        if cfg.hf_token.starts_with("dpapi:") {
+            if let Ok(plain) = crate::security::decrypt_token(&cfg.hf_token) {
+                cfg.hf_token = plain;
+            }
         }
+        cfg
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -366,7 +372,13 @@ impl PersistedConfig {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
         }
-        let text = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        let mut on_disk = self.clone();
+        if !on_disk.hf_token.is_empty() && !on_disk.hf_token.starts_with("dpapi:") {
+            if let Ok(enc) = crate::security::encrypt_token(&on_disk.hf_token) {
+                on_disk.hf_token = enc;
+            }
+        }
+        let text = serde_json::to_string_pretty(&on_disk).map_err(|e| format!("serialize: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
@@ -376,6 +388,101 @@ impl PersistedConfig {
     pub fn find_server(&self, id: &str) -> Option<&ServerDef> {
         self.servers.iter().find(|s| s.id == id)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Portable Server Recipe & Full Config Export
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerRecipe {
+    #[serde(default = "default_recipe_schema")]
+    pub schema: String,
+    pub model_id: String,
+    pub task: String,
+    pub port: u16,
+    pub gpu_mem_util: f64,
+    pub quant: String,
+    #[serde(default)]
+    pub max_model_len: Option<usize>,
+    #[serde(default)]
+    pub served_model_name: Option<String>,
+    #[serde(default)]
+    pub enforce_eager: bool,
+    #[serde(default)]
+    pub swap_space_gb: Option<usize>,
+    #[serde(default)]
+    pub cpu_offload_gb: Option<usize>,
+}
+
+fn default_recipe_schema() -> String {
+    "local-llm-panel/server-recipe/v1".to_string()
+}
+
+impl ServerRecipe {
+    pub fn from_server_def(def: &ServerDef) -> Self {
+        Self {
+            schema: default_recipe_schema(),
+            model_id: def.model_id.clone(),
+            task: def.task.clone(),
+            port: def.port,
+            gpu_mem_util: def.gpu_mem_util,
+            quant: def.quant.clone(),
+            max_model_len: def.max_model_len,
+            served_model_name: def.served_model_name.clone(),
+            enforce_eager: def.enforce_eager,
+            swap_space_gb: def.swap_space_gb,
+            cpu_offload_gb: def.cpu_offload_gb,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigExportPackage {
+    #[serde(default = "default_config_export_schema")]
+    pub schema: String,
+    pub exported_at: String,
+    pub distro: String,
+    pub llm_dir: String,
+    pub venv_dir: String,
+    pub default_quant: String,
+    pub servers: Vec<ServerDef>,
+    pub memory_settings: MemorySettings,
+    pub advanced_settings: AdvancedSettings,
+    pub minimize_to_tray: bool,
+    pub resume_servers_on_launch: bool,
+    pub auto_restart_crashed: bool,
+    pub launch_at_login: bool,
+}
+
+fn default_config_export_schema() -> String {
+    "local-llm-panel/config-export/v1".to_string()
+}
+
+impl ConfigExportPackage {
+    pub fn from_persisted(cfg: &PersistedConfig) -> Self {
+        Self {
+            schema: default_config_export_schema(),
+            exported_at: chrono_or_simple_timestamp(),
+            distro: cfg.distro.clone(),
+            llm_dir: cfg.llm_dir.clone(),
+            venv_dir: cfg.venv_dir.clone(),
+            default_quant: cfg.default_quant.clone(),
+            servers: cfg.servers.clone(),
+            memory_settings: cfg.memory_settings.clone(),
+            advanced_settings: cfg.advanced_settings.clone(),
+            minimize_to_tray: cfg.minimize_to_tray,
+            resume_servers_on_launch: cfg.resume_servers_on_launch,
+            auto_restart_crashed: cfg.auto_restart_crashed,
+            launch_at_login: cfg.launch_at_login,
+        }
+    }
+}
+
+fn chrono_or_simple_timestamp() -> String {
+    let now = std::time::SystemTime::now();
+    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    format!("{}", dur.as_secs())
 }
 
 // ---------------------------------------------------------------------------
@@ -881,5 +988,79 @@ mod tests {
         assert_eq!(parsed.minimize_to_tray, false);
         assert_eq!(parsed.launch_at_login, true);
         assert_eq!(parsed.servers[0].was_running, true);
+    }
+
+    #[test]
+    fn test_server_recipe_and_config_export_roundtrip() {
+        use super::{ConfigExportPackage, ServerDef, ServerRecipe};
+        let def = ServerDef {
+            id: "recipe-test".into(),
+            name: "Qwen 7B".into(),
+            model_id: "Qwen/Qwen2.5-7B-Instruct".into(),
+            task: "instruct".into(),
+            port: 8088,
+            gpu_mem_util: 0.92,
+            max_model_len: Some(8192),
+            quant: "fp8".into(),
+            served_model_name: Some("qwen-7b".into()),
+            enforce_eager: false,
+            params_b: Some(7.6),
+            swap_space_gb: Some(4),
+            cpu_offload_gb: Some(2),
+            was_running: false,
+        };
+
+        let recipe = ServerRecipe::from_server_def(&def);
+        assert_eq!(recipe.model_id, "Qwen/Qwen2.5-7B-Instruct");
+        assert_eq!(recipe.port, 8088);
+        assert_eq!(recipe.swap_space_gb, Some(4));
+
+        let text = serde_json::to_string_pretty(&recipe).unwrap();
+        let parsed_recipe: ServerRecipe = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed_recipe, recipe);
+
+        let mut cfg = super::PersistedConfig::default();
+        cfg.servers.push(def);
+        let export_pkg = ConfigExportPackage::from_persisted(&cfg);
+        let export_json = serde_json::to_string_pretty(&export_pkg).unwrap();
+        let parsed_pkg: ConfigExportPackage = serde_json::from_str(&export_json).unwrap();
+        assert_eq!(parsed_pkg.servers.len(), 1);
+        assert_eq!(parsed_pkg.servers[0].id, "recipe-test");
+    }
+
+    #[test]
+    fn test_dpapi_persisted_config_disk_simulation() {
+        use super::PersistedConfig;
+        let mut cfg = PersistedConfig::default();
+        cfg.hf_token = "hf_super_secret_test_token_9988".to_string();
+
+        let tmp_dir = std::env::temp_dir().join("localllm_dpapi_test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let tmp_file = tmp_dir.join("test_config.json");
+
+        // Manually do what save() does
+        let mut on_disk = cfg.clone();
+        if !on_disk.hf_token.is_empty() && !on_disk.hf_token.starts_with("dpapi:") {
+            if let Ok(enc) = crate::security::encrypt_token(&on_disk.hf_token) {
+                on_disk.hf_token = enc;
+            }
+        }
+        let serialized = serde_json::to_string_pretty(&on_disk).unwrap();
+        // File contents MUST NOT contain the plain token!
+        assert!(!serialized.contains("hf_super_secret_test_token_9988"));
+        assert!(serialized.contains("dpapi:"));
+        std::fs::write(&tmp_file, &serialized).unwrap();
+
+        // Manually do what load() does
+        let read_back = std::fs::read_to_string(&tmp_file).unwrap();
+        let mut loaded: PersistedConfig = serde_json::from_str(&read_back).unwrap();
+        if loaded.hf_token.starts_with("dpapi:") {
+            if let Ok(plain) = crate::security::decrypt_token(&loaded.hf_token) {
+                loaded.hf_token = plain;
+            }
+        }
+
+        assert_eq!(loaded.hf_token, "hf_super_secret_test_token_9988");
+        let _ = std::fs::remove_file(&tmp_file);
     }
 }

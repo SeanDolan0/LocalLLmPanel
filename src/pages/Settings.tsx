@@ -19,6 +19,8 @@ export default function Settings() {
   const [memSaved, setMemSaved] = useState(false);
   const [distros, setDistros] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [showLanModal, setShowLanModal] = useState(false);
+  const [importExportMsg, setImportExportMsg] = useState<string | null>(null);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -28,6 +30,41 @@ export default function Settings() {
   const toggleMode = (newMode: "simple" | "advanced") => {
     setMode(newMode);
     localStorage.setItem("llm_panel_settings_mode", newMode);
+  };
+
+  const handleExportConfig = async () => {
+    try {
+      const jsonStr = await api.configExport();
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `localllm-panel-config-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setImportExportMsg("Config exported!");
+      setTimeout(() => setImportExportMsg(null), 3000);
+    } catch (e) {
+      setErr(`Export failed: ${e}`);
+    }
+  };
+
+  const handleImportConfig = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const updated = await api.configImport(text);
+      setS(updated);
+      const refreshedMem = await api.getMemorySettings();
+      setMem(refreshedMem);
+      setImportExportMsg("Config imported successfully!");
+      setTimeout(() => setImportExportMsg(null), 3000);
+    } catch (e) {
+      setErr(`Import failed: ${e}`);
+    } finally {
+      e.target.value = "";
+    }
   };
 
   useEffect(() => {
@@ -211,8 +248,71 @@ export default function Settings() {
     </Card>
   );
 
+  const renderConfigBackupCard = () => (
+    <Card>
+      <CardTitle right={importExportMsg ? <Badge color="emerald">{importExportMsg}</Badge> : undefined}>
+        Configuration Portability & Backup
+      </CardTitle>
+      <p className="text-xs text-slate-400 leading-relaxed">
+        Export your complete LocalLLM Panel configuration (WSL setup, memory presets, server definitions, and optimization settings) to a portable JSON file, or restore an existing configuration.
+      </p>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <Button variant="subtle" onClick={handleExportConfig}>
+          <span>⬇️ Export Configuration (JSON)</span>
+        </Button>
+        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-edge bg-surface-2 text-slate-300 hover:text-white cursor-pointer transition-colors">
+          <span>⬆️ Import Configuration</span>
+          <input
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={handleImportConfig}
+          />
+        </label>
+      </div>
+    </Card>
+  );
+
   return (
     <div className="mx-auto max-w-4xl p-6 space-y-6">
+      {/* LAN Access Warning Consent Modal */}
+      {showLanModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-xl border border-amber-500/40 bg-surface-1 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">⚠️</span>
+              <h2 className="text-base font-bold text-amber-300">Enable Local Network (LAN) Access?</h2>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Binding vLLM to <code className="bg-black/40 px-1 py-0.5 rounded text-amber-200">0.0.0.0</code> allows any computer, phone, or device on your local Wi-Fi / subnet to query your GPU model endpoints without Windows credentials.
+            </p>
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200/90 leading-relaxed">
+              <strong>Security Recommendation:</strong> Only enable this on a trusted home/office network, and configure an <strong>API Key</strong> to authenticate incoming requests.
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="subtle"
+                onClick={() => {
+                  setShowLanModal(false);
+                }}
+              >
+                Keep Localhost (127.0.0.1)
+              </Button>
+              <button
+                type="button"
+                onClick={() => {
+                  updateAdv({ host: "0.0.0.0" });
+                  setShowLanModal(false);
+                }}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500 transition-colors"
+              >
+                I Understand the Risks, Enable LAN
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header and Mode Switcher */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-edge/60 pb-4">
         <div>
@@ -324,13 +424,19 @@ export default function Settings() {
                   label="Hugging Face Token"
                   hint="Optional: Required for gated model families like Llama 3, Gemma, or Mistral."
                 >
-                  <input
-                    className={inputCls}
-                    type="password"
-                    placeholder="hf_…"
-                    value={s.hf_token}
-                    onChange={(e) => setS({ ...s, hf_token: e.target.value })}
-                  />
+                  <div className="space-y-1.5">
+                    <input
+                      className={inputCls}
+                      type="password"
+                      placeholder="hf_…"
+                      value={s.hf_token}
+                      onChange={(e) => setS({ ...s, hf_token: e.target.value })}
+                    />
+                    <div className="flex items-center gap-1.5 text-[11px] text-emerald-400">
+                      <span>🔒</span>
+                      <span>Encrypted at rest with Windows DPAPI (CryptProtectData). Never stored in plaintext.</span>
+                    </div>
+                  </div>
                 </Field>
               </div>
             </div>
@@ -421,6 +527,8 @@ export default function Settings() {
           </Card>
 
           {renderApplianceCard()}
+
+          {renderConfigBackupCard()}
 
           {/* Quick Notice to Switch to Advanced Mode */}
           <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4 text-xs text-slate-400 flex items-start gap-3">
@@ -529,13 +637,19 @@ export default function Settings() {
                   label="Hugging Face Token"
                   hint="Passed as HF_TOKEN to model downloads and vLLM server launches."
                 >
-                  <input
-                    className={inputCls}
-                    type="password"
-                    placeholder="hf_…"
-                    value={s.hf_token}
-                    onChange={(e) => setS({ ...s, hf_token: e.target.value })}
-                  />
+                  <div className="space-y-1.5">
+                    <input
+                      className={inputCls}
+                      type="password"
+                      placeholder="hf_…"
+                      value={s.hf_token}
+                      onChange={(e) => setS({ ...s, hf_token: e.target.value })}
+                    />
+                    <div className="flex items-center gap-1.5 text-[11px] text-emerald-400">
+                      <span>🔒</span>
+                      <span>Encrypted at rest with Windows DPAPI (CryptProtectData). Never stored in plaintext.</span>
+                    </div>
+                  </div>
                 </Field>
               </div>
             </div>
@@ -674,12 +788,31 @@ export default function Settings() {
                 <select
                   className={inputCls}
                   value={adv.host}
-                  onChange={(e) => updateAdv({ host: e.target.value })}
+                  onChange={(e) => {
+                    if (e.target.value === "0.0.0.0") {
+                      setShowLanModal(true);
+                    } else {
+                      updateAdv({ host: e.target.value });
+                    }
+                  }}
                 >
                   <option value="127.0.0.1">127.0.0.1 (Localhost Only / Secure)</option>
                   <option value="0.0.0.0">0.0.0.0 (Bind All Interfaces / LAN Access)</option>
                 </select>
               </Field>
+
+              {adv.host === "0.0.0.0" && (
+                <div className="sm:col-span-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 flex items-center justify-between">
+                  <span>⚠️ <strong>LAN Access Active:</strong> Server endpoints bind to <code>0.0.0.0</code> and accept connections from your local subnet.</span>
+                  <button
+                    type="button"
+                    onClick={() => updateAdv({ host: "127.0.0.1" })}
+                    className="ml-3 text-[11px] underline text-amber-200 hover:text-white whitespace-nowrap"
+                  >
+                    Revert to 127.0.0.1
+                  </button>
+                </div>
+              )}
 
               <Field
                 label="API Key Protection (--api-key)"
@@ -999,7 +1132,10 @@ export default function Settings() {
           {/* Section 6: Appliance & Startup Behavior */}
           {renderApplianceCard()}
 
-          {/* Section 7: .wslconfig Viewer */}
+          {/* Section 7: Configuration Portability & Backup */}
+          {renderConfigBackupCard()}
+
+          {/* Section 8: .wslconfig Viewer */}
           <Card>
             <CardTitle
               right={

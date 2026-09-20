@@ -1107,6 +1107,59 @@ pub fn autostart_set(enabled: bool) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+pub fn config_export(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let st = (*state).clone();
+    let cfg = st.config.lock().unwrap();
+    let export_pkg = crate::state::ConfigExportPackage::from_persisted(&cfg);
+    serde_json::to_string_pretty(&export_pkg).map_err(|e| format!("Failed to export config: {e}"))
+}
+
+#[tauri::command]
+pub fn config_import(state: State<'_, Arc<AppState>>, json: String) -> Result<PersistedConfig, String> {
+    let pkg: crate::state::ConfigExportPackage = serde_json::from_str(&json)
+        .map_err(|e| format!("Invalid configuration JSON format: {e}"))?;
+
+    let st = (*state).clone();
+    let mut cfg = st.config.lock().unwrap();
+    cfg.distro = pkg.distro;
+    cfg.llm_dir = pkg.llm_dir;
+    cfg.venv_dir = pkg.venv_dir;
+    cfg.default_quant = pkg.default_quant;
+    cfg.memory_settings = pkg.memory_settings;
+    cfg.advanced_settings = pkg.advanced_settings;
+    cfg.minimize_to_tray = pkg.minimize_to_tray;
+    cfg.resume_servers_on_launch = pkg.resume_servers_on_launch;
+    cfg.auto_restart_crashed = pkg.auto_restart_crashed;
+    cfg.launch_at_login = pkg.launch_at_login;
+
+    // For imported servers, ensure they start with was_running = false
+    cfg.servers = pkg.servers.into_iter().map(|mut s| {
+        s.was_running = false;
+        s
+    }).collect();
+
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub fn server_recipe_export(state: State<'_, Arc<AppState>>, server_id: String) -> Result<String, String> {
+    let st = (*state).clone();
+    let cfg = st.config.lock().unwrap();
+    let srv = cfg.find_server(&server_id)
+        .ok_or_else(|| format!("Server not found: {server_id}"))?;
+    let recipe = crate::state::ServerRecipe::from_server_def(srv);
+    serde_json::to_string_pretty(&recipe).map_err(|e| format!("Failed to serialize recipe: {e}"))
+}
+
+#[tauri::command]
+pub fn server_recipe_parse(json: String) -> Result<crate::state::ServerRecipe, String> {
+    let recipe: crate::state::ServerRecipe = serde_json::from_str(&json)
+        .map_err(|e| format!("Invalid server recipe JSON: {e}"))?;
+    Ok(recipe)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMemoryInfo {
     pub wsl_total_mb: u64,
@@ -1922,5 +1975,29 @@ mod tests {
         // Just verify autostart_get() returns a bool without panic
         let res = autostart_get();
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_server_recipe_parse_valid_and_invalid() {
+        let valid_json = r#"{
+            "schema": "local-llm-panel/server-recipe/v1",
+            "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+            "task": "instruct",
+            "port": 8000,
+            "gpu_mem_util": 0.9,
+            "quant": "awq",
+            "max_model_len": 4096,
+            "enforce_eager": true,
+            "swap_space_gb": 2
+        }"#;
+        let recipe = server_recipe_parse(valid_json.to_string()).unwrap();
+        assert_eq!(recipe.model_id, "meta-llama/Llama-3.1-8B-Instruct");
+        assert_eq!(recipe.quant, "awq");
+        assert_eq!(recipe.port, 8000);
+        assert_eq!(recipe.swap_space_gb, Some(2));
+
+        let invalid_json = r#"{ "not": "a recipe" }"#;
+        let err = server_recipe_parse(invalid_json.to_string());
+        assert!(err.is_err());
     }
 }

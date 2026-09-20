@@ -6,6 +6,7 @@ pub mod fit;
 pub mod hf;
 pub mod llmfit_adapter;
 pub mod provision;
+pub mod security;
 pub mod server;
 pub mod state;
 pub mod wsl;
@@ -139,6 +140,10 @@ pub fn run() {
             commands::wsl_distros,
             commands::autostart_get,
             commands::autostart_set,
+            commands::config_export,
+            commands::config_import,
+            commands::server_recipe_export,
+            commands::server_recipe_parse,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
