@@ -9,3 +9,8 @@
 # Tauri itself pulls getrandom 0.3.4, so this applies to the whole build.
 [build]
 rustflags = ["--cfg", "getrandom_backend=\"windows_legacy\""]
+
+# LLVM's linker is substantially faster than MSVC link.exe for this project.
+# Keep LLVM's bin directory on PATH before running Cargo/Tauri commands.
+[target.x86_64-pc-windows-msvc]
+linker = "lld-link.exe"

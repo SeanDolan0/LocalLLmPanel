@@ -194,6 +194,7 @@ export interface PullStatus {
   state: string; // downloading | complete | failed
   file?: string | null;
   percent?: number | null;
+  speed_bps?: number | null;
 }
 
 export interface WslLogEvent {

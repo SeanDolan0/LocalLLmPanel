@@ -1811,6 +1811,7 @@ pub async fn download_gguf(
             .unwrap_or("model"),
     );
     tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
         std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
         let client = reqwest::blocking::Client::new();
         for file_name in files {
@@ -1851,7 +1852,13 @@ pub async fn download_gguf(
                 let percent = total.map(|t| (done as f64 / t as f64 * 100.0) as f32);
                 let _ = app.emit(
                     "pull-progress",
-                    serde_json::json!({"model": model, "state": "downloading", "file": file_name, "percent": percent}),
+                    serde_json::json!({
+                        "model": model,
+                        "state": "downloading",
+                        "file": file_name,
+                        "percent": percent,
+                        "speed_bps": done.saturating_sub(offset) as f64 / started.elapsed().as_secs_f64().max(0.001)
+                    }),
                 );
             }
         }

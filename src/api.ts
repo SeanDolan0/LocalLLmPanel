@@ -207,6 +207,20 @@ export function fmtNum(n: number | null | undefined, digits = 0): string {
   return n.toLocaleString("en-US", { maximumFractionDigits: digits });
 }
 
+export function fmtTransferRate(bytesPerSecond: number | null | undefined): string {
+  if (bytesPerSecond === null || bytesPerSecond === undefined || !Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) {
+    return "Calculating speed…";
+  }
+  const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+  let value = bytesPerSecond;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
 export function fmtTokPerSec(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   if (n >= 1000) return `${(n / 1000).toFixed(2)}k tok/s`;

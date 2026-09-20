@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, events, fmtNum } from "../api";
+import { api, events, fmtNum, fmtTransferRate } from "../api";
 import { Badge, Button, Card, CardTitle, Spinner, inputCls } from "../ui";
 import type { LibraryEntry, PullStatus } from "../types";
 
@@ -175,18 +175,32 @@ export default function Library() {
           {Object.entries(pulls)
             .filter(([, p]) => p.state === "downloading")
             .map(([m, p]) => (
-              <div key={m} className="flex items-center justify-between gap-2">
-                <div className="truncate">
-                  <span className="text-indigo-200 font-medium">{m}</span>
-                  {p.file ? <span className="ml-2 text-slate-400">({p.file})</span> : null}
+              <div key={m} className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="truncate">
+                    <span className="text-indigo-200 font-medium">{m}</span>
+                    {p.file ? <span className="ml-2 text-slate-400">({p.file})</span> : null}
+                  </div>
+                  <span className="shrink-0 text-slate-300">{fmtTransferRate(p.speed_bps)}</span>
                 </div>
-                <Button
-                  variant="danger"
-                  className="text-xs px-2.5 py-1 shrink-0"
-                  onClick={() => handleCancelPull(m)}
-                >
-                  Cancel
-                </Button>
+                <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+                  <div
+                    className={`h-full rounded-full bg-indigo-400 transition-all ${p.percent == null ? "w-1/3 animate-pulse" : ""}`}
+                    style={p.percent == null ? undefined : { width: `${Math.max(0, Math.min(100, p.percent))}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-500">
+                    {p.percent == null ? "Downloading…" : `${p.percent.toFixed(1)}%`}
+                  </span>
+                  <Button
+                    variant="danger"
+                    className="text-xs px-2.5 py-1 shrink-0"
+                    onClick={() => handleCancelPull(m)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
               </div>
             ))}
         </div>

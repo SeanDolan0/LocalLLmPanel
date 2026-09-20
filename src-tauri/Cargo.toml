@@ -1,6 +1,6 @@
 [package]
 name = "llm-panel"
-version = "1.2.1"
+version = "1.2.2"
 description = "Local vLLM Panel — manage vLLM servers inside WSL2"
 authors = ["Local LLM Panel"]
 edition = "2021"
@@ -30,6 +30,16 @@ regex-lite = "0.1"
 llmfit-core = { path = "crates/llmfit-core" }
 
 [profile.release]
-codegen-units = 1
-lto = true
+# Thin LTO preserves cross-crate optimization while avoiding the much
+# slower whole-program optimization pass used by full LTO.
+codegen-units = 16
+lto = "thin"
+incremental = true
 strip = true
+
+# Build scripts and proc-macros do not need release optimization. Keeping
+# these fast reduces the fixed overhead of every release build.
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 256
+incremental = true

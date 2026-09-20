@@ -13,7 +13,7 @@ A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages **vLL
 - Windows 11 (WebView2), NVIDIA GPU + driver supporting CUDA ≥ 12.4 inside WSL2
 - WSL2 with an Ubuntu distro (`.wslconfig` memory recommended: `memory=24GB` as the dev machine uses)
 - For llama.cpp: an NVIDIA Windows driver and a recent CUDA-enabled llama.cpp release. WSL provisioning is not required for this backend.
-- Rust toolchain (MSVC target; VS Build Tools "Desktop development with C++" — cargo picks VS up via vswhere), Node ≥ 20
+- Rust toolchain (MSVC target; VS Build Tools "Desktop development with C++" — cargo picks VS up via vswhere), LLVM/LLD on PATH, Node ≥ 20
 
 ## Setup (dev)
 
@@ -29,6 +29,10 @@ npm run tauri build
 ```
 
 Binary outputs to `src-tauri/target/release/bundle/msi|nsis/`.
+
+The Windows Rust build uses LLVM's `lld-link.exe` for faster linking. Install
+LLVM for Windows and add its `bin` directory (normally
+`C:\Program Files\LLVM\bin`) to `PATH` before running the Tauri commands.
 
 ## Test
 
