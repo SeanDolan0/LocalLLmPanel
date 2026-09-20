@@ -127,7 +127,10 @@ fn launch_script(
         args.push("--quantization".into());
         args.push("fp8".into());
     }
-    let max_len = def.max_model_len.unwrap_or(4096);
+    let max_len = match def.max_model_len {
+        Some(len) if len > 0 => len,
+        _ => 4096,
+    };
     args.push("--max-model-len".into());
     args.push(max_len.to_string());
     if def.enforce_eager {
@@ -139,7 +142,7 @@ fn launch_script(
     }
     if let Some(swap) = def.swap_space_gb {
         if swap > 0 {
-            args.push("--swap-space".into());
+            args.push("--kv-offloading-size".into());
             args.push(swap.to_string());
         }
     }
@@ -182,6 +185,13 @@ fn launch_script(
             if !token.is_empty() {
                 args.push(token.to_string());
             }
+        }
+    }
+
+    // Modern vLLM replaces legacy --swap-space with --kv-offloading-size.
+    for arg in &mut args {
+        if arg == "--swap-space" {
+            *arg = "--kv-offloading-size".to_string();
         }
     }
 
@@ -1382,8 +1392,8 @@ mod tests {
         d.cpu_offload_gb = Some(4);
         let cmd = build_start_command(&d, "");
         assert!(
-            cmd.contains("--swap-space 8"),
-            "command must include --swap-space 8: {cmd}"
+            cmd.contains("--kv-offloading-size 8"),
+            "command must include --kv-offloading-size 8: {cmd}"
         );
         assert!(
             cmd.contains("--cpu-offload-gb 4"),
@@ -1434,8 +1444,8 @@ mod tests {
         d.cpu_offload_gb = Some(0);
         let cmd_zero = build_start_command(&d, "");
         assert!(
-            !cmd_zero.contains("--swap-space"),
-            "command must not include --swap-space: {cmd_zero}"
+            !cmd_zero.contains("--kv-offloading-size") && !cmd_zero.contains("--swap-space"),
+            "command must not include swap flags: {cmd_zero}"
         );
         assert!(
             !cmd_zero.contains("--cpu-offload-gb"),
@@ -1446,13 +1456,25 @@ mod tests {
         d.cpu_offload_gb = None;
         let cmd_none = build_start_command(&d, "");
         assert!(
-            !cmd_none.contains("--swap-space"),
-            "command must not include --swap-space: {cmd_none}"
+            !cmd_none.contains("--kv-offloading-size") && !cmd_none.contains("--swap-space"),
+            "command must not include swap flags: {cmd_none}"
         );
         assert!(
             !cmd_none.contains("--cpu-offload-gb"),
             "command must not include --cpu-offload-gb: {cmd_none}"
         );
+    }
+
+    #[test]
+    fn test_build_start_command_max_model_len_zero_falls_back_to_4096() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8010, "fp16", None);
+        d.max_model_len = Some(0);
+        let cmd = build_start_command(&d, "");
+        assert!(
+            cmd.contains("--max-model-len 4096"),
+            "max-model-len 0 must fall back to 4096: {cmd}"
+        );
+        assert!(!cmd.contains("--max-model-len 0"));
     }
 
     #[test]

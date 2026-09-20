@@ -66,7 +66,7 @@ export default function Servers() {
       setPrefillQuant(r.quant);
       setPrefillSwapSpace(r.swap_space_gb ?? undefined);
       setPrefillCpuOffload(r.cpu_offload_gb ?? undefined);
-      setPrefillMaxLen(r.max_model_len ?? undefined);
+      setPrefillMaxLen(r.max_model_len && r.max_model_len > 0 ? r.max_model_len : undefined);
       setPrefillGpuUtil(r.gpu_mem_util);
       setPrefillServed(r.served_model_name ?? undefined);
       setPrefillTask(r.task as "instruct" | "embed");
@@ -99,7 +99,7 @@ export default function Servers() {
       if (state.prefillCpuOffload !== undefined) {
         setPrefillCpuOffload(state.prefillCpuOffload);
       }
-      if (state.prefillMaxLen !== undefined) {
+      if (state.prefillMaxLen !== undefined && state.prefillMaxLen > 0) {
         setPrefillMaxLen(state.prefillMaxLen);
       }
       if (state.prefillVramContext !== undefined) {
@@ -677,7 +677,7 @@ function NewServerForm({
         </Field>
         <Field
           label="RAM Swap Space (GB)"
-          hint="vLLM --swap-space. Allocates system RAM for spilled KV cache blocks."
+          hint="vLLM RAM offload (--kv-offloading-size). Allocates system RAM for spilled KV cache blocks."
         >
           <input
             type="number"

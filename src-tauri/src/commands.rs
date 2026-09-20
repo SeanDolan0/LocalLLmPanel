@@ -919,9 +919,9 @@ pub async fn servers_create(
     let is_local_path = input.model_id.starts_with('/');
     // Default max_model_len := min(declared context, VRAM context-fit) at quant.
     let max_model_len = match input.max_model_len {
-        Some(l) => Some(l),
-        None if is_local_path => None,
-        None => {
+        Some(l) if l > 0 => Some(l),
+        _ if is_local_path => None,
+        _ => {
             let stats = hf::enrich(
                 &st.http,
                 &input.model_id,
