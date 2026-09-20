@@ -98,6 +98,7 @@ fn wsl_it() {
             params_b: Some(0.494),
             swap_space_gb: None,
             cpu_offload_gb: None,
+            was_running: false,
         });
         cfg.servers.push(ServerDef {
             id: "it-bge".into(),
@@ -113,6 +114,7 @@ fn wsl_it() {
             params_b: Some(0.033),
             swap_space_gb: None,
             cpu_offload_gb: None,
+            was_running: false,
         });
         cfg.save().expect("save config");
     }

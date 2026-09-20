@@ -31,7 +31,18 @@ export default function Settings() {
   };
 
   useEffect(() => {
-    api.settingsGet().then(setS).catch((e) => setErr(String(e)));
+    api
+      .settingsGet()
+      .then((cfg) => {
+        setS(cfg);
+        api
+          .autostartGet()
+          .then((auto) => {
+            setS((prev) => (prev ? { ...prev, launch_at_login: auto } : null));
+          })
+          .catch(() => {});
+      })
+      .catch((e) => setErr(String(e)));
     api.wslDistros().then(setDistros).catch(() => {});
     api.wslconfigGet().then(setWsl).catch(() => {});
     api
@@ -56,6 +67,10 @@ export default function Settings() {
         hf_token: s.hf_token,
         default_quant: s.default_quant,
         advanced_settings: s.advanced_settings,
+        minimize_to_tray: s.minimize_to_tray,
+        resume_servers_on_launch: s.resume_servers_on_launch,
+        auto_restart_crashed: s.auto_restart_crashed,
+        launch_at_login: s.launch_at_login,
       });
       setS(updated);
       setSaved(true);
@@ -114,6 +129,87 @@ export default function Settings() {
       },
     });
   };
+
+  const renderApplianceCard = () => (
+    <Card>
+      <CardTitle right={saved ? <Badge color="emerald">saved</Badge> : undefined}>
+        Appliance & Startup Behavior
+      </CardTitle>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">
+          <input
+            type="checkbox"
+            checked={!!s.minimize_to_tray}
+            onChange={(e) => setS({ ...s, minimize_to_tray: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-200">
+              Minimize to System Tray
+            </div>
+            <div className="text-xs text-slate-400 leading-relaxed">
+              Closing the window hides it into the system notification tray instead of stopping servers.
+            </div>
+          </div>
+        </label>
+
+        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">
+          <input
+            type="checkbox"
+            checked={!!s.launch_at_login}
+            onChange={(e) => setS({ ...s, launch_at_login: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-200">
+              Launch at Windows Login
+            </div>
+            <div className="text-xs text-slate-400 leading-relaxed">
+              Starts LocalLLM Panel automatically when signing into Windows (via HKCU Run registry).
+            </div>
+          </div>
+        </label>
+
+        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">
+          <input
+            type="checkbox"
+            checked={!!s.resume_servers_on_launch}
+            onChange={(e) => setS({ ...s, resume_servers_on_launch: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-200">
+              Auto-Resume Running Servers
+            </div>
+            <div className="text-xs text-slate-400 leading-relaxed">
+              Automatically boots up model servers that were actively running when the panel was closed.
+            </div>
+          </div>
+        </label>
+
+        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">
+          <input
+            type="checkbox"
+            checked={!!s.auto_restart_crashed}
+            onChange={(e) => setS({ ...s, auto_restart_crashed: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-200">
+              Auto-Restart Crashed Servers
+            </div>
+            <div className="text-xs text-slate-400 leading-relaxed">
+              Monitors background server processes and restarts them with backoff if they crash.
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div className="mt-4 flex justify-end">
+        <Button onClick={save}>Save Startup Settings</Button>
+      </div>
+    </Card>
+  );
 
   return (
     <div className="mx-auto max-w-4xl p-6 space-y-6">
@@ -323,6 +419,8 @@ export default function Settings() {
               </div>
             </div>
           </Card>
+
+          {renderApplianceCard()}
 
           {/* Quick Notice to Switch to Advanced Mode */}
           <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4 text-xs text-slate-400 flex items-start gap-3">
@@ -898,7 +996,10 @@ export default function Settings() {
             </div>
           </Card>
 
-          {/* Section 6: .wslconfig Viewer */}
+          {/* Section 6: Appliance & Startup Behavior */}
+          {renderApplianceCard()}
+
+          {/* Section 7: .wslconfig Viewer */}
           <Card>
             <CardTitle
               right={

@@ -10,7 +10,11 @@ pub mod server;
 pub mod state;
 pub mod wsl;
 
+use std::sync::Arc;
 use state::AppState;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::Manager;
 
 #[cfg(test)]
 mod it;
@@ -18,7 +22,81 @@ mod it;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(std::sync::Arc::new(AppState::new()))
+        .manage(Arc::new(AppState::new()))
+        .setup(|app| {
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "Open Panel", true, None::<&str>)?;
+            let stop_all_i = MenuItem::with_id(app, "stop_all", "Stop All Servers", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &stop_all_i, &quit_i])?;
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _tray = TrayIconBuilder::new()
+                    .icon(icon)
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "stop_all" => {
+                            let state: tauri::State<Arc<AppState>> = app.state();
+                            let server_ids: Vec<String> = {
+                                let srvs = state.servers.lock().unwrap();
+                                srvs.keys().cloned().collect()
+                            };
+                            for id in server_ids {
+                                let _ = crate::server::stop_server(&state, Some(app), &id);
+                            }
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .build(app)?;
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let state: tauri::State<Arc<AppState>> = app_handle.state();
+                        let minimize = state.config.lock().unwrap().minimize_to_tray;
+                        if minimize {
+                            api.prevent_close();
+                            let _ = window_clone.hide();
+                        }
+                    }
+                });
+            }
+
+            let app_handle_for_resume = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let state: tauri::State<Arc<AppState>> = app_handle_for_resume.state();
+                server::resume_servers_if_configured(&state, Some(&app_handle_for_resume)).await;
+            });
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::env_status,
             commands::provision,
@@ -59,6 +137,8 @@ pub fn run() {
             commands::get_system_memory,
             commands::open_url,
             commands::wsl_distros,
+            commands::autostart_get,
+            commands::autostart_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

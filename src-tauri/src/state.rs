@@ -138,6 +138,8 @@ pub struct ServerDef {
     pub swap_space_gb: Option<usize>,
     #[serde(default)]
     pub cpu_offload_gb: Option<usize>,
+    #[serde(default)]
+    pub was_running: bool,
 }
 
 fn default_true() -> bool {
@@ -303,6 +305,14 @@ pub struct PersistedConfig {
     pub memory_settings: MemorySettings,
     #[serde(default)]
     pub advanced_settings: AdvancedSettings,
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+    #[serde(default = "default_true")]
+    pub resume_servers_on_launch: bool,
+    #[serde(default = "default_true")]
+    pub auto_restart_crashed: bool,
+    #[serde(default)]
+    pub launch_at_login: bool,
 }
 
 pub type AppConfig = PersistedConfig;
@@ -320,6 +330,10 @@ impl Default for PersistedConfig {
             measured: HashMap::new(),
             memory_settings: MemorySettings::default(),
             advanced_settings: AdvancedSettings::default(),
+            minimize_to_tray: true,
+            resume_servers_on_launch: true,
+            auto_restart_crashed: true,
+            launch_at_login: false,
         }
     }
 }
@@ -409,6 +423,7 @@ pub struct LiveServer {
     pub last_metrics: Option<MetricsSnapshot>,
     /// Set when we called stop() ourselves (so the monitor doesn't flag error).
     pub stopping: bool,
+    pub crash_retry_count: u32,
 }
 
 pub struct VecDequeLog {
@@ -624,6 +639,7 @@ mod tests {
             params_b: None,
             swap_space_gb: None,
             cpu_offload_gb: None,
+            was_running: false,
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -830,5 +846,40 @@ mod tests {
         let q = srv_m.get("test-server").unwrap();
         assert_eq!(q.len(), METRICS_SERIES_CAPACITY);
         assert_eq!(q.back().unwrap().tok_s, 40.0 + ((METRICS_SERIES_CAPACITY + 14) as f64));
+    }
+
+    #[test]
+    fn test_appliance_settings_and_was_running_roundtrip() {
+        use super::{PersistedConfig, ServerDef};
+        let mut cfg = PersistedConfig::default();
+        assert!(cfg.minimize_to_tray);
+        assert!(cfg.resume_servers_on_launch);
+        assert!(cfg.auto_restart_crashed);
+        assert!(!cfg.launch_at_login);
+
+        cfg.minimize_to_tray = false;
+        cfg.launch_at_login = true;
+        cfg.servers.push(ServerDef {
+            id: "s1".into(),
+            name: "test".into(),
+            model_id: "m1".into(),
+            task: "instruct".into(),
+            port: 8000,
+            gpu_mem_util: 0.9,
+            max_model_len: None,
+            quant: "fp16".into(),
+            served_model_name: None,
+            enforce_eager: true,
+            params_b: None,
+            swap_space_gb: None,
+            cpu_offload_gb: None,
+            was_running: true,
+        });
+
+        let text = serde_json::to_string(&cfg).unwrap();
+        let parsed: PersistedConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.minimize_to_tray, false);
+        assert_eq!(parsed.launch_at_login, true);
+        assert_eq!(parsed.servers[0].was_running, true);
     }
 }

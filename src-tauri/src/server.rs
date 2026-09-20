@@ -269,6 +269,11 @@ pub fn start_server(
         .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
     let wsl_pid = child.pid();
 
+    let existing_retry = {
+        let servers = state.servers.lock().unwrap();
+        servers.get(id).map(|ls| ls.crash_retry_count).unwrap_or(0)
+    };
+
     {
         let mut servers = state.servers.lock().unwrap();
         servers.insert(
@@ -282,8 +287,16 @@ pub fn start_server(
                 log_ring: std::sync::Mutex::new(VecDequeLog::new()),
                 last_metrics: None,
                 stopping: false,
+                crash_retry_count: existing_retry,
             },
         );
+    }
+    {
+        let mut cfg = state.config.lock().unwrap();
+        if let Some(d) = cfg.servers.iter_mut().find(|s| s.id == id) {
+            d.was_running = true;
+        }
+        let _ = cfg.save();
     }
     emit_status(app, id, ServerStatus::Starting, None);
 
@@ -311,6 +324,12 @@ pub fn start_server(
             update_status(&state_task, &id_task, ServerStatus::Error);
             return;
         }
+        {
+            let mut servers = state_task.servers.lock().unwrap();
+            if let Some(ls) = servers.get_mut(&id_task) {
+                ls.crash_retry_count = 0;
+            }
+        }
         emit_status(app.as_ref(), &id_task, ServerStatus::Running, None);
         update_status(&state_task, &id_task, ServerStatus::Running);
 
@@ -334,6 +353,34 @@ pub fn start_server(
             };
             if let Some(exit) = exited {
                 if !stopping {
+                    let auto_restart = {
+                        let cfg = state_task.config.lock().unwrap();
+                        cfg.auto_restart_crashed
+                    };
+                    let retry_count = {
+                        let mut servers = state_task.servers.lock().unwrap();
+                        if let Some(ls) = servers.get_mut(&id_task) {
+                            ls.crash_retry_count += 1;
+                            ls.crash_retry_count
+                        } else {
+                            4
+                        }
+                    };
+                    if auto_restart && retry_count <= 3 {
+                        let backoff = match retry_count {
+                            1 => Duration::from_secs(2),
+                            2 => Duration::from_secs(4),
+                            _ => Duration::from_secs(8),
+                        };
+                        eprintln!(
+                            "[server] auto-restarting crashed server {} (attempt {}/3 in {:?})",
+                            id_task, retry_count, backoff
+                        );
+                        tokio::time::sleep(backoff).await;
+                        let _ = start_server(&state_task, app.as_ref(), &id_task);
+                        return;
+                    }
+
                     emit_status(
                         app.as_ref(),
                         &id_task,
@@ -485,11 +532,45 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
             ls.wsl_pid = None;
             ls.error = None;
             ls.last_metrics = None;
+            ls.crash_retry_count = 0;
         }
+    }
+    {
+        let mut cfg = state.config.lock().unwrap();
+        if let Some(d) = cfg.servers.iter_mut().find(|s| s.id == id) {
+            d.was_running = false;
+        }
+        let _ = cfg.save();
     }
     let _ = term_ok;
     emit_status(app, id, ServerStatus::Stopped, None);
     Ok(())
+}
+
+/// Resume any servers that had was_running=true when the app last ran.
+pub async fn resume_servers_if_configured(state: &Arc<AppState>, app: Option<&tauri::AppHandle>) {
+    let (should_resume, servers_to_resume) = {
+        let cfg = state.config.lock().unwrap();
+        if !cfg.resume_servers_on_launch {
+            (false, Vec::new())
+        } else {
+            let to_resume: Vec<String> = cfg
+                .servers
+                .iter()
+                .filter(|s| s.was_running)
+                .map(|s| s.id.clone())
+                .collect();
+            (true, to_resume)
+        }
+    };
+    if should_resume && !servers_to_resume.is_empty() {
+        let distro = state.resolve_distro();
+        if crate::wsl::run_script(&distro, "echo ok").ok {
+            for id in servers_to_resume {
+                let _ = start_server(state, app, &id);
+            }
+        }
+    }
 }
 
 /// Restart = tolerant stop then start.
@@ -1048,6 +1129,7 @@ mod tests {
             params_b: None,
             swap_space_gb: None,
             cpu_offload_gb: None,
+            was_running: false,
         }
     }
 

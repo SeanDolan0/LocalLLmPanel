@@ -826,6 +826,7 @@ pub async fn servers_create(
         params_b,
         swap_space_gb: input.swap_space_gb,
         cpu_offload_gb: input.cpu_offload_gb,
+        was_running: false,
     };
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.push(def.clone());
@@ -995,6 +996,10 @@ pub struct SettingsPatch {
     pub hf_token: Option<String>,
     pub default_quant: Option<String>,
     pub advanced_settings: Option<crate::state::AdvancedSettings>,
+    pub minimize_to_tray: Option<bool>,
+    pub resume_servers_on_launch: Option<bool>,
+    pub auto_restart_crashed: Option<bool>,
+    pub launch_at_login: Option<bool>,
 }
 
 #[tauri::command]
@@ -1025,8 +1030,81 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, patch: SettingsPatch) -> Re
     if let Some(adv) = patch.advanced_settings {
         cfg.advanced_settings = adv;
     }
+    if let Some(m) = patch.minimize_to_tray {
+        cfg.minimize_to_tray = m;
+    }
+    if let Some(r) = patch.resume_servers_on_launch {
+        cfg.resume_servers_on_launch = r;
+    }
+    if let Some(a) = patch.auto_restart_crashed {
+        cfg.auto_restart_crashed = a;
+    }
+    if let Some(l) = patch.launch_at_login {
+        cfg.launch_at_login = l;
+        let _ = autostart_set(l);
+    }
     cfg.save().map_err(|e| e.to_string())?;
     Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub fn autostart_get() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("reg")
+            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "LocalLLmPanel"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("LocalLLmPanel"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn autostart_set(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if enabled {
+            let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let exe_str = current_exe.to_string_lossy();
+            let status = std::process::Command::new("reg")
+                .args([
+                    "add",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "LocalLLmPanel",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &format!("\"{}\"", exe_str),
+                    "/f",
+                ])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err("Failed to update autostart in Windows registry".to_string());
+            }
+        } else {
+            let _ = std::process::Command::new("reg")
+                .args([
+                    "delete",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "LocalLLmPanel",
+                    "/f",
+                ])
+                .status();
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1837,5 +1915,12 @@ mod tests {
 
         let empty_res = get_server_metrics_series(&app_state, "nonexistent");
         assert!(empty_res.is_empty());
+    }
+
+    #[test]
+    fn test_autostart_query_smoke() {
+        // Just verify autostart_get() returns a bool without panic
+        let res = autostart_get();
+        assert!(res.is_ok());
     }
 }

@@ -102,6 +102,7 @@ export interface ServerDef {
   params_b: number | null;
   swap_space_gb?: number | null;
   cpu_offload_gb?: number | null;
+  was_running?: boolean;
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -148,6 +149,10 @@ export interface Settings {
   servers: ServerDef[];
   measured: Record<string, MeasuredStats>;
   advanced_settings: AdvancedSettings;
+  minimize_to_tray?: boolean;
+  resume_servers_on_launch?: boolean;
+  auto_restart_crashed?: boolean;
+  launch_at_login?: boolean;
 }
 
 export interface PullStatus {

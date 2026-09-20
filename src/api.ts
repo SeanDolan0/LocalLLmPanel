@@ -101,8 +101,25 @@ export const api = {
   libraryRemove: (modelId: string) => invoke<void>("library_remove", { modelId }),
   libraryDiskUsage: () => invoke<number>("library_disk_usage"),
   settingsGet: () => invoke<Settings>("settings_get"),
-  settingsSet: (patch: Partial<Pick<Settings, "distro" | "llm_dir" | "venv_dir" | "hf_token" | "default_quant" | "advanced_settings">>) =>
-    invoke<Settings>("settings_set", { patch }),
+  settingsSet: (
+    patch: Partial<
+      Pick<
+        Settings,
+        | "distro"
+        | "llm_dir"
+        | "venv_dir"
+        | "hf_token"
+        | "default_quant"
+        | "advanced_settings"
+        | "minimize_to_tray"
+        | "resume_servers_on_launch"
+        | "auto_restart_crashed"
+        | "launch_at_login"
+      >
+    >
+  ) => invoke<Settings>("settings_set", { patch }),
+  autostartGet: () => invoke<boolean>("autostart_get"),
+  autostartSet: (enabled: boolean) => invoke<void>("autostart_set", { enabled }),
   wslconfigGet: () => invoke<WslConfigInfo>("wslconfig_get"),
   gpuStatus: () => invoke<import("./types").GpuSnapshot | null>("gpu_status"),
   systemMetricsSeries: () =>
