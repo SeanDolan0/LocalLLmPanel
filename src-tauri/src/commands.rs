@@ -1336,6 +1336,26 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
     .map_err(|e| e.to_string())
 }
 
+pub fn compose_library_remove_script(model_id: &str) -> String {
+    let dir_name = format!("models--{}", model_id.replace('/', "--"));
+    format!(
+        r#"
+dir="$HOME/.cache/huggingface/hub/{dir_name}"
+rm -rf "$dir"
+# Prune unreferenced blob files
+find "$HOME/.cache/huggingface/hub/blobs" -type f 2>/dev/null | while read -r blob; do
+    # If no symlink in hub targets this blob hash, delete it
+    hash=$(basename "$blob")
+    if ! grep -rq "$hash" "$HOME/.cache/huggingface/hub/models--"*/snapshots 2>/dev/null; then
+        rm -f "$blob"
+    fi
+done
+echo ok
+"#,
+        dir_name = dir_name
+    )
+}
+
 #[tauri::command]
 pub async fn library_remove(
     state: State<'_, Arc<AppState>>,
@@ -1374,8 +1394,7 @@ pub async fn library_remove(
         }
 
         let distro = st.resolve_distro();
-        let dir_name = format!("models--{}", model_id.replace('/', "--"));
-        let script = format!("rm -rf ~/.cache/huggingface/hub/{}", dir_name);
+        let script = compose_library_remove_script(&model_id);
         let out = crate::wsl::run_script(&distro, &script);
         if !out.ok {
             return Err(format!("Failed to delete model directory: {}", out.stderr));
@@ -2000,4 +2019,11 @@ mod tests {
         let err = server_recipe_parse(invalid_json.to_string());
         assert!(err.is_err());
     }
-}
+
+    #[test]
+    fn test_cache_sweep_script_composition() {
+        let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B");
+        assert!(script.contains("models--Qwen--Qwen2.5-0.5B"));
+        assert!(script.contains("hub/blobs"));
+    }
+}
