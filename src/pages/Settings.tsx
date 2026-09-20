@@ -24,6 +24,9 @@ export default function Settings() {
   const [importExportMsg, setImportExportMsg] = useState<string | null>(null);
   const [gw, setGw] = useState<GatewayStatus | null>(null);
   const [gatewayCopied, setGatewayCopied] = useState(false);
+  const [snippetCopied, setSnippetCopied] = useState<string | null>(null);
+  const [gwInstruct, setGwInstruct] = useState<string | null>(null);
+  const [gwEmbed, setGwEmbed] = useState<string | null>(null);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -103,6 +106,25 @@ export default function Settings() {
         if (!cancelled) setGw(status);
       } catch {
         /* gateway status unavailable */
+      }
+      try {
+        const rows = await api.serversList();
+        if (!cancelled) {
+          const instruct = rows.find(
+            (r) => r.def.task === "instruct" && r.status === "running",
+          );
+          const embed = rows.find(
+            (r) => r.def.task === "embed" && r.status === "running",
+          );
+          setGwInstruct(
+            instruct ? (instruct.def.served_model_name ?? instruct.def.model_id) : null,
+          );
+          setGwEmbed(
+            embed ? (embed.def.served_model_name ?? embed.def.model_id) : null,
+          );
+        }
+      } catch {
+        /* servers list unavailable */
       }
     };
     poll();
@@ -941,6 +963,15 @@ export default function Settings() {
                   </Field>
                 </div>
               )}
+              {adv.gateway_enabled && (
+                <ClientSnippets
+                  gatewayPort={adv.gateway_port}
+                  instructModel={gwInstruct}
+                  embedModel={gwEmbed}
+                  copied={snippetCopied}
+                  setCopied={setSnippetCopied}
+                />
+              )}
             </div>
 
             <div className="mt-4 flex justify-end">
@@ -1295,6 +1326,90 @@ export default function Settings() {
           </Card>
         </div>
       )}
+    </div>
+  );
+}
+
+function ClientSnippets({
+  gatewayPort,
+  instructModel,
+  embedModel,
+  copied,
+  setCopied,
+}: {
+  gatewayPort: number;
+  instructModel: string | null;
+  embedModel: string | null;
+  copied: string | null;
+  setCopied: (k: string | null) => void;
+}) {
+  const base = `http://127.0.0.1:${gatewayPort}/v1`;
+  const chat = instructModel ?? "your-instruct-model";
+  const embed = embedModel ?? "your-embed-model";
+
+  const snippets: { key: string; label: string; hint: string; text: string }[] = [
+    {
+      key: "continue",
+      label: "Continue config.yaml",
+      hint: "Paste into ~/.continue/config.yaml",
+      text: `name: Local Assistant\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Local Instruct\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: not-needed\n  - name: Local Autocomplete\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: not-needed\n    capabilities: [autocomplete]\n  - name: Local Embed\n    provider: openai\n    model: ${embed}\n    apiBase: ${base}\n    apiKey: not-needed\n    capabilities: [embed]\n`,
+    },
+    {
+      key: "cursor",
+      label: "Cursor / Cline",
+      hint: "Base URL + model override",
+      text: `Base URL: ${base}\nChat model: ${chat}\nAutocomplete model: ${chat}\nEmbeddings model: ${embed}\nAPI key: not-needed\n`,
+    },
+    {
+      key: "curl-chat",
+      label: "curl chat",
+      hint: "Chat + FIM completions smoke test",
+      text: `curl ${base}/chat/completions -H "Content-Type: application/json" -d '{"model":"${chat}","messages":[{"role":"user","content":"hi"}]}'\n`,
+    },
+    {
+      key: "curl-embed",
+      label: "curl embeddings",
+      hint: "Embeddings smoke test",
+      text: `curl ${base}/embeddings -H "Content-Type: application/json" -d '{"model":"${embed}","input":"hello world"}'\n`,
+    },
+  ];
+
+  const copy = async (key: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-edge bg-surface/40 p-3">
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+        One-click client configs
+      </div>
+      {instructModel === null && embedModel === null && (
+        <div className="mt-1.5 text-[11px] text-amber-300">
+          No running servers — start an instruct / embed server first; snippets use placeholders.
+        </div>
+      )}
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {snippets.map((s) => (
+          <div key={s.key} className="rounded-md border border-edge/60 bg-surface-2/60 p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-slate-200">{s.label}</span>
+              <Button variant="subtle" onClick={() => copy(s.key, s.text)}>
+                {copied === s.key ? "Copied" : "Copy"}
+              </Button>
+            </div>
+            <div className="mt-0.5 text-[11px] text-slate-500">{s.hint}</div>
+            <pre className="mt-1.5 max-h-24 overflow-y-auto whitespace-pre-wrap rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
+              {s.text}
+            </pre>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
