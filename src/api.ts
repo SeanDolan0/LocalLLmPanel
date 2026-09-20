@@ -102,6 +102,7 @@ export const api = {
   libraryRemove: (modelId: string) => invoke<void>("library_remove", { modelId }),
   libraryDiskUsage: () => invoke<number>("library_disk_usage"),
   settingsGet: () => invoke<Settings>("settings_get"),
+  gatewayStatus: () => invoke<import("./types").GatewayStatus>("gateway_status"),
   settingsSet: (
     patch: Partial<
       Pick<

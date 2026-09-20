@@ -3,6 +3,7 @@ import { api, fmtNum } from "../api";
 import { Badge, Button, Card, CardTitle, Field, inputCls } from "../ui";
 import type {
   AdvancedSettings,
+  GatewayStatus,
   MemorySettings,
   Settings as SettingsT,
   SystemMemoryInfo,
@@ -21,6 +22,8 @@ export default function Settings() {
   const [err, setErr] = useState<string | null>(null);
   const [showLanModal, setShowLanModal] = useState(false);
   const [importExportMsg, setImportExportMsg] = useState<string | null>(null);
+  const [gw, setGw] = useState<GatewayStatus | null>(null);
+  const [gatewayCopied, setGatewayCopied] = useState(false);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -92,6 +95,24 @@ export default function Settings() {
     api.getSystemMemory().then(setSysMem).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await api.gatewayStatus();
+        if (!cancelled) setGw(status);
+      } catch {
+        /* gateway status unavailable */
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   const save = async () => {
     if (!s) return;
     setErr(null);
@@ -140,13 +161,13 @@ export default function Settings() {
   if (!s || !mem) {
     return <div className="p-6 text-sm text-slate-500">Loading settings…</div>;
   }
-
-  // Safe fallback for advanced settings
   const adv: AdvancedSettings = s.advanced_settings ?? {
     hf_home: null,
     hf_offline: false,
     host: "127.0.0.1",
     api_key: null,
+    gateway_enabled: false,
+    gateway_port: 11434,
     kv_cache_dtype: "auto",
     enable_prefix_caching: true,
     enable_chunked_prefill: false,
@@ -829,6 +850,97 @@ export default function Settings() {
                   }}
                 />
               </Field>
+            </div>
+
+            <div className="mt-4 rounded-lg border border-edge bg-surface/60 p-3.5">
+              <div
+                className="flex cursor-pointer select-none items-start justify-between gap-3"
+                onClick={() => updateAdv({ gateway_enabled: !adv.gateway_enabled })}
+              >
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+                    checked={adv.gateway_enabled}
+                    onChange={(e) => updateAdv({ gateway_enabled: e.target.checked })}
+                  />
+                  <div className="space-y-0.5">
+                    <div className="text-sm font-medium text-slate-200">
+                      OpenAI-Compatible Gateway
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      One stay-put endpoint that routes chat requests to whichever running vLLM
+                      server actually serves the requested model.
+                    </p>
+                  </div>
+                </div>
+                {gw && (
+                  <span
+                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                      gw.running && adv.gateway_enabled
+                        ? "bg-emerald-500/15 text-emerald-300"
+                        : "bg-slate-500/15 text-slate-400"
+                    }`}
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        gw.running && adv.gateway_enabled ? "bg-emerald-400" : "bg-slate-500"
+                      }`}
+                    />
+                    {gw.running && adv.gateway_enabled ? "listening" : "off"}
+                  </span>
+                )}
+              </div>
+
+              {adv.gateway_enabled && (
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Field
+                    label="Gateway Port"
+                    hint="Ollama-style default; point your client here."
+                  >
+                    <input
+                      className={inputCls}
+                      type="number"
+                      min={1024}
+                      max={65535}
+                      value={adv.gateway_port}
+                      onClick={(e) => e.currentTarget.select()}
+                      onChange={(e) =>
+                        updateAdv({ gateway_port: Number(e.target.value) || 11434 })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Base URL for Clients"
+                    hint="Use in Cursor, Continue, LibreChat, or any OpenAI-compatible client."
+                  >
+                    <div className="flex gap-2">
+                      <input
+                        className={inputCls}
+                        readOnly
+                        value={`http://127.0.0.1:${adv.gateway_port}/v1`}
+                        onFocus={(e) => e.target.select()}
+                      />
+                      <Button
+                        variant="subtle"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(
+                              `http://127.0.0.1:${adv.gateway_port}/v1`,
+                            );
+                            setGatewayCopied(true);
+                            setTimeout(() => setGatewayCopied(false), 2000);
+                          } catch {
+                            /* clipboard unavailable */
+                          }
+                        }}
+                      >
+                        {gatewayCopied ? "Copied" : "Copy"}
+                      </Button>
+                    </div>
+                  </Field>
+                </div>
+              )}
             </div>
 
             <div className="mt-4 flex justify-end">

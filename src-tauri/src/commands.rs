@@ -1002,6 +1002,31 @@ pub fn settings_get(state: State<'_, Arc<AppState>>) -> PersistedConfig {
     st.config()
 }
 
+#[derive(serde::Serialize)]
+pub struct GatewayStatus {
+    pub enabled: bool,
+    pub port: u16,
+    pub running: bool,
+}
+
+#[tauri::command]
+pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
+    let st = (*state).clone();
+    let cfg = st.config();
+    let enabled = cfg.advanced_settings.gateway_enabled;
+    let port = cfg.advanced_settings.gateway_port;
+    let running = if enabled {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_millis(300),
+        )
+        .is_ok()
+    } else {
+        false
+    };
+    GatewayStatus { enabled, port, running }
+}
+
 #[derive(serde::Deserialize)]
 pub struct SettingsPatch {
     pub distro: Option<String>,

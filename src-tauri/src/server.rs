@@ -1184,6 +1184,8 @@ mod tests {
             hf_offline: true,
             host: "0.0.0.0".into(),
             api_key: Some("sk-test-123".into()),
+            gateway_enabled: true,
+            gateway_port: 11434,
             kv_cache_dtype: "fp8".into(),
             enable_prefix_caching: true,
             enable_chunked_prefill: true,

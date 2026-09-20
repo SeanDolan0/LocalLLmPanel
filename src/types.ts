@@ -130,6 +130,8 @@ export interface AdvancedSettings {
   hf_offline: boolean;
   host: string;
   api_key?: string | null;
+  gateway_enabled: boolean;
+  gateway_port: number;
   kv_cache_dtype: string;
   enable_prefix_caching: boolean;
   enable_chunked_prefill: boolean;
@@ -138,6 +140,12 @@ export interface AdvancedSettings {
   log_level: string;
   extra_vllm_args?: string | null;
   custom_env_vars?: string | null;
+}
+
+export interface GatewayStatus {
+  enabled: boolean;
+  port: number;
+  running: boolean;
 }
 
 export interface Settings {

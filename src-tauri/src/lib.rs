@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod estimate;
 pub mod fit;
+pub mod gateway;
 pub mod hf;
 pub mod llmfit_adapter;
 pub mod provision;
@@ -104,6 +105,8 @@ pub fn run() {
                 server::resume_servers_if_configured(&state, Some(&app_handle_for_resume)).await;
             });
 
+            gateway::spawn_supervisor(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -138,6 +141,7 @@ pub fn run() {
             commands::library_disk_usage,
             commands::settings_get,
             commands::settings_set,
+            commands::gateway_status,
             commands::wslconfig_get,
             commands::gpu_status,
             commands::system_metrics_series,

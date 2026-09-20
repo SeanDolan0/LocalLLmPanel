@@ -230,6 +230,12 @@ pub struct AdvancedSettings {
     /// Optional global API key for OpenAI-compatible endpoint
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Emit an OpenAI-compatible gateway router on 127.0.0.1:<gateway_port>.
+    #[serde(default)]
+    pub gateway_enabled: bool,
+    /// Port for the built-in OpenAI-compatible gateway router.
+    #[serde(default = "default_gateway_port")]
+    pub gateway_port: u16,
     /// Default KV cache data type: "auto", "fp8", "fp8_e5m2", "fp8_e4m3"
     #[serde(default = "default_auto")]
     pub kv_cache_dtype: String,
@@ -264,6 +270,10 @@ fn default_auto() -> String {
     "auto".to_string()
 }
 
+fn default_gateway_port() -> u16 {
+    crate::gateway::DEFAULT_GATEWAY_PORT
+}
+
 fn default_info() -> String {
     "INFO".to_string()
 }
@@ -275,6 +285,8 @@ impl Default for AdvancedSettings {
             hf_offline: false,
             host: default_host(),
             api_key: None,
+            gateway_enabled: false,
+            gateway_port: default_gateway_port(),
             kv_cache_dtype: default_auto(),
             enable_prefix_caching: true,
             enable_chunked_prefill: false,
