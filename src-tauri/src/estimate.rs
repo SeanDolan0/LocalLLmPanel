@@ -6,26 +6,26 @@
 use serde::Serialize;
 
 /// Bytes of memory per parameter for a given quantization.
-/// fp16/bf16 = 2, fp8 = 1, int4 (AWQ/GPTQ) ≈ 1.1 (weights + scale overhead).
+/// fp16/bf16 = 2, fp8 = 1, int4 (AWQ/GPTQ) ≈ 0.55 (weights + scale overhead).
 pub fn bytes_per_param(quant: &str) -> f64 {
     let q = quant.to_ascii_lowercase();
     let q_str = q.as_str();
     if q_str.starts_with("q4") || q_str.contains("q4_") || q_str.contains("iq4") || q_str == "awq" || q_str == "gptq" || q_str == "int4" {
-        1.1
+        0.55 // 4-bit: 0.50 bytes/weight + ~0.05 scaling overhead
     } else if q_str.starts_with("q8") || q_str.contains("q8_") {
-        1.25
+        1.05 // 8-bit: 1.00 byte/weight + scaling overhead
     } else if q_str.starts_with("q5") || q_str.contains("q5_") {
-        0.85
+        0.68 // 5-bit: ~0.625 + overhead
     } else if q_str.starts_with("q6") || q_str.contains("q6_") {
-        0.95
+        0.80 // 6-bit: ~0.75 + overhead
     } else if q_str.starts_with("q3") || q_str.contains("q3_") || q_str.contains("iq3") {
-        0.55
-    } else if q_str.starts_with("q2") || q_str.contains("q2_") || q_str.contains("iq2") {
         0.45
+    } else if q_str.starts_with("q2") || q_str.contains("q2_") || q_str.contains("iq2") {
+        0.35
     } else if q_str == "fp8" || q_str == "int8" {
         1.0
     } else if q_str == "gguf" {
-        1.1 // default GGUF assumption is ~4-bit
+        0.55 // default GGUF assumption is ~Q4_K_M
     } else {
         2.0 // fp16 / bf16 / unset
     }
@@ -491,8 +491,21 @@ mod tests {
         assert_eq!(bytes_per_param("bf16"), 2.0);
         assert_eq!(bytes_per_param(""), 2.0);
         assert_eq!(bytes_per_param("fp8"), 1.0);
-        assert_eq!(bytes_per_param("AWQ"), 1.1);
-        assert!((bytes_per_param("gptq") - 1.1).abs() < 1e-9);
+        assert_eq!(bytes_per_param("AWQ"), 0.55);
+        assert!((bytes_per_param("gptq") - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_quant_bytes_per_param_accurate_hierarchy() {
+        assert!((bytes_per_param("fp16") - 2.0).abs() < 1e-6);
+        assert!((bytes_per_param("fp8") - 1.0).abs() < 1e-6);
+        assert!((bytes_per_param("awq") - 0.55).abs() < 1e-6);
+        assert!((bytes_per_param("gptq") - 0.55).abs() < 1e-6);
+        assert!((bytes_per_param("q4_k_m") - 0.55).abs() < 1e-6);
+        assert!((bytes_per_param("q8_0") - 1.05).abs() < 1e-6);
+        // AWQ/Q4 (4-bit) must be strictly smaller than FP8 (8-bit) and Q5 (5-bit)
+        assert!(bytes_per_param("awq") < bytes_per_param("q5_k_m"));
+        assert!(bytes_per_param("awq") < bytes_per_param("fp8"));
     }
 
     #[test]
@@ -549,11 +562,11 @@ mod tests {
         // 0.5B fp16 = 1GB weights; kv_bpt 12KB → (11.04-1-2.5)=7.54GB / 12KB ≈ 657k → clamp to usize
         let ctx = context_fit(12227.0, 0.92, 0.494, "fp16", 12288.0, 2500.0);
         assert!(ctx > 500_000 && ctx < 800_000);
-        // int4 makes 7B fit: 7*1.1=7.7GB → 11.04-7.7-2.5=0.84GB/2KB(bpt for 7b: 2*32*8*128*2=131072)
-        // ≈ 6726 tokens
+        // int4 makes 7B fit: 7*0.55=3.85GB → 11.25-3.85-2.5=4.90GB KV (bpt for 7b: 2*32*8*128*2=131072)
+        // ≈ 38451 tokens
         let bpt = kv_bytes_per_token(32, 8, 128);
         let ctx7 = context_fit(12227.0, 0.92, 7.0, "awq", bpt, 2500.0);
-        assert!(ctx7 > 6000 && ctx7 < 8000);
+        assert!(ctx7 > 35000 && ctx7 < 42000);
     }
 
     #[test]
@@ -716,10 +729,10 @@ mod tests {
 
     #[test]
     fn test_gguf_bytes_per_param() {
-        assert_eq!(bytes_per_param("q4_k_m"), 1.1);
-        assert_eq!(bytes_per_param("Q4_0"), 1.1);
-        assert_eq!(bytes_per_param("Q8_0"), 1.25);
-        assert_eq!(bytes_per_param("gguf"), 1.1);
+        assert_eq!(bytes_per_param("q4_k_m"), 0.55);
+        assert_eq!(bytes_per_param("Q4_0"), 0.55);
+        assert_eq!(bytes_per_param("Q8_0"), 1.05);
+        assert_eq!(bytes_per_param("gguf"), 0.55);
     }
 
     #[test]

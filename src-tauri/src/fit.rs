@@ -376,7 +376,7 @@ mod tests {
             ram_bandwidth_gbs: 65.0,
         };
         let v = variant("awq", false);
-        let arch = arch_7b(); // 32k native context
+        let arch = arch_14b(); // 14B AWQ on 12GB GPU: weights fit, but KV context spills to RAM
         let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
         assert_eq!(r.run_mode, RunMode::GpuRamSwap);
         assert!(r.extended_context > r.vram_context);
@@ -494,9 +494,19 @@ mod tests {
 
     #[test]
     fn test_constrained_7b_awq() {
-        // 7.6B AWQ = ~8.36 GB weights + 2.5 overhead = ~10.86 GB.
-        // VRAM ratio = 10.86 / 12.227 = 0.888 → Constrained (0.60 < ratio ≤ 0.95)
-        let r = score_variant(&hw_12gb(), &variant("awq", false), &arch_7b(), None, 0.92, 2500.0, true, None);
+        let hw_8gb = HardwareProfile {
+            gpu_name: "RTX 4060".into(),
+            vram_total_mb: 8192,
+            bandwidth_gbs: 272.0,
+            bandwidth_known: true,
+            ram_total_mb: 16384,
+            ram_usable_mb: 12288,
+            ram_potential_mb: 12288,
+            ram_bandwidth_gbs: 65.0,
+        };
+        // 7.6B AWQ on 8GB GPU: ~4.18 GB weights + 2.5 overhead = ~6.68 GB.
+        // VRAM ratio = 6.68 / 8.192 = 0.815 → Constrained (0.60 < ratio ≤ 0.95)
+        let r = score_variant(&hw_8gb, &variant("awq", false), &arch_7b(), None, 0.92, 2500.0, true, None);
         assert_eq!(r.verdict, FitVerdict::Constrained);
         assert!(r.score > 30 && r.score < 80, "score = {}", r.score);
     }
@@ -560,7 +570,7 @@ mod tests {
     fn test_measured_stats_preferred() {
         let hw = hw_12gb();
         let v = variant("awq", false);
-        let arch = arch_7b();
+        let arch = arch_14b();
 
         let r_est = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
         let r_faster = score_variant(&hw, &v, &arch, Some(80.0), 0.92, 2500.0, true, None);
@@ -684,7 +694,7 @@ mod tests {
             ram_bandwidth_gbs: 65.0,
         };
         let v = variant("awq", false);
-        let arch = arch_7b(); // 32k native context
+        let arch = arch_14b(); // 14B AWQ on 12GB GPU: context overflows to RAM
         let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
         // Active execution mode should be pure GPU because overflow is disabled in settings
         assert_eq!(r.run_mode, RunMode::Gpu);
