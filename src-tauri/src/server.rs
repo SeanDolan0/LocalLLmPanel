@@ -677,6 +677,16 @@ pub fn running_weight_gb(state: &Arc<AppState>) -> f64 {
         .sum()
 }
 
+pub fn apply_vllm_auth(
+    mut req: reqwest::RequestBuilder,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    req
+}
+
 /// Issue a chat completion against an instruct server (server-side, no CORS).
 pub async fn chat(
     state: &Arc<AppState>,
@@ -697,10 +707,9 @@ pub async fn chat(
         "messages": messages,
         "stream": false,
     });
-    let resp = state
-        .http
-        .post(&url)
-        .json(&body)
+    let api_key = state.config().advanced_settings.api_key.clone();
+    let req = state.http.post(&url).json(&body);
+    let resp = apply_vllm_auth(req, api_key.as_deref())
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
@@ -797,10 +806,9 @@ pub async fn chat_stream(
             body["temperature"] = serde_json::json!(temp);
         }
 
-        let mut resp = state
-            .http
-            .post(&url)
-            .json(&body)
+        let api_key = state.config().advanced_settings.api_key.clone();
+        let req = state.http.post(&url).json(&body);
+        let mut resp = apply_vllm_auth(req, api_key.as_deref())
             .send()
             .await
             .with_context(|| format!("POST {url}"))?;
@@ -972,7 +980,9 @@ pub async fn run_benchmark(
             });
 
             let t0 = Instant::now();
-            let send_future = state.http.post(&url).json(&body).send();
+            let api_key = state.config().advanced_settings.api_key.clone();
+            let req = state.http.post(&url).json(&body);
+            let send_future = apply_vllm_auth(req, api_key.as_deref()).send();
 
             let resp = tokio::select! {
                 _ = cancel_notify.notified() => {
@@ -1278,4 +1288,22 @@ mod tests {
         assert!(prompts[0].len() < prompts[1].len());
         assert!(prompts[1].len() < prompts[2].len());
     }
-}
+
+    #[test]
+    fn test_apply_vllm_auth_header() {
+        use super::apply_vllm_auth;
+        use reqwest::Client;
+        let client = Client::new();
+
+        let req = client.post("http://127.0.0.1:8000/v1/chat/completions");
+        let req_with_auth = apply_vllm_auth(req, Some("sk-secret-123")).build().unwrap();
+        assert_eq!(
+            req_with_auth.headers().get("Authorization").unwrap().to_str().unwrap(),
+            "Bearer sk-secret-123"
+        );
+
+        let req_blank = client.post("http://127.0.0.1:8000/v1/chat/completions");
+        let req_no_auth = apply_vllm_auth(req_blank, None).build().unwrap();
+        assert!(req_no_auth.headers().get("Authorization").is_none());
+    }
+}
