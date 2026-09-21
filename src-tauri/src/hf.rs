@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::estimate;
-use crate::state::AppState;
+use crate::state::{AppState, LlamaCppChannel};
 use std::sync::Arc as StdArc;
 use tauri::Emitter;
 
@@ -423,6 +423,9 @@ pub struct QuantVariant {
     pub params_b: Option<f64>,
     pub gguf_file: Option<String>,
     pub vllm_native: bool,
+    /// The llama.cpp channel required to run this variant: "upstream" or "prism"
+    #[serde(default)]
+    pub required_channel: LlamaCppChannel,
 }
 
 static GGUF_SHARD_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
@@ -431,7 +434,7 @@ static GGUF_SHARD_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLo
 
 static GGUF_QUANT_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
     regex_lite::Regex::new(
-        r"[-_]((?:UD-)?(?:I?Q\d+(?:_(?:K(?:_[SMLX]{1,2})?|0|1|XXS|XS|S|M|NL))?|BF16|F16|FP16))$",
+        r"[-_]((?:UD-)?(?:I?Q\d+(?:_(?:K(?:_[SMLX]{1,2})?|0|1|XXS|XS|S|M|NL))?|BF16|F16|FP16|PQ\d+_\d+|PTQ\d+_\d+|Q\d+_g\d+|Q\d+))$",
     )
     .expect("valid GGUF quant regex")
 });
@@ -487,11 +490,29 @@ pub fn parse_gguf_quant_label(filename: &str) -> Option<String> {
     let stem = filename.strip_suffix(".gguf").unwrap();
     // Strip shard suffix like -00001-of-00003
     let stem = GGUF_SHARD_RE.replace(stem, "");
-    // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*, BF16, F16, FP16
+    // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*, BF16, F16, FP16, PQ2_0, PTQ1_0, Q2_0_g64, etc.
     GGUF_QUANT_RE
         .captures(&stem)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
+}
+
+/// Determine if a quant label requires the PrismML llama.cpp fork.
+/// Ternary formats (PQ2_0, PTQ1_0, etc.) and some group-quantized variants (Q2_0_g64) need the fork.
+pub fn quant_requires_prism_channel(quant_label: &str) -> bool {
+    let q = quant_label.to_ascii_uppercase();
+    // Ternary formats
+    if q.starts_with("PQ") || q.starts_with("PTQ") {
+        return true;
+    }
+    // Group-quantized variants that need fork
+    if q.contains("_G") || q.contains("_g") {
+        // Q2_0_g64, Q2_g64, Q1_0, etc.
+        if q.starts_with("Q1_") || q.starts_with("Q2_") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extract base model name (part after the org/user prefix).
@@ -553,6 +574,7 @@ pub async fn discover_quant_variants(
             params_b: None,
             gguf_file: None,
             vllm_native: true,
+            required_channel: crate::state::LlamaCppChannel::Upstream,
         }];
         if let Some(c) = cache {
             if let Ok(mut guard) = c.lock() {
@@ -601,6 +623,7 @@ pub async fn discover_quant_variants(
         params_b: None,
         gguf_file: None,
         vllm_native: true,
+        required_channel: LlamaCppChannel::Upstream,
     });
 
     // 5. Run cross-repo candidate, publisher, and GGUF queries concurrently
@@ -677,6 +700,7 @@ pub async fn discover_quant_variants(
                 params_b: None,
                 gguf_file: None,
                 vllm_native: true,
+                required_channel: LlamaCppChannel::Upstream,
             });
         }
     }
@@ -777,6 +801,11 @@ pub async fn check_gguf_repo(
                         let fname = sib.get("rfilename").and_then(|v| v.as_str()).unwrap_or("");
                         if let Some(quant_label) = parse_gguf_quant_label(fname) {
                             let size = sib.get("size").and_then(|v| v.as_u64());
+                            let required_channel = if quant_requires_prism_channel(&quant_label) {
+                                LlamaCppChannel::Prism
+                            } else {
+                                LlamaCppChannel::Upstream
+                            };
                             match variant_map.entry(quant_label.clone()) {
                                 std::collections::btree_map::Entry::Vacant(e) => {
                                     e.insert(QuantVariant {
@@ -787,6 +816,7 @@ pub async fn check_gguf_repo(
                                         params_b: None,
                                         gguf_file: Some(fname.to_string()),
                                         vllm_native: false,
+                                        required_channel,
                                     });
                                 }
                                 std::collections::btree_map::Entry::Occupied(mut e) => {
@@ -1060,6 +1090,7 @@ mod tests {
             params_b: Some(7.0),
             gguf_file: None,
             vllm_native: true,
+            required_channel: LlamaCppChannel::Upstream,
         }];
         cache.lock().unwrap().insert(
             "test/model".to_string(),

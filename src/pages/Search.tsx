@@ -913,6 +913,11 @@ export default function Search() {
                                     ⚠️ GGUF
                                   </span>
                                 )}
+                                {(variant?.required_channel === "prism" || fit?.notes?.some?.(n => n.includes("PrismML"))) && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30" title="Requires PrismML llama.cpp fork (ternary format)">
+                                    🔮 Prism
+                                  </span>
+                                )}
                               </div>
                               <span className="text-[10px] text-slate-500">
                                 ~{fit.vram_pct}% VRAM
@@ -1122,6 +1127,7 @@ function ModelCard({
   const fit = best?.fit;
   const variant = best?.variant;
   const isGguf = variant?.format === "GGUF" || fit?.format_support === "Experimental";
+  const requiresPrism = variant?.required_channel === "prism";
   const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
 
   const parts = model.id.split("/");
@@ -1159,6 +1165,14 @@ function ModelCard({
                 title="vLLM support for GGUF is experimental"
               >
                 ⚠️ GGUF
+              </span>
+            )}
+            {requiresPrism && (
+              <span
+                className="inline-flex items-center gap-0.5 rounded-full border border-purple-500/30 bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-medium text-purple-300"
+                title="Requires PrismML llama.cpp fork (ternary format)"
+              >
+                🔮 Prism
               </span>
             )}
           </div>
@@ -1581,6 +1595,7 @@ function ModelDetailModal({
                 const best = getBestVariant(model);
                 const isBest = vwf === best;
                 const isGguf = variant.format === "GGUF" || fit.format_support === "Experimental";
+                const requiresPrism = variant.required_channel === "prism";
                 const pullState = pulls[variant.repo_id] || (isBest ? pulls[model.id] : undefined);
                 const tokS = fit.measured_tok_s ?? fit.est_tok_s;
 
@@ -1614,6 +1629,14 @@ function ModelDetailModal({
                               title="vLLM support for GGUF is experimental"
                             >
                               ⚠️ Experimental
+                            </span>
+                          )}
+                          {requiresPrism && (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-300"
+                              title="Requires PrismML llama.cpp fork (ternary format)"
+                            >
+                              🔮 Prism
                             </span>
                           )}
                         </div>

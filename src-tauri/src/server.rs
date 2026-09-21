@@ -878,8 +878,11 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         }
     };
     let (wsl_child, native_child, wsl_pid) = if def.backend == "llamacpp" {
-        let exe = crate::llamacpp_install::executable_from_config(&cfg)
-            .ok_or_else(|| anyhow!("llama-server.exe is not installed or configured"))?;
+        let channel = def.llamacpp_channel;
+        let exe = crate::llamacpp_install::executable_from_config_channel(&cfg, channel)
+            .ok_or_else(|| anyhow!(
+                "llama-server.exe for {channel:?} channel is not installed. Install it from Dashboard or Settings, or set a custom executable path."
+            ))?;
         let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
         let mut def = def.clone();
         if let Some(resolved) = resolve_gguf_model_path(raw_model, &cfg.gguf_dir, &distro) {
@@ -891,7 +894,12 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             );
         }
         let help = crate::llamacpp_install::command_output(&exe, &["--help"])
-            .unwrap_or_else(|_| cfg.llamacpp_help.clone().unwrap_or_default());
+            .unwrap_or_else(|_| {
+                cfg.llamacpp_channels
+                    .get(&channel)
+                    .and_then(|c| c.help.clone())
+                    .unwrap_or_default()
+            });
         let args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
         let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
             .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
@@ -1207,6 +1215,10 @@ pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String
         || lower.contains("invalid option")
     {
         "The installed binary does not support one of the configured flags; reinstall/update llama.cpp or remove the unsupported extra argument."
+    } else if lower.contains("invalid ggml type") || lower.contains("unknown ggml type") || lower.contains("unsupported ggml type") {
+        "The model uses a ternary quantization format (PQ2_0, PTQ1_0, etc.) that requires the PrismML llama.cpp fork. Switch the server's llama.cpp channel to 'prism' in Settings, install the Prism channel from Dashboard, and restart the server."
+    } else if lower.contains("no kernel image") || lower.contains("sm_120") || lower.contains("unsupported device") {
+        "CUDA kernel missing for Blackwell (sm_120). The installed binary may lack native Blackwell kernels. Options: (1) build llama.cpp from source with -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120, (2) update NVIDIA driver for CUDA 12.8+, (3) use a prebuilt binary with sm_120 support."
     } else if lower.contains("no such file")
         || lower.contains("cannot open")
         || lower.contains("failed to load model")

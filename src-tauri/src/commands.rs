@@ -212,12 +212,23 @@ pub async fn install_llamacpp(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::llamacpp_install::InstallStatus, String> {
+    install_llamacpp_channel(app, state, crate::state::LlamaCppChannel::Upstream).await
+}
+
+#[tauri::command]
+pub async fn install_llamacpp_channel(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    channel: crate::state::LlamaCppChannel,
+) -> Result<crate::llamacpp_install::InstallStatus, String> {
     let st = (*state).clone();
     let cfg = st.config();
-    let destination = PathBuf::from(cfg.llamacpp_dir);
+    let channel_config = cfg.llamacpp_channels.get(&channel).cloned().unwrap_or_default();
+    let destination = PathBuf::from(channel_config.dir);
     let github_token = (!cfg.github_token.trim().is_empty()).then_some(cfg.github_token);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::llamacpp_install::install(
+        crate::llamacpp_install::install_for_channel(
+            channel,
             &destination,
             |file, done, total| {
                 let _ = app.emit(
@@ -233,17 +244,19 @@ pub async fn install_llamacpp(
     .map_err(|e| format!("llama.cpp install failed: {e}"))?;
     let (tag, exe, version, help) = result;
     let mut cfg = st.config.lock().unwrap();
-    cfg.llamacpp_installed_tag = Some(tag);
-    cfg.llamacpp_version = Some(version.clone());
-    cfg.llamacpp_help = Some(help);
-    cfg.llamacpp_executable = Some(exe.to_string_lossy().into_owned());
+    if let Some(ch) = cfg.llamacpp_channels.get_mut(&channel) {
+        ch.installed_tag = Some(tag);
+        ch.version = Some(version.clone());
+        ch.help = Some(help);
+        ch.executable = Some(exe.to_string_lossy().into_owned());
+    }
     cfg.save().map_err(|e| e.to_string())?;
     let devices = crate::llamacpp_install::list_devices(&exe).unwrap_or_default();
     Ok(crate::llamacpp_install::InstallStatus {
         installed: true,
-        tag: cfg.llamacpp_installed_tag.clone(),
-        version: cfg.llamacpp_version.clone(),
-        executable: cfg.llamacpp_executable.clone(),
+        tag: cfg.llamacpp_channels.get(&channel).and_then(|c| c.installed_tag.clone()),
+        version: cfg.llamacpp_channels.get(&channel).and_then(|c| c.version.clone()),
+        executable: cfg.llamacpp_channels.get(&channel).and_then(|c| c.executable.clone()),
         gpu: crate::llamacpp_install::windows_gpu_snapshot(),
         cuda_available: devices
             .iter()
@@ -286,7 +299,7 @@ pub async fn github_access(
 ) -> Result<crate::llamacpp_install::GithubAccess, String> {
     let token = state.config().github_token;
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(crate::llamacpp_install::test_github_access(Some(&token)))
+        Ok(crate::llamacpp_install::test_github_access(crate::state::LlamaCppChannel::Upstream, Some(&token)))
     })
     .await
     .map_err(|e| format!("GitHub access task error: {e}"))?
@@ -575,12 +588,15 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
                             }
                         };
                         let is_gguf = v.format == QuantFormat::GGUF;
+                        let required_channel = v.required_channel;
                         let vi = VariantInput {
                             quant_str,
                             weight_bytes: v.weight_bytes,
                             params_b: v.params_b,
                             is_gguf,
+                            required_channel,
                         };
+                        let channel_installed = st.config().llamacpp_channels.get(&required_channel).and_then(|c| c.installed_tag.as_ref()).map(|_| required_channel);
                         let fit = fit::score_variant(
                             &hw,
                             &vi,
@@ -590,6 +606,7 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
                             mem_settings.vram_overhead_mb,
                             mem_settings.offload_weights_allowed,
                             mem_settings.max_context_cap,
+                            channel_installed,
                         );
                         (v, (vi, fit))
                     })
@@ -1035,6 +1052,7 @@ pub struct ServerInput {
     pub extra_args: Option<Vec<String>>,
     pub env: Option<std::collections::BTreeMap<String, String>>,
     pub restart: Option<bool>,
+    pub llamacpp_channel: Option<crate::state::LlamaCppChannel>,
 }
 
 #[tauri::command]
@@ -1166,6 +1184,7 @@ pub async fn servers_create(
         metrics: input.metrics.unwrap_or(true),
         extra_args: input.extra_args.unwrap_or_default(),
         env: BTreeMap::new(),
+        llamacpp_channel: input.llamacpp_channel.unwrap_or(crate::state::LlamaCppChannel::Upstream),
     };
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.push(def.clone());
@@ -2874,6 +2893,7 @@ mod tests {
                     params_b: None,
                     gguf_file: None,
                     vllm_native: true,
+                    required_channel: LlamaCppChannel::Upstream,
                 },
                 fit: FitResult {
                     verdict: fit::FitVerdict::Constrained,
@@ -2984,6 +3004,7 @@ mod tests {
                     params_b: Some(7.0),
                     gguf_file: None,
                     vllm_native: true,
+                    required_channel: LlamaCppChannel::Upstream,
                 }],
                 fetched_at: std::time::Instant::now(),
             },

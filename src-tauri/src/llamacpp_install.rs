@@ -3,13 +3,18 @@
 use anyhow::{anyhow, Context, Result};
 use regex_lite::Regex;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10";
-const RELEASES_PAGE: &str = "https://github.com/ggml-org/llama.cpp/releases";
+use crate::state::LlamaCppChannel;
+
+const UPSTREAM_RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10";
+const UPSTREAM_RELEASES_PAGE: &str = "https://github.com/ggml-org/llama.cpp/releases";
+const PRISM_RELEASES_API: &str = "https://api.github.com/repos/PrismML-Eng/llama.cpp/releases?per_page=10";
+const PRISM_RELEASES_PAGE: &str = "https://github.com/PrismML-Eng/llama.cpp/releases";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GithubAccess {
@@ -34,6 +39,36 @@ struct Release {
 pub struct Asset {
     pub name: String,
     pub browser_download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelConfig {
+    api_url: &'static str,
+    page_url: &'static str,
+    parse_main_regex: Regex,
+    parse_runtime_regex: Regex,
+    main_prefix: String,
+}
+
+impl ChannelConfig {
+    fn for_channel(channel: LlamaCppChannel) -> Self {
+        match channel {
+            LlamaCppChannel::Upstream => ChannelConfig {
+                api_url: UPSTREAM_RELEASES_API,
+                page_url: UPSTREAM_RELEASES_PAGE,
+                parse_main_regex: Regex::new(r"^llama-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
+                parse_runtime_regex: Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
+                main_prefix: "llama-".to_string(),
+            },
+            LlamaCppChannel::Prism => ChannelConfig {
+                api_url: PRISM_RELEASES_API,
+                page_url: PRISM_RELEASES_PAGE,
+                parse_main_regex: Regex::new(r"^llama-prism-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
+                parse_runtime_regex: Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
+                main_prefix: "llama-prism-".to_string(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -88,7 +123,7 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 pub fn choose_assets(assets: &[Asset]) -> Result<(Asset, Option<Asset>)> {
-    let selection = choose_assets_for_machine(assets, None, None)?;
+    let selection = choose_assets_for_machine(LlamaCppChannel::Upstream, assets, None, None)?;
     Ok((selection.candidate.main, selection.candidate.runtime))
 }
 
@@ -135,11 +170,12 @@ fn diagnostic(assets: &[Asset], driver: Option<CudaVersion>) -> String {
             assets.len()
         ));
     }
-    lines.push(format!("Releases: {}", RELEASES_PAGE));
+    lines.push(format!("Releases: {}", UPSTREAM_RELEASES_PAGE));
     lines.join("\n")
 }
 
 fn choose_assets_for_machine(
+    channel: LlamaCppChannel,
     assets: &[Asset],
     driver: Option<CudaVersion>,
     compute_cap: Option<(u32, u32)>,
@@ -170,7 +206,7 @@ fn choose_assets_for_machine(
         None
     };
     Ok(Selection {
-        tag: parse_main_tag(&main.name),
+        tag: parse_main_tag(&main.name, channel),
         candidate: CudaCandidate {
             main: (*main).clone(),
             runtime,
@@ -180,12 +216,171 @@ fn choose_assets_for_machine(
     })
 }
 
-fn parse_main_tag(name: &str) -> String {
+fn parse_main_tag(name: &str, channel: LlamaCppChannel) -> String {
+    let config = ChannelConfig::for_channel(channel);
     name.split("-bin-")
         .next()
         .unwrap_or("unknown")
-        .trim_start_matches("llama-")
+        .trim_start_matches(&config.main_prefix)
         .to_string()
+}
+
+fn parse_main_channel(name: &str, channel: LlamaCppChannel) -> Option<CudaVersion> {
+    let config = ChannelConfig::for_channel(channel);
+    let captures = config.parse_main_regex.captures(name)?;
+    Some(CudaVersion(
+        captures.get(1)?.as_str().parse().ok()?,
+        captures.get(2)?.as_str().parse().ok()?,
+    ))
+}
+
+fn parse_runtime_channel(name: &str, channel: LlamaCppChannel) -> Option<CudaVersion> {
+    let config = ChannelConfig::for_channel(channel);
+    let captures = config.parse_runtime_regex.captures(name)?;
+    Some(CudaVersion(
+        captures.get(1)?.as_str().parse().ok()?,
+        captures.get(2)?.as_str().parse().ok()?,
+    ))
+}
+
+fn diagnostic_channel(assets: &[Asset], driver: Option<CudaVersion>, channel: LlamaCppChannel) -> String {
+    let config = ChannelConfig::for_channel(channel);
+    let mut lines = vec![format!(
+        "No suitable Windows x64 CUDA archive found for {channel:?} channel (driver CUDA: {}).",
+        driver.map_or_else(|| "unknown".into(), |v| v.to_string())
+    )];
+    for asset in assets
+        .iter()
+        .filter(|a| a.name.to_ascii_lowercase().contains("win"))
+    {
+        let reason = if asset.name.to_ascii_lowercase().contains("arm64") {
+            "rejected: arm64"
+        } else if parse_main_channel(&asset.name, channel).is_some() {
+            "rejected: CUDA version is newer than the driver"
+        } else if !asset.name.to_ascii_lowercase().contains("cuda") {
+            "rejected: non-CUDA variant"
+        } else {
+            "rejected: not an exact Windows x64 CUDA archive"
+        };
+        lines.push(format!(
+            "  {} ({}; {} bytes total assets)",
+            asset.name,
+            reason,
+            assets.len()
+        ));
+    }
+    lines.push(format!("Releases: {}", config.page_url));
+    lines.join("\n")
+}
+
+fn choose_assets_for_machine_channel(
+    channel: LlamaCppChannel,
+    assets: &[Asset],
+    driver: Option<CudaVersion>,
+    compute_cap: Option<(u32, u32)>,
+) -> Result<Selection> {
+    let mut mains: Vec<(CudaVersion, &Asset)> = assets
+        .iter()
+        .filter_map(|asset| parse_main_channel(&asset.name, channel).map(|version| (version, asset)))
+        .collect();
+    mains.sort_by(|a, b| b.0.cmp(&a.0));
+    let usable = mains
+        .iter()
+        .filter(|(version, _)| driver.map_or(true, |max| *version <= max));
+    let (version, main) = usable
+        .clone()
+        .find(|(version, _)| {
+            compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version >= CudaVersion(12, 8)
+        })
+        .or_else(|| usable.clone().next())
+        .ok_or_else(|| anyhow!(diagnostic_channel(assets, driver, channel)))?;
+    let runtime = assets
+        .iter()
+        .find(|asset| parse_runtime_channel(&asset.name, channel) == Some(*version))
+        .cloned();
+    let warning = if compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version < CudaVersion(12, 8)
+    {
+        Some(format!("CUDA {} predates Blackwell native support; it may be slow or fail. Update the NVIDIA driver to use CUDA 12.8 or newer.", version))
+    } else {
+        None
+    };
+    Ok(Selection {
+        tag: parse_main_tag(&main.name, channel),
+        candidate: CudaCandidate {
+            main: (*main).clone(),
+            runtime,
+            version: *version,
+        },
+        warning,
+    })
+}
+
+pub fn install_for_channel(
+    channel: LlamaCppChannel,
+    destination: &Path,
+    progress: impl Fn(&str, u64, Option<u64>) + Copy,
+    token: Option<&str>,
+) -> Result<(String, PathBuf, String, String)> {
+    let selection = latest_release_for_channel(channel, token)?;
+    let tag = selection.tag;
+    let main = selection.candidate.main;
+    let runtime = selection.candidate.runtime;
+    let config = ChannelConfig::for_channel(channel);
+    let install_dir = destination.join(format!("{channel:?}-{}-cuda-{}", tag, selection.candidate.version).to_lowercase());
+    std::fs::create_dir_all(&install_dir)?;
+    let temp = destination.join(format!(".llamacpp-{channel:?}-{}.zip", std::process::id()).to_lowercase());
+    let download_label = selection.warning.as_ref().map_or_else(
+        || format!("downloading {}", main.name),
+        |warning| format!("downloading {} ({warning})", main.name),
+    );
+    progress(&download_label, 0, None);
+    let result = (|| {
+        download(&main.browser_download_url, &temp, |done, total| {
+            progress(&main.name, done, total)
+        })?;
+        expand_archive(&temp, &install_dir)?;
+        let _ = std::fs::remove_file(&temp);
+
+        if let Some(runtime) = runtime {
+            let runtime_zip =
+                destination.join(format!(".llamacpp-{channel:?}-cudart-{}.zip", std::process::id()).to_lowercase());
+            let runtime_result = (|| {
+                download(
+                    &runtime.browser_download_url,
+                    &runtime_zip,
+                    |done, total| progress(&runtime.name, done, total),
+                )?;
+                expand_archive(&runtime_zip, &install_dir)
+            })();
+            let _ = std::fs::remove_file(runtime_zip);
+            runtime_result?;
+        }
+
+        let exe = find_file(&install_dir, "llama-server.exe")
+            .ok_or_else(|| anyhow!("archive did not contain llama-server.exe"))?;
+        let version = command_output(&exe, &["--version"])?;
+        let help = command_output(&exe, &["--help"])?;
+        Ok((tag, exe, version, help))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+pub fn executable_from_config_channel(cfg: &crate::state::PersistedConfig, channel: LlamaCppChannel) -> Option<PathBuf> {
+    let channel_config = cfg.llamacpp_channels.get(&channel)?;
+    channel_config
+        .executable
+        .as_ref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| find_file(Path::new(&channel_config.dir), "llama-server.exe"))
+        .or_else(|| find_on_path("llama-server.exe"))
+}
+
+pub fn executable_from_config(cfg: &crate::state::PersistedConfig) -> Option<PathBuf> {
+    executable_from_config_channel(cfg, LlamaCppChannel::Upstream)
 }
 
 fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Result<()> {
@@ -276,7 +471,8 @@ fn compute_capability() -> Option<(u32, u32)> {
     ))
 }
 
-fn releases(token: Option<&str>) -> Result<(Vec<Release>, Option<String>)> {
+fn releases_for_channel(channel: LlamaCppChannel, token: Option<&str>) -> Result<(Vec<Release>, Option<String>)> {
+    let config = ChannelConfig::for_channel(channel);
     static CACHE: OnceLock<Mutex<Option<(Instant, Vec<Release>)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     if token.is_none() {
@@ -286,7 +482,7 @@ fn releases(token: Option<&str>) -> Result<(Vec<Release>, Option<String>)> {
             }
         }
     }
-    let (releases, warning) = github_releases_with_info(RELEASES_API, token)?;
+    let (releases, warning) = github_releases_with_info(config.api_url, token)?;
     if token.is_none() {
         *cache.lock().unwrap() = Some((Instant::now(), releases.clone()));
     }
@@ -354,7 +550,8 @@ fn github_releases_with_info(
     Ok((response.json()?, warning))
 }
 
-pub fn test_github_access(token: Option<&str>) -> GithubAccess {
+pub fn test_github_access(channel: LlamaCppChannel, token: Option<&str>) -> GithubAccess {
+    let config = ChannelConfig::for_channel(channel);
     let token_used = token.map(str::trim).is_some_and(|t| !t.is_empty());
     let client = match github_client() {
         Ok(client) => client,
@@ -372,7 +569,7 @@ pub fn test_github_access(token: Option<&str>) -> GithubAccess {
     };
     let trimmed = token.map(str::trim).filter(|t| !t.is_empty());
     let mut warning = None;
-    let mut response = match github_request(&client, RELEASES_API, trimmed).send() {
+    let mut response = match github_request(&client, config.api_url, trimmed).send() {
         Ok(response) => response,
         Err(_) => {
             return GithubAccess {
@@ -391,7 +588,7 @@ pub fn test_github_access(token: Option<&str>) -> GithubAccess {
             "Your GitHub token was rejected; using unauthenticated access (60 requests/hour)."
                 .into(),
         );
-        response = match github_request(&client, RELEASES_API, None).send() {
+        response = match github_request(&client, config.api_url, None).send() {
             Ok(response) => response,
             Err(_) => {
                 return GithubAccess {
@@ -445,11 +642,11 @@ pub fn test_github_access(token: Option<&str>) -> GithubAccess {
     }
 }
 
-fn latest_release(token: Option<&str>) -> Result<Selection> {
+fn latest_release_for_channel(channel: LlamaCppChannel, token: Option<&str>) -> Result<Selection> {
     let driver = driver_cuda_version();
     let cc = compute_capability();
-    let (releases, api_warning) = releases(token)?;
-    let mut selection = select_release(&releases, driver, cc)?;
+    let (releases, api_warning) = releases_for_channel(channel, token)?;
+    let mut selection = select_release_for_channel(channel, &releases, driver, cc)?;
     if let Some(warning) = api_warning {
         selection.warning = Some(match selection.warning {
             Some(existing) => format!("{warning} {existing}"),
@@ -459,11 +656,13 @@ fn latest_release(token: Option<&str>) -> Result<Selection> {
     Ok(selection)
 }
 
-fn select_release(
+fn select_release_for_channel(
+    channel: LlamaCppChannel,
     releases: &[Release],
     driver: Option<CudaVersion>,
     cc: Option<(u32, u32)>,
 ) -> Result<Selection> {
+    let config = ChannelConfig::for_channel(channel);
     let mut examined = Vec::new();
     for release in releases.iter().filter(|release| !release.draft) {
         let windows_count = release
@@ -471,7 +670,7 @@ fn select_release(
             .iter()
             .filter(|asset| asset.name.to_ascii_lowercase().contains("win"))
             .count();
-        match choose_assets_for_machine(&release.assets, driver, cc) {
+        match choose_assets_for_machine_channel(channel, &release.assets, driver, cc) {
             Ok(mut selection) => {
                 selection.tag = release.tag_name.clone();
                 if !examined.is_empty() {
@@ -494,9 +693,9 @@ fn select_release(
         }
     }
     Err(anyhow!(
-        "No suitable llama.cpp release was found.\nExamined releases:\n{}\n{}",
+        "No suitable llama.cpp release was found for {channel:?} channel.\nExamined releases:\n{}\n{}",
         examined.join("\n"),
-        format!("{RELEASES_PAGE}\nManual fallback: download a Windows x64 CUDA zip and its matching cudart zip from the release page, extract both into the same folder, then set that folder's llama-server.exe under Settings → Custom llama-server.exe.")
+        format!("{}\nManual fallback: download a Windows x64 CUDA zip and its matching cudart zip from the release page, extract both into the same folder, then set that folder's llama-server.exe under Settings → Custom llama-server.exe.", config.page_url)
     ))
 }
 
@@ -505,50 +704,7 @@ pub fn install(
     progress: impl Fn(&str, u64, Option<u64>) + Copy,
     token: Option<&str>,
 ) -> Result<(String, PathBuf, String, String)> {
-    let selection = latest_release(token)?;
-    let tag = selection.tag;
-    let main = selection.candidate.main;
-    let runtime = selection.candidate.runtime;
-    let install_dir = destination.join(format!("{}-cuda-{}", tag, selection.candidate.version));
-    std::fs::create_dir_all(&install_dir)?;
-    let temp = destination.join(format!(".llamacpp-{}.zip", std::process::id()));
-    let download_label = selection.warning.as_ref().map_or_else(
-        || format!("downloading {}", main.name),
-        |warning| format!("downloading {} ({warning})", main.name),
-    );
-    progress(&download_label, 0, None);
-    let result = (|| {
-        download(&main.browser_download_url, &temp, |done, total| {
-            progress(&main.name, done, total)
-        })?;
-        expand_archive(&temp, &install_dir)?;
-        let _ = std::fs::remove_file(&temp);
-
-        if let Some(runtime) = runtime {
-            let runtime_zip =
-                destination.join(format!(".llamacpp-cudart-{}.zip", std::process::id()));
-            let runtime_result = (|| {
-                download(
-                    &runtime.browser_download_url,
-                    &runtime_zip,
-                    |done, total| progress(&runtime.name, done, total),
-                )?;
-                expand_archive(&runtime_zip, &install_dir)
-            })();
-            let _ = std::fs::remove_file(runtime_zip);
-            runtime_result?;
-        }
-
-        let exe = find_file(&install_dir, "llama-server.exe")
-            .ok_or_else(|| anyhow!("archive did not contain llama-server.exe"))?;
-        let version = command_output(&exe, &["--version"])?;
-        let help = command_output(&exe, &["--help"])?;
-        Ok((tag, exe, version, help))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
+    install_for_channel(LlamaCppChannel::Upstream, destination, progress, token)
 }
 
 pub fn command_output(exe: &Path, args: &[&str]) -> Result<String> {
@@ -594,14 +750,6 @@ pub fn parse_devices(output: &str) -> Vec<LlamaDevice> {
         .collect()
 }
 
-pub fn executable_from_config(cfg: &crate::state::PersistedConfig) -> Option<PathBuf> {
-    cfg.llamacpp_executable
-        .as_ref()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .or_else(|| find_file(Path::new(&cfg.llamacpp_dir), "llama-server.exe"))
-        .or_else(|| find_on_path("llama-server.exe"))
-}
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")

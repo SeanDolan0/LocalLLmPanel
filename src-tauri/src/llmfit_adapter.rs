@@ -17,6 +17,7 @@ use llmfit_core::models::{LlmModel, ModelDatabase, UseCase, QUANT_HIERARCHY};
 
 use crate::fit::{FitResult, FitVerdict, FormatSupport, RunMode};
 use crate::hf::{QuantFormat, QuantVariant};
+use crate::state::LlamaCppChannel;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ScoreComponentsDto {
@@ -243,6 +244,7 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
             params_b,
             gguf_file: None,
             vllm_native: format != QuantFormat::GGUF,
+            required_channel: LlamaCppChannel::Upstream,
         };
 
         // Score this specific quant variant

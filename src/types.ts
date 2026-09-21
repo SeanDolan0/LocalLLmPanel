@@ -143,6 +143,7 @@ export interface ServerDef {
   metrics: boolean;
   extra_args: string[];
   env?: Record<string, string>;
+  llamacpp_channel?: LlamaCppChannel;
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -208,6 +209,22 @@ export interface Settings {
   auto_restart_crashed?: boolean;
   launch_at_login?: boolean;
   default_env?: Record<string, string>;
+  llamacpp_channels?: {
+    upstream?: {
+      installed_tag?: string | null;
+      version?: string | null;
+      help?: string | null;
+      executable?: string | null;
+      dir?: string;
+    };
+    prism?: {
+      installed_tag?: string | null;
+      version?: string | null;
+      help?: string | null;
+      executable?: string | null;
+      dir?: string;
+    };
+  };
 }
 
 export interface PullStatus {
@@ -270,6 +287,7 @@ export interface CreateServerInput {
   metrics?: boolean;
   extra_args?: string[];
   env?: Record<string, string>;
+  llamacpp_channel?: LlamaCppChannel;
 }
 
 export interface WslConfigInfo {
@@ -295,6 +313,8 @@ export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";
 export type FormatSupport = "Native" | "Experimental";
 export type QuantFormatTag = "FP16" | "FP8" | "AWQ" | "GPTQ" | "BNB" | "GGUF";
 
+export type LlamaCppChannel = "upstream" | "prism";
+
 export interface QuantVariant {
   repo_id: string;
   format: QuantFormatTag;
@@ -303,6 +323,7 @@ export interface QuantVariant {
   params_b: number | null;
   gguf_file: string | null;
   vllm_native: boolean;
+  required_channel?: LlamaCppChannel;
 }
 
 export interface MemorySettings {

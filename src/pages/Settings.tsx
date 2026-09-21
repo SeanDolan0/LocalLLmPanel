@@ -692,13 +692,24 @@ export default function Settings() {
               </Field>
 
               <Field
-                label="llama.cpp Directory"
-                hint="Windows folder containing the installed CUDA llama-server build."
+                label="llama.cpp Directory (Upstream)"
+                hint="Windows folder containing the installed CUDA llama-server build (ggml-org/llama.cpp)."
               >
                 <input
                   className={inputCls}
-                  value={s.llamacpp_dir}
-                  onChange={(e) => setS({ ...s, llamacpp_dir: e.target.value })}
+                  value={s.llamacpp_channels?.upstream?.dir ?? s.llamacpp_dir}
+                  onChange={(e) => setS({ ...s, llamacpp_channels: { ...s.llamacpp_channels, upstream: { ...s.llamacpp_channels?.upstream, dir: e.target.value } } })}
+                />
+              </Field>
+
+              <Field
+                label="llama.cpp Directory (PrismML)"
+                hint="Windows folder for PrismML fork build (PrismML-Eng/llama.cpp@prism). Supports ternary formats (PQ2_0, PTQ1_0)."
+              >
+                <input
+                  className={inputCls}
+                  value={s.llamacpp_channels?.prism?.dir ?? ""}
+                  onChange={(e) => setS({ ...s, llamacpp_channels: { ...s.llamacpp_channels, prism: { ...s.llamacpp_channels?.prism, dir: e.target.value } } })}
                 />
               </Field>
 
@@ -714,17 +725,34 @@ export default function Settings() {
               </Field>
 
               <Field
-                label="Custom llama-server.exe"
-                hint="Optional absolute path; leave blank to use the installed build."
+                label="Custom llama-server.exe (Upstream)"
+                hint="Optional absolute path for upstream build; leave blank to use the installed build."
               >
                 <input
                   className={inputCls}
                   placeholder="C:\\path\\to\\llama-server.exe"
-                  value={s.llamacpp_executable ?? ""}
+                  value={s.llamacpp_channels?.upstream?.executable ?? s.llamacpp_executable ?? ""}
                   onChange={(e) =>
                     setS({
                       ...s,
-                      llamacpp_executable: e.target.value.trim() || null,
+                      llamacpp_channels: { ...s.llamacpp_channels, upstream: { ...s.llamacpp_channels?.upstream, executable: e.target.value.trim() || null } },
+                    })
+                  }
+                />
+              </Field>
+
+              <Field
+                label="Custom llama-server.exe (PrismML)"
+                hint="Optional absolute path for PrismML build; leave blank to use the installed build."
+              >
+                <input
+                  className={inputCls}
+                  placeholder="C:\\path\\to\\llama-server.exe"
+                  value={s.llamacpp_channels?.prism?.executable ?? ""}
+                  onChange={(e) =>
+                    setS({
+                      ...s,
+                      llamacpp_channels: { ...s.llamacpp_channels, prism: { ...s.llamacpp_channels?.prism, executable: e.target.value.trim() || null } },
                     })
                   }
                 />
@@ -732,13 +760,20 @@ export default function Settings() {
               <div className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 text-xs text-slate-400">
                 <div className="flex items-center gap-2 text-sm text-slate-200">
                   <span className={`h-2 w-2 rounded-full ${llamacppStatus?.cuda_available ? "bg-emerald-400" : "bg-amber-400"}`} />
-                  Native llama.cpp: {llamacppStatus?.installed ? (llamacppStatus.cuda_available ? "CUDA ready" : "installed, CUDA device unavailable") : "not installed"}
+                  Native llama.cpp (Upstream): {llamacppStatus?.installed ? (llamacppStatus.cuda_available ? "CUDA ready" : "installed, CUDA device unavailable") : "not installed"}
                 </div>
                 {llamacppStatus?.devices?.length ? (
                   <div className="mt-1">Devices: {llamacppStatus.devices.map((d) => `${d.id} (${d.name})`).join(", ")}</div>
                 ) : (
                   <div className="mt-1">Install a CUDA build; Vulkan/CPU archives are not selected by this app.</div>
                 )}
+              </div>
+              <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
+                <div className="flex items-center gap-2 text-sm text-indigo-200">
+                  <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                  PrismML Channel: {s.llamacpp_channels?.prism?.installed_tag ? "installed" : "not installed"}
+                </div>
+                <div className="mt-1 text-slate-400">Supports ternary quant formats (PQ2_0, PTQ1_0) and Hadamard activation transform for Bonsai 2 models.</div>
               </div>
 
               <div className="sm:col-span-2">

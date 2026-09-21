@@ -6,6 +6,37 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LlamaCppChannel {
+    #[default]
+    Upstream,
+    Prism,
+}
+
+impl LlamaCppChannel {
+    pub fn repo(&self) -> (&'static str, &'static str) {
+        match self {
+            LlamaCppChannel::Upstream => ("ggml-org", "llama.cpp"),
+            LlamaCppChannel::Prism => ("PrismML-Eng", "llama.cpp"),
+        }
+    }
+
+    pub fn branch(&self) -> &'static str {
+        match self {
+            LlamaCppChannel::Upstream => "master",
+            LlamaCppChannel::Prism => "prism",
+        }
+    }
+
+    pub fn dir_suffix(&self) -> &'static str {
+        match self {
+            LlamaCppChannel::Upstream => "upstream",
+            LlamaCppChannel::Prism => "prism",
+        }
+    }
+}
+
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
@@ -152,6 +183,9 @@ pub struct ServerDef {
     /// "fp16" | "fp8" | "awq" | "gptq"
     pub quant: String,
     pub served_model_name: Option<String>,
+    /// llama.cpp binary channel: "upstream" (ggml-org) or "prism" (PrismML-Eng/llama.cpp@prism)
+    #[serde(default)]
+    pub llamacpp_channel: LlamaCppChannel,
     /// Skip CUDA-graph capture (`--enforce-eager`). WSL2's full-graph
     /// capture can hang for minutes or stall; eager mode starts reliably.
     /// Default true; throughput is slightly lower but startup is robust.
@@ -395,12 +429,31 @@ impl Default for AdvancedSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct LlamaCppChannelConfig {
+    #[serde(default)]
+    pub installed_tag: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub help: Option<String>,
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedConfig {
     pub distro: String,
     pub llm_dir: String,
     pub venv_dir: String,
     pub llamacpp_dir: String,
     pub gguf_dir: String,
+    /// Per-channel llama.cpp installation state
+    #[serde(default)]
+    pub llamacpp_channels: BTreeMap<LlamaCppChannel, LlamaCppChannelConfig>,
+    /// Legacy fields (for back-compat with config.json written by older versions)
     #[serde(default)]
     pub llamacpp_executable: Option<String>,
     #[serde(default)]
@@ -437,11 +490,30 @@ pub struct PersistedConfig {
 
 pub type AppConfig = PersistedConfig;
 
+impl Default for LlamaCppChannelConfig {
+    fn default() -> Self {
+        let base_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(CONFIG_DIR_NAME)
+            .join("llama.cpp");
+        LlamaCppChannelConfig {
+            installed_tag: None,
+            version: None,
+            help: None,
+            executable: None,
+            dir: base_dir.to_string_lossy().into_owned(),
+        }
+    }
+}
+
 impl Default for PersistedConfig {
     fn default() -> Self {
         let distro = crate::wsl::detect_default_distro().unwrap_or_else(|| "Ubuntu".to_string());
         let mut default_env = BTreeMap::new();
         default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
+        let mut llamacpp_channels = BTreeMap::new();
+        llamacpp_channels.insert(LlamaCppChannel::Upstream, LlamaCppChannelConfig::default());
+        llamacpp_channels.insert(LlamaCppChannel::Prism, LlamaCppChannelConfig::default());
         PersistedConfig {
             distro,
             llm_dir: "~/llm-lp".to_string(),
@@ -458,6 +530,7 @@ impl Default for PersistedConfig {
                 .join("gguf")
                 .to_string_lossy()
                 .into_owned(),
+            llamacpp_channels,
             llamacpp_executable: None,
             llamacpp_installed_tag: None,
             llamacpp_version: None,
@@ -513,6 +586,19 @@ impl PersistedConfig {
         // Ensure default_env has the FlashInfer sampler disabled by default for existing configs.
         if cfg.default_env.is_empty() {
             cfg.default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
+        }
+        // Back-compat: migrate legacy single-install fields to Upstream channel config
+        if cfg.llamacpp_channels.is_empty() {
+            let mut channels = BTreeMap::new();
+            let mut upstream = LlamaCppChannelConfig::default();
+            upstream.installed_tag = cfg.llamacpp_installed_tag.clone();
+            upstream.version = cfg.llamacpp_version.clone();
+            upstream.help = cfg.llamacpp_help.clone();
+            upstream.executable = cfg.llamacpp_executable.clone();
+            upstream.dir = cfg.llamacpp_dir.clone();
+            channels.insert(LlamaCppChannel::Upstream, upstream);
+            channels.insert(LlamaCppChannel::Prism, LlamaCppChannelConfig::default());
+            cfg.llamacpp_channels = channels;
         }
         cfg
     }

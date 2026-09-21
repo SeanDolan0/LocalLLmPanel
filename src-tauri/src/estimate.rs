@@ -7,10 +7,14 @@ use serde::Serialize;
 
 /// Bytes of memory per parameter for a given quantization.
 /// fp16/bf16 = 2, fp8 = 1, int4 (AWQ/GPTQ) ≈ 0.55 (weights + scale overhead).
+/// Ternary formats (PQ2_0, PTQ1_0) ≈ 0.26 (2.1 bits/weight).
 pub fn bytes_per_param(quant: &str) -> f64 {
     let q = quant.to_ascii_lowercase();
     let q_str = q.as_str();
-    if q_str.starts_with("q4")
+    // Ternary formats (2.1 bits/weight ≈ 0.2625 bytes/weight + small overhead)
+    if q_str.starts_with("pq") || q_str.starts_with("ptq") {
+        0.28 // ~2.1 bits + overhead
+    } else if q_str.starts_with("q4")
         || q_str.contains("q4_")
         || q_str.contains("iq4")
         || q_str == "awq"
@@ -28,6 +32,8 @@ pub fn bytes_per_param(quant: &str) -> f64 {
         0.45
     } else if q_str.starts_with("q2") || q_str.contains("q2_") || q_str.contains("iq2") {
         0.35
+    } else if q_str.starts_with("q1") || q_str.contains("q1_") {
+        0.25 // 1-2 bit extreme quantization
     } else if q_str == "fp8" || q_str == "int8" {
         1.0
     } else if q_str == "gguf" {
@@ -41,6 +47,22 @@ pub fn bytes_per_param(quant: &str) -> f64 {
 /// `2 (K+V) × n_layers × n_kv_heads × head_dim × 2 bytes`.
 pub fn kv_bytes_per_token(n_layers: usize, n_kv_heads: usize, head_dim: usize) -> f64 {
     2.0 * n_layers as f64 * n_kv_heads as f64 * head_dim as f64 * 2.0
+}
+
+/// KV-cache bytes per token for hybrid attention models.
+/// Only full-attention layers allocate KV cache. Bonsai 2 has full attention
+/// on every Nth layer (e.g., every 4th layer out of 64).
+pub fn kv_bytes_per_token_hybrid(
+    total_layers: usize,
+    full_attention_interval: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+) -> f64 {
+    if full_attention_interval == 0 || n_kv_heads == 0 || head_dim == 0 {
+        return 0.0;
+    }
+    let full_layers = total_layers / full_attention_interval;
+    2.0 * full_layers as f64 * n_kv_heads as f64 * head_dim as f64 * 2.0
 }
 
 /// Fallback estimate of KV-cache bytes per token when specific layer dims are missing.
@@ -592,6 +614,10 @@ mod tests {
         // AWQ/Q4 (4-bit) must be strictly smaller than FP8 (8-bit) and Q5 (5-bit)
         assert!(bytes_per_param("awq") < bytes_per_param("q5_k_m"));
         assert!(bytes_per_param("awq") < bytes_per_param("fp8"));
+        // Ternary formats
+        assert!((bytes_per_param("pq2_0") - 0.28).abs() < 1e-6);
+        assert!((bytes_per_param("ptq1_0") - 0.28).abs() < 1e-6);
+        assert!(bytes_per_param("pq2_0") < bytes_per_param("q4_k_m"));
     }
 
     #[test]
@@ -603,6 +629,20 @@ mod tests {
         let hd = 64;
         let bpt = kv_bytes_per_token(24, 2, hd);
         assert_eq!(bpt, 12288.0);
+    }
+
+    #[test]
+    fn kv_bytes_hybrid_bonsai2() {
+        // Bonsai 2 27B: 64 layers, full attention every 4th layer = 16 full-attention layers
+        // n_kv_heads=8, head_dim=128
+        // kv_bpt = 2 * 16 * 8 * 128 * 2 = 65536 bytes/token
+        let bpt = kv_bytes_per_token_hybrid(64, 4, 8, 128);
+        assert_eq!(bpt, 65536.0);
+        // Compare with full KV: 2 * 64 * 8 * 128 * 2 = 262144
+        let full_bpt = kv_bytes_per_token(64, 8, 128);
+        assert_eq!(full_bpt, 262144.0);
+        // Hybrid is 1/4 of full
+        assert_eq!(bpt * 4, full_bpt);
     }
 
     #[test]

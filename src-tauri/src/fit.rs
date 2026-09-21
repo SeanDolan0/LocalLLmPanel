@@ -98,6 +98,9 @@ pub struct VariantInput {
     pub weight_bytes: Option<u64>,
     pub params_b: Option<f64>, // override if different from base model
     pub is_gguf: bool,
+    /// The llama.cpp channel required: "upstream" or "prism"
+    #[serde(default)]
+    pub required_channel: crate::state::LlamaCppChannel,
 }
 
 pub fn score_variant(
@@ -109,10 +112,22 @@ pub fn score_variant(
     vram_overhead_mb: f64,
     allow_weight_offload: bool,
     max_context_cap: Option<usize>,
+    channel_installed: Option<crate::state::LlamaCppChannel>,
 ) -> FitResult {
     let params_b = variant.params_b.or(arch.params_b).unwrap_or(0.0);
+    
+    // Determine format support based on channel availability
     let format_support = if variant.is_gguf {
-        FormatSupport::Experimental
+        if variant.required_channel == crate::state::LlamaCppChannel::Prism {
+            // Check if prism channel is installed
+            if channel_installed == Some(crate::state::LlamaCppChannel::Prism) {
+                FormatSupport::Native
+            } else {
+                FormatSupport::Experimental
+            }
+        } else {
+            FormatSupport::Experimental
+        }
     } else {
         FormatSupport::Native
     };
@@ -412,7 +427,7 @@ mod tests {
         };
         let v = variant("awq", false);
         let arch = arch_14b(); // 14B AWQ on 12GB GPU: weights fit, but KV context spills to RAM
-        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
         assert_eq!(r.run_mode, RunMode::GpuRamSwap);
         assert!(r.extended_context > r.vram_context);
         assert!(r.swap_space_gb > 0);
@@ -434,7 +449,7 @@ mod tests {
         // 7.6B fp16 = 15.2 GB weights on 8GB GPU -> shortfall ~10GB -> offload to RAM
         let v = variant("fp16", false);
         let arch = arch_7b();
-        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
         assert_eq!(r.run_mode, RunMode::CpuOffload);
         assert_eq!(r.verdict, FitVerdict::Constrained);
         assert!(r.cpu_offload_gb > 0);
@@ -540,6 +555,7 @@ mod tests {
             weight_bytes: None,
             params_b: None,
             is_gguf,
+            required_channel: crate::state::LlamaCppChannel::Upstream,
         }
     }
 
@@ -549,6 +565,7 @@ mod tests {
             weight_bytes: Some(size_bytes),
             params_b: None,
             is_gguf: true,
+            required_channel: crate::state::LlamaCppChannel::Upstream,
         }
     }
 
@@ -581,7 +598,8 @@ mod tests {
             None,
             0.92,
             2500.0,
-            false,
+            true,
+            None,
             None,
         );
         assert_eq!(r.verdict, FitVerdict::DoesNotFit);
@@ -611,6 +629,7 @@ mod tests {
             2500.0,
             true,
             None,
+            None,
         );
         assert_eq!(r.verdict, FitVerdict::Constrained);
         assert!(r.score > 30 && r.score < 80, "score = {}", r.score);
@@ -626,6 +645,7 @@ mod tests {
             0.92,
             2500.0,
             true,
+            None,
             None,
         );
         assert_eq!(r.verdict, FitVerdict::DoesNotFit);
@@ -644,6 +664,7 @@ mod tests {
             0.92,
             2500.0,
             true,
+            None,
             None,
         );
         // 4.5 GB + 2.5 GB overhead = 7 GB → 7/12.227 = 0.572 → Comfortable
@@ -666,6 +687,7 @@ mod tests {
             2500.0,
             true,
             None,
+            None,
         );
         assert_eq!(r.verdict, FitVerdict::Comfortable);
         assert!(r.vram_context > 0);
@@ -684,6 +706,7 @@ mod tests {
             2500.0,
             true,
             None,
+            None,
         );
         assert_eq!(r.verdict, FitVerdict::Constrained);
         assert!(r.vram_context < 1000);
@@ -698,9 +721,9 @@ mod tests {
         let v = variant("awq", false);
         let arch = arch_14b();
 
-        let r_est = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
-        let r_faster = score_variant(&hw, &v, &arch, Some(80.0), 0.92, 2500.0, true, None);
-        let r_slower = score_variant(&hw, &v, &arch, Some(10.0), 0.92, 2500.0, true, None);
+        let r_est = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
+        let r_faster = score_variant(&hw, &v, &arch, Some(80.0), 0.92, 2500.0, true, None, None);
+        let r_slower = score_variant(&hw, &v, &arch, Some(10.0), 0.92, 2500.0, true, None, None);
 
         assert_eq!(r_faster.measured_tok_s, Some(80.0));
         assert!(r_faster.est_tok_s.is_some());
@@ -816,8 +839,9 @@ mod tests {
             weight_bytes: Some(16_000_000_000), // ~14.9 GB
             params_b: Some(27.0),
             is_gguf: true,
+            required_channel: crate::state::LlamaCppChannel::Upstream,
         };
-        let res = score_variant(&hw, &v_gguf, &arch, None, 0.92, 2500.0, true, None);
+        let res = score_variant(&hw, &v_gguf, &arch, None, 0.92, 2500.0, true, None, None);
         assert!(res.vram_context > 0, "usable context should not be 0");
         assert!(res.est_tok_s.is_some(), "est speed should be present");
         assert!(
@@ -842,7 +866,7 @@ mod tests {
         };
         let v = variant("awq", false);
         let arch = arch_14b(); // 14B AWQ on 12GB GPU: context overflows to RAM
-        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
         // Active execution mode should be pure GPU because overflow is disabled in settings
         assert_eq!(r.run_mode, RunMode::Gpu);
         // But extended_context and swap_space_gb must show the RAM overflow potential
@@ -857,10 +881,60 @@ mod tests {
         let hw = hw_12gb();
         let v = variant("fp16", false);
         let arch = arch_0_5b(); // 32k native context fits entirely in 12GB VRAM
-        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None);
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
         assert_eq!(r.run_mode, RunMode::Gpu);
         assert_eq!(r.vram_context, 32768);
         assert_eq!(r.extended_context, 32768);
         assert_eq!(r.swap_space_gb, 0);
+    }
+
+    #[test]
+    fn test_bonsai_27b_ternary_fits_12gb_with_prism() {
+        // Bonsai 2 27B ternary (PQ2_0): ~6 GB weights, 64 layers, full attention every 4th layer
+        // On RTX 5070 Ti 12GB with Prism channel installed
+        let hw = hw_12gb();
+        let v = VariantInput {
+            quant_str: "pq2_0".into(),
+            weight_bytes: Some(6_000_000_000), // ~6 GB for 27B ternary
+            params_b: Some(27.0),
+            is_gguf: true,
+            required_channel: crate::state::LlamaCppChannel::Prism,
+        };
+        let arch = ModelArchInfo {
+            params_b: Some(27.0),
+            context: 32768,
+            n_layers: Some(64),
+            n_kv_heads: Some(8),
+            head_dim: Some(128),
+        };
+        // With Prism channel installed, format_support = Native
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, Some(crate::state::LlamaCppChannel::Prism));
+        assert_eq!(r.format_support, FormatSupport::Native);
+        // 6 GB + 2.5 GB overhead = 8.5 GB, VRAM ratio = 8.5/12.2 ≈ 0.69 → Constrained
+        // But hybrid KV (16 full-attention layers) = 65536 bytes/token → plenty of room for context
+        assert!(r.vram_context > 10000, "Should have large context with hybrid KV");
+        assert!(r.verdict != FitVerdict::DoesNotFit, "27B ternary should fit on 12GB with hybrid KV");
+    }
+
+    #[test]
+    fn test_bonsai_27b_ternary_experimental_without_prism() {
+        // Same model but Prism channel NOT installed → Experimental
+        let hw = hw_12gb();
+        let v = VariantInput {
+            quant_str: "pq2_0".into(),
+            weight_bytes: Some(6_000_000_000),
+            params_b: Some(27.0),
+            is_gguf: true,
+            required_channel: crate::state::LlamaCppChannel::Prism,
+        };
+        let arch = ModelArchInfo {
+            params_b: Some(27.0),
+            context: 32768,
+            n_layers: Some(64),
+            n_kv_heads: Some(8),
+            head_dim: Some(128),
+        };
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
+        assert_eq!(r.format_support, FormatSupport::Experimental);
     }
 }

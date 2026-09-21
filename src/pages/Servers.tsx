@@ -709,6 +709,9 @@ function NewServerForm({
     const defaults = initialGlobalDefaults ?? {};
     return defaults["VLLM_USE_FLASHINFER_SAMPLER"] === "0";
   });
+  const [llamaCppChannel, setLlamaCppChannel] = useState<"upstream" | "prism">("upstream");
+  const [cacheTypeK, setCacheTypeK] = useState("q8_0");
+  const [cacheTypeV, setCacheTypeV] = useState("q8_0");
 
   // Sync flashInferDisabled checkbox with env
   useEffect(() => {
@@ -755,6 +758,11 @@ function NewServerForm({
     if (initialTask !== undefined) {
       setTask(initialTask);
     }
+    if (initialServer) {
+      setLlamaCppChannel(initialServer.llamacpp_channel === "prism" ? "prism" : "upstream");
+      setCacheTypeK(initialServer.cache_type_k);
+      setCacheTypeV(initialServer.cache_type_v);
+    }
   }, [
     initialModelId,
     initialBackend,
@@ -768,6 +776,7 @@ function NewServerForm({
     initialGpuUtil,
     initialServed,
     initialTask,
+    initialServer,
   ]);
 
   const submit = async () => {
@@ -808,6 +817,9 @@ function NewServerForm({
         log_verbosity: backend === "llamacpp" && logVerbosity.trim() ? parseInt(logVerbosity, 10) : undefined,
         flash_attn: backend === "llamacpp" ? flashAttn : undefined,
         jinja: backend === "llamacpp" ? jinja : undefined,
+        llamacpp_channel: backend === "llamacpp" ? llamaCppChannel : undefined,
+        cache_type_k: backend === "llamacpp" ? cacheTypeK : undefined,
+        cache_type_v: backend === "llamacpp" ? cacheTypeV : undefined,
         env: backend === "vllm" && Object.keys(env).length > 0 ? env : undefined,
       };
       let s;
@@ -903,11 +915,40 @@ function NewServerForm({
             <option value="gptq">GPTQ</option>
           </select>
         </Field>}
-        {backend === "vllm" && <Field label="GPU memory utilization (0–1)">
-          <input className={inputCls} value={gpuUtil} onChange={(e) => setGpuUtil(e.target.value)} />
-        </Field>}
         {backend === "llamacpp" && (
           <>
+            <Field label="llama.cpp Channel" hint="PrismML fork supports ternary formats (PQ2_0, PTQ1_0) and Hadamard transform.">
+              <select className={inputCls} value={llamaCppChannel} onChange={(e) => setLlamaCppChannel(e.target.value as "upstream" | "prism")}>
+                <option value="upstream">Upstream (ggml-org/llama.cpp)</option>
+                <option value="prism">PrismML (PrismML-Eng/llama.cpp@prism)</option>
+              </select>
+            </Field>
+            {llamaCppChannel === "prism" && (
+              <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+                <div className="text-sm font-medium text-indigo-200">Bonsai 2 / Ternary Preset</div>
+                <div className="text-xs text-slate-400 mb-2">Optimized for PrismML fork: all GPU layers, flash attention, Jinja tool calling, q8_0 KV cache.</div>
+                <Button
+                  variant="subtle"
+                  onClick={() => {
+                    setNGpuLayers("99");
+                    setNCpuMoe("");
+                    setCtxSize("32768");
+                    setFit(true);
+                    setFitTarget("1024");
+                    setFlashAttn(true);
+                    setJinja(true);
+                    setCacheTypeK("q8_0");
+                    setCacheTypeV("q8_0");
+                    setMoePresetApplied(true);
+                  }}
+                >
+                  Apply Bonsai 2 Preset
+                </Button>
+              </div>
+            )}
+            <Field label="Quantization">
+              <input className={inputCls} placeholder="e.g. PQ2_0, PTQ1_0, Q2_0_g64" value={quant} onChange={(e) => setQuant(e.target.value)} />
+            </Field>
             {nGpuLayers.trim() && fit && (
               <div className="sm:col-span-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                 Explicit <code>-ngl</code> disables llama.cpp automatic fitting. Clear GPU layers to let fit choose automatically.
