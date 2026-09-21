@@ -38,6 +38,7 @@ export default function Servers() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
   const [globalDefaults] = useState<Record<string, string>>({});
+  const [editingServer, setEditingServer] = useState<ServerDef | null>(null);
   
   // log buffers per server (event-driven + hydrated)
   const [logs, setLogs] = useState<Record<string, string>>({});
@@ -56,6 +57,7 @@ export default function Servers() {
     setPrefillGpuUtil(undefined);
     setPrefillServed(undefined);
     setPrefillTask(undefined);
+    setEditingServer(null);
   };
 
   const copyRecipe = async (def: ServerDef) => {
@@ -129,6 +131,23 @@ export default function Servers() {
       window.history.replaceState({}, document.title);
     }
   }, [location.state]);
+
+  // Populate form when editing a server
+  useEffect(() => {
+    if (editingServer) {
+      setPrefillModel(editingServer.model_id);
+      setPrefillBackend(editingServer.backend as "vllm" | "llamacpp");
+      setPrefillModelPath(editingServer.model_path ?? undefined);
+      setPrefillQuant(editingServer.quant);
+      setPrefillSwapSpace(editingServer.swap_space_gb ?? undefined);
+      setPrefillCpuOffload(editingServer.cpu_offload_gb ?? undefined);
+      setPrefillMaxLen(editingServer.max_model_len ?? undefined);
+      setPrefillGpuUtil(editingServer.gpu_mem_util);
+      setPrefillServed(editingServer.served_model_name ?? undefined);
+      setPrefillTask(editingServer.task as "instruct" | "embed");
+      setShowNew(true);
+    }
+  }, [editingServer]);
 
   const refresh = useCallback(() => {
     api
@@ -305,6 +324,7 @@ export default function Servers() {
           initialTask={prefillTask}
           initialGlobalDefaults={globalDefaults}
           initialEnv={{}}
+          initialServer={editingServer}
           onDone={(s) => {
             setShowNew(false);
             clearPrefills();
@@ -455,6 +475,16 @@ export default function Servers() {
                     }}
                   >
                     {copiedId === r.def.id ? "Copied!" : "Recipe"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    title="Edit server configuration"
+                    onClick={() => {
+                      setEditingServer(r.def);
+                      setShowNew(true);
+                    }}
+                  >
+                    Edit
                   </Button>
                   <Button variant="subtle" disabled={busy === r.def.id} onClick={() => { if (confirm(`Delete server "${r.def.name}"?`)) act(r.def.id, () => api.serversDelete(r.def.id)); }}>
                     ✕
@@ -611,6 +641,7 @@ function NewServerForm({
   initialTask,
   initialGlobalDefaults,
   initialEnv,
+  initialServer, // When provided, enables edit mode
   onDone,
   onCancel,
   onErr,
@@ -630,10 +661,12 @@ function NewServerForm({
   initialTask?: "instruct" | "embed";
   initialGlobalDefaults?: Record<string, string>;
   initialEnv?: Record<string, string>;
+  initialServer?: ServerDef | null; // For editing existing server
   onDone: (s: { id: string }) => void;
   onCancel: () => void;
   onErr: (e: string) => void;
 }) {
+  const isEditing = !!initialServer;
   const isInitialGguf =
     initialBackend === "llamacpp" ||
     initialQuant?.toUpperCase() === "GGUF" ||
@@ -756,7 +789,7 @@ function NewServerForm({
     try {
       const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
-      const s = await api.serversCreate({
+      const serverData = {
         backend,
         model_id: chosenModelId || chosenModelPath,
         name: name.trim() || chosenModelId.split("/").pop() || "server",
@@ -780,7 +813,13 @@ function NewServerForm({
         flash_attn: backend === "llamacpp" ? flashAttn : undefined,
         jinja: backend === "llamacpp" ? jinja : undefined,
         env: backend === "vllm" && Object.keys(env).length > 0 ? env : undefined,
-      });
+      };
+      let s;
+      if (isEditing && initialServer) {
+        s = await api.serversUpdate(initialServer.id, serverData);
+      } else {
+        s = await api.serversCreate(serverData);
+      }
       onDone(s);
     } catch (e) {
       onErr(String(e));
@@ -791,7 +830,7 @@ function NewServerForm({
 
   return (
     <Card className="border-indigo-500/30">
-      <CardTitle>Define new server</CardTitle>
+      <CardTitle>{isEditing ? "Edit server" : "Define new server"}</CardTitle>
       {backend === "vllm" && freeGb !== null && freeGb !== undefined && freeGb < 1.0 && (
         <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
           ⚠️ <strong>VRAM Pressure:</strong> Current free VRAM is only {freeGb.toFixed(1)} GB. Consider configuring Swap Space or CPU Offload below to avoid OOM errors.
