@@ -14,8 +14,8 @@ use crate::state::{AppState, LiveServer, ServerDef, ServerStatus, VecDequeLog};
 use crate::wsl;
 use tauri::Emitter;
 
-// Validation and escaping functions for environment variables
-fn validate_env_name(name: &str) -> Result<(), String> {
+/// Validate environment variable name: must match ^[A-Za-z_][A-Za-z0-9_]*$
+pub fn validate_env_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Environment variable name cannot be empty".into());
     }
@@ -32,19 +32,32 @@ fn validate_env_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn shell_escape_single_quoted(value: &str) -> String {
+/// Safely single-quote a value for POSIX sh.
+/// Wraps in single quotes and replaces each embedded ' with '\''.
+/// This is the ONLY quoting function that should be used for shell values.
+pub fn shell_quote(value: &str) -> String {
+    // Simple and correct: wrap in single quotes, escape embedded quotes
     let mut result = String::with_capacity(value.len() + 2);
     result.push('\'');
-    for chunk in value.split('\'') {
-        if !result.ends_with('\'') {
-            result.push_str(chunk);
-        } else {
-            result.push_str("'\\''");
-            result.push_str(chunk);
-        }
-    }
+    result.push_str(&value.replace('\'', "'\\''"));
     result.push('\'');
     result
+}
+
+/// Sanitize a user-supplied environment variable value:
+/// - Trim whitespace
+/// - Strip a matching pair of surrounding single or double quotes
+/// This allows users to enter '0' or "0" and get 0.
+pub fn sanitize_env_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let first = trimmed.chars().next().unwrap();
+        let last = trimmed.chars().last().unwrap();
+        if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 const DEFAULT_PORT_START: u16 = 8000;
@@ -78,10 +91,6 @@ pub fn alloc_port(existing: &[u16]) -> Result<u16> {
 // ---------------------------------------------------------------------------
 // Launch script
 // ---------------------------------------------------------------------------
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
 
 /// Determine if a model is an already quantized checkpoint.
 /// Such models contain their own `quantization_config` in `config.json` which vLLM
@@ -118,9 +127,9 @@ fn is_prequantized_model(model_id: &str) -> bool {
     false
 }
 
-/// Build the `bash -lc` launcher. The script activates the venv, records the
-/// process PID (bash exec → vLLM keeps the same PID), then `exec`s vLLM so it
-/// runs in the foreground of the wsl.exe console (logs stream to the panel).
+/// Build the launch script that will be written to a file in WSL and executed.
+/// This avoids nested quoting issues with `wsl.exe -d <distro> --exec bash -lc "<script>"`.
+/// The script activates the venv, records the PID, exports env vars, then execs vLLM.
 fn launch_script(
     venv_dir: &str,
     def: &ServerDef,
@@ -133,20 +142,24 @@ fn launch_script(
     merged_env.extend(def.env.clone());
 
     let mut parts: Vec<String> = vec![
-        format!("mkdir -p {}/../run", venv_dir),
-        format!("cd {}/..", venv_dir),
-        format!(". {}/bin/activate", venv_dir),
-        format!("echo $$ > {}/../run/{}.pid", venv_dir, def.id),
+        format!("mkdir -p {}/../run", shell_quote(venv_dir)),
+        format!("cd {}/..", shell_quote(venv_dir)),
+        format!(". {}/bin/activate", shell_quote(venv_dir)),
+        format!("echo $$ > {}/../run/{}.pid", shell_quote(venv_dir), def.id),
     ];
 
     // Export environment variables (merged global defaults + per-server overrides)
-    for (name, value) in merged_env {
-        if let Err(e) = validate_env_name(&name) {
+    // Log applied env vars at startup for debugging quote issues
+    parts.insert(0, format!("echo '[LocalLLmPanel] Starting server {} on port {}'", shell_quote(&def.id), def.port));
+    for (name, value) in &merged_env {
+        if let Err(e) = validate_env_name(name) {
             eprintln!("[launch_script] Invalid env name '{}': {}, skipping", name, e);
             continue;
         }
-        let escaped = shell_escape_single_quoted(&value);
-        parts.insert(0, format!("export {}={}", name, escaped));
+        let quoted = shell_quote(value);
+        parts.insert(0, format!("export {}={}", name, quoted));
+        // Debug log showing the exact value that will be seen by the process
+        parts.insert(0, format!("printf '[LocalLLmPanel] env %s=<%s>\\n' {} {}", shell_quote(name), quoted));
     }
 
     let mut args: Vec<String> = Vec::new();
@@ -247,23 +260,23 @@ fn launch_script(
     }
 
     // Environment variables (WSL2 vLLM requirements: bypass UVA pin-memory bug & use spawn workers)
-    parts.insert(0, "export VLLM_WORKER_MULTIPROC_METHOD=spawn".into());
-    parts.insert(0, "export VLLM_WSL2_ENABLE_PIN_MEMORY=1".into());
+    parts.insert(0, format!("export VLLM_WORKER_MULTIPROC_METHOD={}", shell_quote("spawn")));
+    parts.insert(0, format!("export VLLM_WSL2_ENABLE_PIN_MEMORY={}", shell_quote("1")));
     if !adv.log_level.trim().is_empty() {
         parts.insert(
             0,
-            format!("export VLLM_LOGGING_LEVEL='{}'", adv.log_level.trim()),
+            format!("export VLLM_LOGGING_LEVEL={}", shell_quote(&adv.log_level.trim())),
         );
     }
     if adv.hf_offline {
-        parts.insert(0, "export HF_HUB_OFFLINE=1".into());
+        parts.insert(0, format!("export HF_HUB_OFFLINE={}", shell_quote("1")));
     }
     if let Some(home) = &adv.hf_home {
         let home_trim = home.trim();
         if !home_trim.is_empty() {
             parts.insert(
                 0,
-                format!("mkdir -p {home_trim} && export HF_HOME={home_trim}"),
+                format!("mkdir -p {} && export HF_HOME={}", shell_quote(home_trim), shell_quote(home_trim)),
             );
         }
     }
@@ -271,7 +284,18 @@ fn launch_script(
         for line in custom_envs.lines() {
             let line_trim = line.trim();
             if !line_trim.is_empty() && !line_trim.starts_with('#') && line_trim.contains('=') {
-                parts.insert(0, format!("export {line_trim}"));
+                if let Some((key, value)) = line_trim.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    if validate_env_name(key).is_ok() {
+                        let sanitized = sanitize_env_value(value);
+                        let quoted = shell_quote(&sanitized);
+                        parts.insert(0, format!("export {}={}", key, quoted));
+                        parts.insert(0, format!("printf '[LocalLLmPanel] env %s=<%s>\\n' {} {}", shell_quote(key), quoted));
+                    } else {
+                        eprintln!("[launch_script] Invalid custom env name '{}', skipping", key);
+                    }
+                }
             }
         }
     }
@@ -280,7 +304,8 @@ fn launch_script(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || (c.is_ascii_punctuation() && c != '\''));
     if token_ok {
-        parts.insert(0, format!("export HF_TOKEN='{}'", hf_token));
+        parts.insert(0, format!("export HF_TOKEN={}", shell_quote(hf_token)));
+        parts.insert(0, format!("printf '[LocalLLmPanel] env %s=<%s>\\n' {} {}", shell_quote("HF_TOKEN"), shell_quote(hf_token)));
     }
     parts.push(format!(
         "exec python -m vllm.entrypoints.openai.api_server {}",
@@ -844,6 +869,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     }
 
     let id_log = id.to_string();
+    let id_for_wsl = id_log.clone(); // Clone for WslChild::spawn call later
     let state_log = Arc::clone(state);
     let app_ev = app.map(|a| (*a).clone());
     let log_path = dirs::data_dir()
@@ -901,7 +927,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             &cfg.advanced_settings,
             &cfg.default_env,
         );
-        let child = wsl::WslChild::spawn(&distro, &script, log_cb)
+        let child = wsl::WslChild::spawn(&distro, &script, &id_for_wsl, log_cb)
             .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
         let pid = child.pid();
         (Some(child), None, Some(pid))
@@ -2076,7 +2102,8 @@ mod tests {
         assert!(script.contains("--port 8010"));
         assert!(script.contains("--gpu-memory-utilization 0.92"));
         assert!(script.contains("--max-model-len 2048"));
-        assert!(script.contains("$$ > ~/llm-lp/.venv/../run/s1.pid"));
+        // Paths are now shell-quoted
+        assert!(script.contains("$$ > '~/llm-lp/.venv'/../run/s1.pid"));
         assert!(!script.contains("--runner pooling"));
         assert!(!script.contains("--quantization"));
         assert!(!script.contains("export HF_TOKEN="));
@@ -2299,12 +2326,12 @@ llama_requests_processing 1
             &adv,
             &BTreeMap::new(),
         );
-        assert!(script.contains("export HF_HOME=/mnt/d/ai/hf"));
-        assert!(script.contains("mkdir -p /mnt/d/ai/hf"));
-        assert!(script.contains("export HF_HUB_OFFLINE=1"));
+        assert!(script.contains("export HF_HOME='/mnt/d/ai/hf'"));
+        assert!(script.contains("mkdir -p '/mnt/d/ai/hf'"));
+        assert!(script.contains("export HF_HUB_OFFLINE='1'"));
         assert!(script.contains("export VLLM_LOGGING_LEVEL='DEBUG'"));
-        assert!(script.contains("export CUDA_VISIBLE_DEVICES=0,1"));
-        assert!(script.contains("export NCCL_DEBUG=INFO"));
+        assert!(script.contains("export CUDA_VISIBLE_DEVICES='0,1'"));
+        assert!(script.contains("export NCCL_DEBUG='INFO'"));
         assert!(script.contains("--host 0.0.0.0"));
         assert!(script.contains("--api-key 'sk-test-123'"));
         assert!(script.contains("--kv-cache-dtype fp8"));
@@ -2329,8 +2356,11 @@ llama_requests_processing 1
             cmd.contains("--cpu-offload-gb 4"),
             "command must include --cpu-offload-gb 4: {cmd}"
         );
-        assert!(cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY=1"));
-        assert!(cmd.contains("export VLLM_WORKER_MULTIPROC_METHOD=spawn"));
+        assert!(
+            cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY='1'"),
+            "command must include export VLLM_WSL2_ENABLE_PIN_MEMORY='1': {cmd}"
+        );
+        assert!(cmd.contains("export VLLM_WORKER_MULTIPROC_METHOD='spawn'"));
     }
 
     #[test]
@@ -2493,19 +2523,58 @@ llama_requests_processing 1
     }
 
     #[test]
-    fn test_shell_escape_single_quoted() {
-        assert_eq!(shell_escape_single_quoted("simple"), "'simple'");
-        assert_eq!(shell_escape_single_quoted("hello world"), "'hello world'");
-        assert_eq!(shell_escape_single_quoted("don't"), "'don'\\''t'");
-        assert_eq!(shell_escape_single_quoted("'"), "'\\''");
-        assert_eq!(shell_escape_single_quoted("a'b'c"), "'a'\\''b'\\''c'");
+    fn test_shell_quote() {
+        // Basic cases
+        assert_eq!(shell_quote("simple"), "'simple'");
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("don't"), "'don'\\''t'");
+        // Single quote character: shell representation is '\\''\\'' (wrapped: '\\''\\''\\'')
+        // Actually: ' + replace(','\\'') + ' = ' + '\\'' + ' = ''\\'''
+        assert_eq!(shell_quote("'"), "''\\'''");
+        assert_eq!(shell_quote("a'b'c"), "'a'\\''b'\\''c'");
+        // Empty string
+        assert_eq!(shell_quote(""), "''");
+        // Dollar sign (should be preserved, not expanded)
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        // Backticks (should be preserved)
+        assert_eq!(shell_quote("`id`"), "'`id`'");
+        // Backslashes
+        assert_eq!(shell_quote(r"C:\path"), "'C:\\path'");
+        // Stray leading quote (the bug we're fixing)
+        // shell_quote("'0") = ' + replace("'0", "'\\''") + ' = ' + '\\''0 + ' = ''\\''0'
+        assert_eq!(shell_quote("'0"), "''\\''0'");
+        // Unicode
+        assert_eq!(shell_quote("café"), "'café'");
+        assert_eq!(shell_quote("测试"), "'测试'");
         // Hostile value: should not inject shell commands
         let hostile = "'; rm -rf ~ #";
-        let escaped = shell_escape_single_quoted(hostile);
+        let escaped = shell_quote(hostile);
         assert!(escaped.starts_with("'") && escaped.ends_with("'"));
-        let inner = &escaped[1..escaped.len()-1];
-        assert!(!inner.contains("'"));
-        assert!(inner.contains("'\\''")); // escaped quotes
+        // The escaped value should contain the escape sequence for single quotes
+        assert!(escaped.contains("'\\''"));
+        // Verify the value can be recovered by shell (tested via integration test)
+    }
+
+    #[test]
+    fn test_sanitize_env_value() {
+        // Normal values unchanged
+        assert_eq!(sanitize_env_value("0"), "0");
+        assert_eq!(sanitize_env_value("1"), "1");
+        assert_eq!(sanitize_env_value("hello"), "hello");
+        assert_eq!(sanitize_env_value("hello world"), "hello world");
+        // Strip surrounding single quotes
+        assert_eq!(sanitize_env_value("'0'"), "0");
+        assert_eq!(sanitize_env_value("'hello'"), "hello");
+        // Strip surrounding double quotes
+        assert_eq!(sanitize_env_value("\"0\""), "0");
+        assert_eq!(sanitize_env_value("\"hello\""), "hello");
+        // Trim whitespace
+        assert_eq!(sanitize_env_value("  0  "), "0");
+        assert_eq!(sanitize_env_value("  '0'  "), "0");
+        // No strip if not matching pair
+        assert_eq!(sanitize_env_value("'0"), "'0");
+        assert_eq!(sanitize_env_value("0'"), "0'");
+        assert_eq!(sanitize_env_value("\"0'"), "\"0'");
     }
 
     #[test]
@@ -2572,11 +2641,12 @@ llama_requests_processing 1
         assert!(!script.contains("INVALID-VAR"));
     }
 
-    #[test]
-    fn test_launch_script_env_escaping_hostile_values() {
+#[test]
+    fn test_launch_script_env_export_lines_exact_format() {
         use std::collections::BTreeMap;
         let mut global_env = BTreeMap::new();
-        global_env.insert("HOSTILE".to_string(), "'; rm -rf ~ #'".to_string());
+        global_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
+        global_env.insert("TEST_VAR".to_string(), "test_value".to_string());
 
         let def = def(
             "Qwen/Qwen2.5-0.5B-Instruct",
@@ -2594,16 +2664,80 @@ llama_requests_processing 1
             &global_env,
         );
 
-        // Should be safely escaped
-        assert!(script.contains("export HOSTILE='\\''; rm -rf ~ #'\\''"));
-        // Should not contain unescaped single quotes that could inject commands
-        let lines: Vec<&str> = script.lines().collect();
-        for line in lines {
-            if line.starts_with("export HOSTILE=") {
-                // After export HOSTILE=, the rest should be properly quoted
-                let value_part = &line["export HOSTILE=".len()..];
-                assert!(value_part.starts_with("'") && value_part.ends_with("'"));
+        // Check that export lines are properly formatted with shell_quote
+        assert!(script.contains("export VLLM_USE_FLASHINFER_SAMPLER='0'"));
+        assert!(script.contains("export TEST_VAR='test_value'"));
+        
+        // Check that the debug log lines are present
+        assert!(script.contains("printf '[LocalLLmPanel] env %s=<%s>\\n' 'VLLM_USE_FLASHINFER_SAMPLER' '0'"));
+        assert!(script.contains("printf '[LocalLLmPanel] env %s=<%s>\\n' 'TEST_VAR' 'test_value'"));
+        
+        // Check that the starting log line is present
+        assert!(script.contains("echo '[LocalLLmPanel] Starting server"));
+    }
+
+    /// Integration test: launch a dummy command in WSL and verify env vars are passed correctly.
+    /// Only runs when WSL is available and LLM_TEST_WSL=1 is set.
+    #[test]
+    #[ignore]
+    fn test_wsl_env_var_passing() {
+        use std::env;
+        if env::var("LLM_TEST_WSL").is_err() {
+            eprintln!("Skipping WSL integration test: set LLM_TEST_WSL=1 to run");
+            return;
+        }
+        let distro = crate::wsl::detect_default_distro().expect("WSL distro not found");
+        
+        // Test values including hostile ones
+        let test_cases = vec![
+            ("SIMPLE", "0"),
+            ("WITH_SPACE", "hello world"),
+            ("WITH_QUOTE", "don't"),
+            ("STRAY_QUOTE", "'0"),
+            ("DOLLAR", "$HOME"),
+            ("BACKTICK", "`id`"),
+            ("BACKSLASH", r"C:\path"),
+            ("UNICODE", "café测试"),
+            ("HOSTILE", "'; rm -rf ~ #"),
+            ("EMPTY", ""),
+        ];
+
+        for (name, value) in test_cases {
+            // Build a script that just prints the env var
+            let script = format!(
+                "export {}={} && printf 'RESULT=%s\\n' \"${}\"",
+                name,
+                shell_quote(value),
+                name
+            );
+            
+            // Write script to file and execute
+            let script_path = format!("~/.local/share/local-llm-panel/test-{}.sh", name);
+            let mkdir_cmd = format!("mkdir -p ~/.local/share/local-llm-panel");
+            let write_cmd = format!("cat > {}", crate::wsl::shell_quote_wsl(&script_path));
+            let chmod_cmd = format!("chmod +x {}", crate::wsl::shell_quote_wsl(&script_path));
+            let exec_cmd = format!("bash -l {}", crate::wsl::shell_quote_wsl(&script_path));
+            let full_cmd = format!("{} && {} && {} && {}", mkdir_cmd, write_cmd, chmod_cmd, exec_cmd);
+
+            let mut cmd = crate::wsl::wsl_command();
+            cmd.env("WSL_UTF8", "1");
+            cmd.args(["-d", &distro, "--exec", "bash", "-lc", &full_cmd]);
+            cmd.stdin(std::process::Stdio::piped());
+            
+            let mut child = cmd.spawn().expect("failed to spawn wsl");
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                stdin.write_all(script.as_bytes()).ok();
+                stdin.flush().ok();
             }
+            let output = child.wait_with_output().expect("failed to wait");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            
+            // Extract the RESULT line
+            let result_line = stdout.lines().find(|l| l.starts_with("RESULT="));
+            let actual = result_line.map(|l| l["RESULT=".len()..].to_string()).unwrap_or_default();
+            
+            assert_eq!(actual, value, "Env var {}: expected {:?}, got {:?}", name, value, actual);
         }
     }
 }

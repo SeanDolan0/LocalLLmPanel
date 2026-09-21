@@ -7,7 +7,7 @@ A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages **vLL
 - **Pull models** in the background (`hf download`, progress streamed to the UI).
 - **Run multiple servers** concurrently (instruct + embedding) with per-server quantization (`--quantization`), GPU memory util, max-model-len, ports, and live log tails, metrics, and a minimal chat playground.
 - **Run llama.cpp `llama-server.exe` natively on Windows**, including GGUF models, split-shard downloads, CUDA builds, Jinja tool calling, and MoE expert CPU offload.
-- **Per-server & global environment variables** for vLLM servers (merged with per-server overriding global defaults).
+- **Per-server & global environment variables** for vLLM servers (merged with per-server overriding global defaults). Launch scripts are written to files in WSL to avoid quoting issues. The UI validates boolean flags (e.g. `VLLM_USE_*` must be `0` or `1`), trims whitespace, and strips surrounding quotes from user input.
 - **FlashInfer JIT workaround**: `VLLM_USE_FLASHINFER_SAMPLER=0` disables vLLM's FlashInfer sampler (which requires nvcc/CUDA toolkit in WSL) and uses the built-in PyTorch sampler instead.
 - **One-click CUDA build tools installer** for FlashInfer JIT readiness (installs gcc, python3.12-dev, ninja-build, and NVIDIA CUDA toolkit from WSL-Ubuntu repo).
 

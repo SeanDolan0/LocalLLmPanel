@@ -329,6 +329,8 @@ pub fn run_script_stream(distro: &str, script: &str, mut on_line: impl FnMut(&st
 pub struct WslChild {
     pub child: Child,
     handles: Vec<std::thread::JoinHandle<()>>,
+    /// Path to the generated script file in WSL (for cleanup on drop)
+    script_path: Option<String>,
 }
 
 /// Native Windows child used by llama-server. Output is streamed using the
@@ -419,28 +421,83 @@ impl Drop for NativeChild {
     }
 }
 
+/// Generate a unique script filename for a server launch.
+fn gen_script_name(server_id: &str) -> String {
+    format!("~/.local/share/local-llm-panel/launch-{}.sh", server_id)
+}
+
+/// Minimal shell_quote for WSL path generation (used internally for script paths).
+/// Only handles the specific case of script paths which don't contain quotes.
+pub fn shell_quote_wsl(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Write a script to a file in WSL via stdin, then execute it.
+/// Returns the command args for wsl.exe (without the script content on the command line).
+fn write_and_exec_script(
+    distro: &str,
+    _script: &str,
+    server_id: &str,
+) -> Result<Vec<String>, String> {
+    let script_path = gen_script_name(server_id);
+    // Ensure the directory exists, write script via stdin, chmod +x, then execute
+    let mkdir_cmd = format!("mkdir -p ~/.local/share/local-llm-panel");
+    let write_cmd = format!("cat > {}", shell_quote_wsl(&script_path));
+    let chmod_cmd = format!("chmod +x {}", shell_quote_wsl(&script_path));
+    let exec_cmd = format!("bash -l {}", shell_quote_wsl(&script_path));
+
+    // Build the combined command that writes and executes
+    // We use a heredoc-like approach: pipe script content to cat
+    let full_cmd = format!("{} && {} && {} && {}", mkdir_cmd, write_cmd, chmod_cmd, exec_cmd);
+
+    let mut args = Vec::new();
+    if distro.trim().is_empty() {
+        args.push("--exec".to_string());
+    } else {
+        args.push("-d".to_string());
+        args.push(distro.to_string());
+        args.push("--exec".to_string());
+    }
+    args.push("bash".to_string());
+    args.push("-lc".to_string());
+    args.push(full_cmd);
+    Ok(args)
+}
+
 impl WslChild {
-    /// Spawn `bash -lc <script>` in `<distro>`; stream output lines to `on_line`.
+    /// Spawn a script in WSL by writing it to a file first, then executing it.
+    /// This avoids nested quoting issues with `bash -lc "<script>"`.
     /// `script` typically ends with `exec python ...` so the child lives for the
     /// lifetime of the server.
     pub fn spawn(
         distro: &str,
         script: &str,
+        server_id: &str,
         on_line: impl FnMut(String) + Send + 'static,
     ) -> Result<WslChild, String> {
         let mut cmd = wsl_command();
         cmd.env("WSL_UTF8", "1");
-        if distro.trim().is_empty() {
-            cmd.args(["--exec", "bash", "-lc", script]);
-        } else {
-            cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
+        cmd.stdin(Stdio::piped());
+
+        let args = write_and_exec_script(distro, script, server_id)?;
+        for arg in args {
+            cmd.arg(arg);
         }
+
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null())
             .spawn()
             .map_err(|e| format!("failed to spawn wsl.exe: {e}"))?;
+
+        // Write the script content to stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(script.as_bytes());
+            let _ = stdin.flush();
+            // stdin is dropped here, closing the pipe
+        }
+
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let mut handles = Vec::new();
@@ -465,7 +522,7 @@ impl WslChild {
                 }
             }));
         }
-        Ok(WslChild { child, handles })
+        Ok(WslChild { child, handles, script_path: Some(gen_script_name(server_id)) })
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {

@@ -1051,6 +1051,36 @@ interface EnvironmentVarsEditorProps {
   flashInferDisabled: boolean;
 }
 
+/// Sanitize a user-supplied environment variable value:
+/// - Trim whitespace
+/// - Strip a matching pair of surrounding single or double quotes
+/// This allows users to enter '0' or "0" and get 0.
+function sanitizeEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+/// Check if an env var name is a known boolean vLLM var (VLLM_USE_* or similar)
+/// and validate that its value is "0" or "1".
+function validateBooleanEnvVar(key: string, value: string): string | null {
+  const knownBooleanPrefixes = ["VLLM_USE_"];
+  const isKnownBoolean = knownBooleanPrefixes.some((prefix) => key.startsWith(prefix));
+  if (isKnownBoolean) {
+    const sanitized = sanitizeEnvValue(value);
+    if (sanitized !== "0" && sanitized !== "1") {
+      return `Warning: ${key} is a boolean flag (expected "0" or "1"), got "${sanitized}"`;
+    }
+  }
+  return null;
+}
+
 function EnvironmentVarsEditor({
   globalDefaults,
   initialEnv,
@@ -1061,35 +1091,49 @@ function EnvironmentVarsEditor({
   const [localEnv, setLocalEnv] = useState<Record<string, string>>({});
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
+  const [warnings, setWarnings] = useState<Record<string, string>>({});
 
   // Initialize localEnv from globalDefaults and initialEnv (but don't include VLLM_USE_FLASHINFER_SAMPLER since it's handled by checkbox)
   useEffect(() => {
     const filtered: Record<string, string> = {};
+    const newWarnings: Record<string, string> = {};
     for (const [k, v] of Object.entries(globalDefaults)) {
       if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
         filtered[k] = v;
+        const warn = validateBooleanEnvVar(k, v);
+        if (warn) newWarnings[k] = warn;
       }
     }
     // Merge initialEnv (per-server overrides) on top of global defaults
     for (const [k, v] of Object.entries(initialEnv ?? {})) {
       if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
         filtered[k] = v;
+        const warn = validateBooleanEnvVar(k, v);
+        if (warn) newWarnings[k] = warn;
       }
     }
     setLocalEnv(filtered);
+    setWarnings(newWarnings);
     onChange({ ...filtered, VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1" });
   }, [globalDefaults, initialEnv, flashInferDisabled, onChange]);
 
   const handleAdd = () => {
     const key = newKey.trim();
-    const value = newValue;
+    const rawValue = newValue;
     if (!key) return;
     // Validate env name: ^[A-Za-z_][A-Za-z0-9_]*$
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       alert("Invalid environment variable name. Use only letters, numbers, and underscores, starting with a letter or underscore.");
       return;
     }
+    const value = sanitizeEnvValue(rawValue);
+    const warn = validateBooleanEnvVar(key, rawValue);
     setLocalEnv((prev) => ({ ...prev, [key]: value }));
+    setWarnings((prev) => {
+      const next = { ...prev };
+      if (warn) next[key] = warn; else delete next[key];
+      return next;
+    });
     setNewKey("");
     setNewValue("");
   };
@@ -1100,10 +1144,22 @@ function EnvironmentVarsEditor({
       delete next[key];
       return next;
     });
+    setWarnings((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
-  const handleChange = (key: string, value: string) => {
+  const handleChange = (key: string, rawValue: string) => {
+    const value = sanitizeEnvValue(rawValue);
+    const warn = validateBooleanEnvVar(key, rawValue);
     setLocalEnv((prev) => ({ ...prev, [key]: value }));
+    setWarnings((prev) => {
+      const next = { ...prev };
+      if (warn) next[key] = warn; else delete next[key];
+      return next;
+    });
   };
 
   // Merge localEnv with flashInfer setting and call onChange
@@ -1148,7 +1204,7 @@ function EnvironmentVarsEditor({
           </div>
         )}
 
-        {/* Per-server Overrides */}
+{/* Per-server Overrides */}
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-[11px] text-slate-500 font-medium uppercase tracking-wider">
             Per-Server Overrides
@@ -1177,20 +1233,31 @@ function EnvironmentVarsEditor({
           {Object.keys(localEnv).length === 0 && (
             <div className="text-xs text-slate-500 italic">No per-server overrides. Add variables above or configure global defaults in Settings.</div>
           )}
-          {Object.entries(localEnv).map(([key, value]) => (
-            <div key={key} className="flex items-center gap-2">
-              <span className="font-mono text-xs text-slate-400 w-48 truncate">{key}</span>
-              <input
-                className={inputCls}
-                value={value}
-                onChange={(e) => handleChange(key, e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => handleRemove(key)}>
-                ✕
-              </Button>
-            </div>
-          ))}
+          {Object.entries(localEnv).map(([key, value]) => {
+            const warn = warnings[key];
+            return (
+              <div key={key} className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs text-slate-400 w-48 truncate">{key}</span>
+                  <input
+                    className={inputCls}
+                    value={value}
+                    onChange={(e) => handleChange(key, e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => handleRemove(key)}>
+                    ✕
+                  </Button>
+                </div>
+                {warn && (
+                  <div className="ml-[7.5rem] flex items-center gap-1.5 text-[10px] text-amber-300">
+                    <span>⚠</span>
+                    <span>{warn}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </Field>
