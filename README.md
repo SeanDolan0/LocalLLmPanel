@@ -5,11 +5,17 @@ A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages **vLL
 - **Auto-provisions** WSL2 (idempotent): apt basics → uv venv (CPython 3.12) → `vllm` CUDA wheels → torch/GPU verification.
 - **Search & estimate** any Hugging Face model: live `config.json` context, VRAM context-fit, and per-GPU **estimated max tok/s** for your hardware.
 - **Pull models** in the background (`hf download`, progress streamed to the UI).
-- **Run multiple servers** concurrently (instruct + embedding) with per-server quantization (`--quantization`), GPU memory util, max-model-len, ports, and live log tails, metrics, and a minimal chat playground.
+- **Run multiple servers** concurrently (instruct + embedding) with per-server quantization (`--quantization`), GPU memory util, max-model-len, ports, and live log tails, metrics, and a chat playground with streaming, conversation persistence, and benchmark suite.
 - **Run llama.cpp `llama-server.exe` natively on Windows**, including GGUF models, split-shard downloads, CUDA builds, Jinja tool calling, and MoE expert CPU offload.
-- **Per-server & global environment variables** for vLLM servers (merged with per-server overriding global defaults). Launch scripts are written to files in WSL to avoid quoting issues. The UI validates boolean flags (e.g. `VLLM_USE_*` must be `0` or `1`), trims whitespace, and strips surrounding quotes from user input.
-- **FlashInfer JIT workaround**: `VLLM_USE_FLASHINFER_SAMPLER=0` disables vLLM's FlashInfer sampler (which requires nvcc/CUDA toolkit in WSL) and uses the built-in PyTorch sampler instead.
-- **One-click CUDA build tools installer** for FlashInfer JIT readiness (installs gcc, python3.12-dev, ninja-build, and NVIDIA CUDA toolkit from WSL-Ubuntu repo).
+- **Unified OpenAI-compatible Gateway** (port 11434): single endpoint routes requests to the correct running vLLM/llama.cpp server by model name — works with Cursor, Continue.dev, LibreChat, any OpenAI-compatible client.
+- **Per-server & global environment variables** for vLLM servers (merged with per-server overriding global defaults). Launch scripts written to WSL files to avoid quoting issues. UI validates boolean flags (`VLLM_USE_*` = `0`/`1`), trims whitespace, strips quotes.
+- **FlashInfer JIT workaround**: `VLLM_USE_FLASHINFER_SAMPLER=0` (default) avoids nvcc/CUDA toolkit requirement in WSL.
+- **One-click CUDA build tools installer** for FlashInfer JIT readiness (gcc, python3.12-dev, ninja-build, NVIDIA CUDA toolkit from WSL-Ubuntu repo).
+- **System tray appliance mode**: minimize to tray, auto-start on login, resume servers on launch, auto-restart crashed servers.
+- **Config export/import** + **server recipe sharing** (copy-to-clipboard JSON).
+- **Time-series VRAM/GPU sparklines** on Dashboard and per-server metrics.
+- **DPAPI-encrypted HF token** storage (Windows Credential Guard).
+- **LAN access toggle** for vLLM `--host 0.0.0.0` (with consent warning).
 
 ## Requirements
 
@@ -17,6 +23,7 @@ A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages **vLL
 - WSL2 with an Ubuntu distro (`.wslconfig` memory recommended: `memory=24GB` as the dev machine uses)
 - For llama.cpp: an NVIDIA Windows driver and a recent CUDA-enabled llama.cpp release. WSL provisioning is not required for this backend.
 - Rust toolchain (MSVC target; VS Build Tools "Desktop development with C++" — cargo picks VS up via vswhere), LLVM/LLD on PATH, Node ≥ 20
+- Optional: GitHub token (for llama.cpp release downloads), Hugging Face token (for gated models)
 
 ## Setup (dev)
 
@@ -40,6 +47,8 @@ The build runner (`scripts/build.mjs`) automatically locates LLVM's `lld-link.ex
 
 For the full cross-agent deployment SOP, version synchronization guidelines, and GitHub release instructions, see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`skills/github-deployment/SKILL.md`](skills/github-deployment/SKILL.md).
 
+Quick reference for agents: [`AGENTS.md`](AGENTS.md).
+
 ## Test
 
 ```bash
@@ -62,6 +71,7 @@ Requires ~5 GB disk + network. If `nvidia-smi` is unavailable inside WSL, the te
 4. **Servers → New server** → pick the model, task `instruct` (or `embed`), press Start.
 5. Logs stream live; the chat drawer works once `/health` is green; VRAM gauge updates on Dashboard.
 6. Measured tok/s replaces the estimate after the first generation run.
+7. **Optional: Enable Gateway** → **Settings → Gateway** → toggle **Enable OpenAI-compatible Gateway** (port 11434). Point Cursor, Continue.dev, or any OpenAI client at `http://127.0.0.1:11434/v1` — it routes to the correct server by model name automatically.
 
 ### vLLM FlashInfer sampler workaround
 
@@ -85,8 +95,11 @@ The llama.cpp backend binds to localhost only. The installer uses a separate opt
 
 - MSVC: if `link.exe` is not on PATH but VS is installed, cargo finds it via vswhere. Fallback target `x86_64-pc-windows-gnu` if linking ever fails (not needed on this machine).
 - GPU bandwidth for unknown GPUs defaults to ~700 GB/s; the estimate is always labeled and measured data wins.
-- Config lives at `%APPDATA%\local-llm-panel\config.json` (distro, HF token, server definitions, measured stats).
+- Config lives at `%APPDATA%\local-llm-panel\config.json` (distro, HF token, server definitions, measured stats, conversations, benchmarks).
 - The app never edits `.wslconfig` silently — Settings shows it read-only (copy to apply tweaks).
+- HF token is encrypted at rest via Windows DPAPI (`CryptProtectData`).
+- Gateway listens on localhost only by default; LAN access requires explicit opt-in with consent warning.
+- Version must be synced across 4 files: `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.
 
 ## Architecture
 

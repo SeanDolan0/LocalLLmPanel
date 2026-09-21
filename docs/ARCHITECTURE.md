@@ -5,13 +5,17 @@
 ```
 ┌──────────────────────────── Windows ────────────────────────────┐
 │  Tauri 2 app (Rust core) ── React/TS UI (WebView2)              │
-│    ├─ wsl.rs      distro detect + WSL/native child runners      │
-│    ├─ provision.rs  idempotent WSL2 provisioning               │
-│    ├─ server.rs   multi-instance lifecycle, logs, metrics      │
-│    ├─ hf.rs       HF search / quant discovery / pull           │
-│    ├─ estimate.rs tok/s + context-fit heuristics               │
-│    ├─ fit.rs      hardware fit scoring + variant ranking       │
-│    └─ state.rs    persisted config + measured stats            │
+│    ├─ wsl.rs           distro detect + WSL/native child runners │
+│    ├─ provision.rs     idempotent WSL2 provisioning             │
+│    ├─ server.rs        multi-instance lifecycle, logs, metrics  │
+│    ├─ gateway.rs       OpenAI-compatible reverse proxy (11434)  │
+│    ├─ hf.rs            HF search / quant discovery / pull       │
+│    ├─ estimate.rs      tok/s + context-fit heuristics           │
+│    ├─ fit.rs           hardware fit scoring + variant ranking   │
+│    ├─ state.rs         persisted config + measured stats        │
+│    ├─ llamacpp_install.rs native binary mgmt + CUDA probing     │
+│    ├─ security.rs      DPAPI encryption for HF token            │
+│    └─ llmfit_adapter.rs llmfit-core ONNX integration            │
 │         │  spawns wsl.exe -d <distro> -- bash -lc '<script>'   │
 └─────────┼───────────────────────────────────────────────────────┘
           ▼
@@ -35,10 +39,36 @@ Tauri Rust core ── llama-server.exe (NativeChild)
        └─ %APPDATA%\local-llm-panel\logs\<id>.log
 ```
 
+Gateway (OpenAI-compatible reverse proxy):
+
+```
+External Client (Cursor, Continue, etc.)
+         │  http://127.0.0.1:11434/v1/chat/completions
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  gateway.rs — single port, routes by model name             │
+│    • GET  /v1/models          → lists running instruct servers│
+│    • POST /v1/chat/completions→ find_server_port_for(model)   │
+│    • Streams SSE frames back to client                       │
+└─────────────────────────────────────────────────────────────┘
+         │  forwards to 127.0.0.1:<server_port>
+         ▼
+   vLLM / llama.cpp server
+```
+
 WSL/vLLM provisioning and native llama.cpp installation are independent. The app never
 changes `.wslconfig`; llama.cpp remains usable when WSL has not been provisioned.
 
 ## Rust core modules
+
+### `gateway.rs`
+- **Unified OpenAI-compatible reverse proxy** listening on port 11434 (default, Ollama-compatible).
+- `find_server_port_for(servers, model, task)` — routes by exact or fuzzy match on served model name or HF id against running `instruct` servers.
+- `model_rows(servers)` — emits OpenAI `/v1/models` format with `id`, `object`, `port` for each running instruct server.
+- Hand-rolled HTTP/1.1 framing (Tokio `TcpListener` + `AsyncReadExt`/`AsyncWriteExt`) — no external HTTP deps.
+- Streams SSE `data:` frames bidirectionally; copies headers, handles `Content-Length` and chunked encoding.
+- `spawn_supervisor(app_handle)` — background task binds port, accepts connections, routes per-request.
+- `gateway_status` command returns `{running: bool, port: u16, error?: string}`.
 
 ### `wsl.rs`
 - `detect_default_distro() -> Option<String>` — parse `wsl -l -q` (first line, strip BOM/zeros), default to `Ubuntu`.
@@ -81,6 +111,14 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - Lists and caches recent `ggml-org/llama.cpp` releases, parses anchored Windows x64 CUDA/cudart names, selects a driver-compatible numeric CUDA version (with Blackwell warnings), falls back across incomplete releases, extracts both archives into a tag/version directory, and probes `--version`/`--help`.
 - Stores the installed tag, version, executable override, and help text in the persisted config. Windows `nvidia-smi` is used as a native GPU fallback.
 
+### `security.rs`
+- **DPAPI encryption** for HF token at rest: `protect_data()` / `unprotect_data()` wrap `CryptProtectData`/`CryptUnprotectData` (Windows Credential Guard).
+- Token stored encrypted in `config.json`; plaintext never written to disk.
+
+### `llmfit_adapter.rs`
+- Bridge to `llmfit-core` crate (ONNX-based model fit estimation).
+- Provides async `estimate_fit()` using embedded ONNX models for more accurate VRAM/tok-s predictions.
+
 ### `server.rs`
 - `alloc_port()` — starting 8000 (+ existing server defs excluded), bind `127.0.0.1:port` to prove free.
 - `start(def)` — compose launch script; spawn via `wsl.rs::spawn_script`; write `~/llm-lp/run/<id>.pid` with the WSL-side PID (script prints `$$` after `exec`-less start); poll `/health` until 200 or timeout (300s); emit `server-status`.
@@ -97,32 +135,47 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - **CUDA build tools provisioning (optional)**: `phase_cuda_build_tools` installs `gcc`, `python3.12-dev`, `ninja-build`, and the NVIDIA CUDA toolkit (matching PyTorch CUDA version) from NVIDIA's WSL-Ubuntu repo. Runs as root via `wsl --user root`. Streamed via `wsl-log` events. Idempotent and user-initiated only.
 
 ### `state.rs`
-- `AppState { config: Mutex<PersistedConfig>, servers: Mutex<BTreeMap<Id, LiveServer>>, http: Client, pulling: Arc<Mutex<HashMap<model_id, bool>>>, gpu: Mutex<Option<GpuSnapshot>>, enrichment_cache: Mutex<HashMap<model_id, CachedEnrichment>>, rec_cache: Mutex<Option<(Vec<ModelWithFit>, Instant)>> }`.
-- `PersistedConfig { distro, llm_dir, venv_dir, hf_token, default_quant, servers: Vec<ServerDef>, measured: HashMap<model_id, MeasuredStats> }` — JSON at `%APPDATA%/local-llm-panel/config.json`; atomic save (write temp + rename).
-- `LiveServer { def, child: ChildGuard (Windows process handle), wsl_pid: Option<u32>, status, log_ring: VecDeque<String>, health_since, last_metrics }`.
+- `AppState { config: Mutex<PersistedConfig>, servers: Mutex<BTreeMap<Id, LiveServer>>, http: Client, pulling: Arc<Mutex<HashMap<model_id, bool>>>, gpu: Mutex<Option<GpuSnapshot>>, enrichment_cache: Mutex<HashMap<model_id, CachedEnrichment>>, rec_cache: Mutex<Option<(Vec<ModelWithFit>, Instant)>>, conversations: Mutex<HashMap<String, Conversation>>, benchmarks: Mutex<Vec<BenchmarkRun>> }`.
+- `PersistedConfig { distro, llm_dir, venv_dir, hf_token_encrypted, default_quant, servers: Vec<ServerDef>, measured: HashMap<model_id, MeasuredStats>, minimize_to_tray, launch_at_login, resume_servers_on_launch, gateway_enabled, gateway_port, lan_access_enabled, system_metrics_retention_secs }` — JSON at `%APPDATA%/local-llm-panel/config.json`; atomic save (write temp + rename). `hf_token_encrypted` is DPAPI blob.
+- `LiveServer { def, child: ChildGuard (Windows process handle), wsl_pid: Option<u32>, status, log_ring: VecDeque<String>, health_since, last_metrics, was_running: bool }`.
+- `Conversation { id, server_id, title, created, updated, messages: Vec<Message> }` — persisted to `conversations.json` (atomic).
+- `BenchmarkRun { id, server_id, model_id, timestamp, prompts: Vec<BenchmarkPromptResult> }` — persisted in config.
 
 ## Tauri commands (public surface)
-`env_status`, `provision`, `search_models`, `search_models_with_fit`, `recommended_models`,
-`model_stats`, `pull_model`, `pull_status`, `install_llamacpp`, `llamacpp_status`, `gguf_files`, `download_gguf`,
-`servers_list`, `servers_create`, `servers_delete`,
-`servers_start`, `servers_stop`, `servers_restart`, `servers_logs`, `servers_metrics`,
-`servers_chat`, `settings_get`, `settings_set`, `measured_stats`.
 
-Events: `wsl-log {phase,line}`, `llamacpp-install-progress {file,done,total?}`,
-`server-status {id,status,error?}`, `server-log {id,line}`,
-`pull-progress {model,state,file?,percent?}`.
+**Core/WSL:** `env_status`, `provision`, `wsl_distros`, `wslconfig_get`, `system_metrics_series`, `get_system_memory`, `get_memory_settings`, `update_memory_settings`.
+
+**HF/Models:** `search_models`, `search_models_with_fit`, `recommended_models`, `model_stats`, `pull_model`, `pull_status`, `pull_cancel`, `gguf_files`, `download_gguf`, `library_list`, `library_remove`, `library_disk_usage`, `library_import_local`.
+
+**llama.cpp:** `install_llamacpp`, `llamacpp_status`, `github_access`, `clear_github_token`.
+
+**Servers:** `servers_list`, `servers_create`, `servers_delete`, `servers_start`, `servers_stop`, `servers_restart`, `servers_logs`, `servers_metrics`, `server_metrics_series`.
+
+**Chat/Conversations:** `servers_chat`, `servers_chat_stream`, `servers_chat_cancel`, `servers_test_tool_call`, `conversations_list`, `conversations_save`, `conversations_delete`.
+
+**Benchmarks:** `benchmarks_run`, `benchmarks_cancel`, `benchmarks_history`.
+
+**Gateway:** `gateway_status`.
+
+**Settings/Config:** `settings_get`, `settings_set`, `measured_stats`, `autostart_get`, `autostart_set`, `config_export`, `config_import`, `server_recipe_export`, `server_recipe_parse`, `open_url`.
+
+Events: `wsl-log {phase,line}`, `llamacpp-install-progress {file,done,total?}`, `server-status {id,status,error?}`, `server-log {id,line}`, `pull-progress {model,state,file?,percent?}`, `chat-token {request_id,server_id,token}`, `chat-done {request_id}`, `chat-cancel {request_id}`, `gpu-status`, `gateway-status`.
 
 ## Frontend (`src/`)
 - Vite + React 18 + TS; Tailwind v4 (`@tailwindcss/vite`); dark theme (zinc/indigo).
 - `App.tsx` — shell: sidebar nav (Dashboard/Search/Library/Servers/Settings) + `<Routes>`.
 - `api.ts` — typed wrappers over `@tauri-apps/api/core.invoke` + event subscriptions.
-- Pages: `Dashboard.tsx` (env status card, GPU/VRAM gauge from nvidia-smi poll), `Search.tsx` (dynamic recommendations, debounced auto-search, quant-aware fit verdicts [Comfortable/Constrained/DoesNotFit], est tok/s per quant, GGUF experimental flagging, pull button), `Library.tsx` (pulled = HF-cache scan via `env_status` cache path + `hf cache list` source), `Servers.tsx` (create/edit/delete rows; per-row status dot, port, log tail pane, metrics, chat drawer), `Settings.tsx` (distro, dirs, HF token, default quant, `.wslconfig` read-only + copy).
+- Pages: `Dashboard.tsx` (env status card, GPU/VRAM gauge from nvidia-smi poll, VRAM/tok-s sparklines, gateway status toggle), `Search.tsx` (dynamic recommendations, debounced auto-search, quant-aware fit verdicts [Comfortable/Constrained/DoesNotFit], est tok/s per quant, GGUF experimental flagging, pull button), `Library.tsx` (pulled = HF-cache scan via `env_status` cache path + `hf cache list` source; per-model disk size, delete with in-use guard), `Servers.tsx` (create/edit/delete rows; per-row status dot, port, log tail pane, metrics, chat drawer with streaming + conversation persistence, benchmark runner, tool-call test), `Settings.tsx` (distro, dirs, HF token, default quant, `.wslconfig` read-only + copy, gateway enable/port, LAN access, autostart/minimize-to-tray/resume, memory limits, config export/import, server recipe share).
 
 ## Data flow
 - Poll loops in Rust (tokio tasks, 5s): `nvidia-smi` snapshot → `gpu-status` event; per-server `/health`+`/metrics` → `server-status`/`server-metrics` events; UI keeps local copies. No DB — config JSON only.
 - Measured stats: on each metrics poll compute deltas; persist into `config.measured` so they survive restart; `measured_stats` command returns latest.
+- Gateway supervisor task accepts connections on 11434, routes each request to the correct server port based on model name, streams SSE bidirectionally.
+- Conversations & benchmarks persisted atomically alongside config.
 
 ## Security notes
-- HF token stored plaintext in `%APPDATA%` config (MVP; user-owned machine).
+- HF token encrypted at rest via Windows DPAPI (`CryptProtectData`); never plaintext on disk.
 - Ports bound on WSL 127.0.0.1 via `--host 127.0.0.1` (vLLM default 0.0.0.0 — we pass `--host 127.0.0.1` so servers aren't exposed on LAN).
+- Gateway listens on 127.0.0.1:11434 only; LAN access requires explicit opt-in (`lan_access_enabled` in config) with consent warning in UI.
 - Chat endpoint called from Rust (no webview CORS exposure).
+- Config export omits encrypted HF token by default; import validates schema.

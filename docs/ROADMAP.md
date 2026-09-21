@@ -1,7 +1,7 @@
 # Local LLM Panel — Product Roadmap
 
-The repo is at **v1.0.0** (WSL2 provisioning, HF search + fit estimation, model
-pull, multi-instance vLLM servers with logs/metrics, real-time chat playground with streaming & persistence, standardized benchmark suite, complete model cache management & uninstall, time-series GPU/VRAM sparklines, tray appliance mode with auto-resume & crash recovery, DPAPI token encryption, recipe & config export/import, and LAN access controls). This roadmap orders the features by **value ÷ effort**, consistent with the existing design ethos
+The repo is at **v1.4.0** (WSL2 provisioning, HF search + fit estimation, model
+pull, multi-instance vLLM/llama.cpp servers with logs/metrics, real-time chat playground with streaming & persistence, standardized benchmark suite, complete model cache management & uninstall, time-series GPU/VRAM sparklines, tray appliance mode with auto-resume & crash recovery, DPAPI token encryption, recipe & config export/import, LAN access controls, **OpenAI-compatible Gateway (port 11434)**). This roadmap orders the features by **value ÷ effort**, consistent with the existing design ethos
 ("estimates are estimates — measured data wins", idempotent + minimal deps).
 
 Legend: ✅ done · 🔵 planned · work item split into backend (Rust, `src-tauri`)
@@ -128,10 +128,31 @@ A true "always-on local LLM appliance" rather than a panel you open.
 
 ---
 
+## Phase 7 — OpenAI-compatible Gateway  ✅ (v1.2.0)
+
+Single local endpoint (`http://127.0.0.1:11434/v1`) that routes to the correct
+running vLLM/llama.cpp server by model name. Enables Cursor, Continue.dev,
+LibreChat, and any OpenAI-compatible client to work without per-server port
+configuration.
+
+- [x] Backend: `gateway.rs` — Tokio `TcpListener` on 11434, hand-rolled HTTP/1.1
+      framing, `find_server_port_for()` exact/fuzzy routing, SSE streaming proxy,
+      `GET /v1/models` listing running instruct servers with ports.
+- [x] Backend: `gateway_status` command + `gateway-status` event; supervisor
+      task spawned at startup when enabled.
+- [x] Frontend: Settings → Gateway toggle + port override; Dashboard shows
+      gateway status badge.
+- [x] LAN access opt-in (binds 0.0.0.0 with consent warning).
+
+**Acceptance:** start two instruct servers (different models) → enable Gateway
+→ from Cursor pointed at 11434, chat with both models by name → tokens stream
+correctly.
+
+---
+
 ## Stretch (not yet prioritized)
 
-- OpenAI-compatible proxy for the chat playground (skip vLLM port internals),
-  multi-GPU tensor-parallel (fit.rs already has a `TensorParallel` run mode),
+- Multi-GPU tensor-parallel (fit.rs already has a `TensorParallel` run mode),
   prompt-library templates, embedding similarity playground.
 
 ---
