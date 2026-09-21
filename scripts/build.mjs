@@ -146,11 +146,6 @@ if (fs.existsSync(rawExePath)) {
   fs.copyFileSync(rawExePath, stagedExePath);
   const sizeMb = (fs.statSync(stagedExePath).size / (1024 * 1024)).toFixed(2);
   stagedFiles.push({ name: stagedExeName, type: "Standalone Executable", size: `${sizeMb} MB`, path: stagedExePath });
-
-  const altExeName = `Local.LLM.Panel_${version}_x64-standalone.exe`;
-  const altExePath = path.join(distReleaseDir, altExeName);
-  fs.copyFileSync(rawExePath, altExePath);
-  stagedFiles.push({ name: altExeName, type: "Standalone Executable (alias)", size: `${sizeMb} MB`, path: altExePath });
 }
 
 if (!isFast) {

@@ -440,14 +440,15 @@ fn write_and_exec_script(
     server_id: &str,
 ) -> Result<Vec<String>, String> {
     let script_path = gen_script_name(server_id);
-    // Ensure the directory exists, write script via stdin, chmod +x, then execute
+    // Use a heredoc to write the script content, then execute it.
+    // The stdin will be piped to the heredoc for `cat`.
     let mkdir_cmd = format!("mkdir -p ~/.local/share/local-llm-panel");
-    let write_cmd = format!("cat > {}", shell_quote_wsl(&script_path));
+    // Use cat with heredoc - the script content comes from stdin
+    let write_cmd = format!("cat << 'SCRIPT_EOF' > {}", shell_quote_wsl(&script_path));
     let chmod_cmd = format!("chmod +x {}", shell_quote_wsl(&script_path));
     let exec_cmd = format!("bash -l {}", shell_quote_wsl(&script_path));
 
-    // Build the combined command that writes and executes
-    // We use a heredoc-like approach: pipe script content to cat
+    // Build the combined command: mkdir, then write script via heredoc from stdin, then chmod, then execute
     let full_cmd = format!("{} && {} && {} && {}", mkdir_cmd, write_cmd, chmod_cmd, exec_cmd);
 
     let mut args = Vec::new();
@@ -490,10 +491,11 @@ impl WslChild {
             .spawn()
             .map_err(|e| format!("failed to spawn wsl.exe: {e}"))?;
 
-        // Write the script content to stdin
+        // Write the script content to stdin, followed by the heredoc terminator
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
             let _ = stdin.write_all(script.as_bytes());
+            let _ = stdin.write_all(b"\nSCRIPT_EOF\n");
             let _ = stdin.flush();
             // stdin is dropped here, closing the pipe
         }

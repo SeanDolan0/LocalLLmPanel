@@ -998,10 +998,11 @@ pub fn servers_list(state: State<'_, Arc<AppState>>) -> Vec<ServerListRow> {
 }
 
 #[derive(serde::Deserialize)]
-pub struct CreateServerInput {
+pub struct ServerInput {
+    pub id: Option<String>,
     pub backend: Option<String>,
-    pub name: String,
-    pub model_id: String,
+    pub name: Option<String>,
+    pub model_id: Option<String>,
     pub task: Option<String>,
     pub port: Option<u16>,
     pub gpu_mem_util: Option<f64>,
@@ -1032,14 +1033,18 @@ pub struct CreateServerInput {
     pub no_kv_offload: Option<bool>,
     pub metrics: Option<bool>,
     pub extra_args: Option<Vec<String>>,
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    pub restart: Option<bool>,
 }
 
 #[tauri::command]
 pub async fn servers_create(
     state: State<'_, Arc<AppState>>,
-    input: CreateServerInput,
+    input: ServerInput,
 ) -> Result<ServerDef, String> {
     let st = (*state).clone();
+    let name = input.name.ok_or_else(|| "name is required".to_string())?;
+    let model_id = input.model_id.ok_or_else(|| "model_id is required".to_string())?;
     // Pick a free port if not given.
     let existing: Vec<u16> = st.config().servers.iter().map(|s| s.port).collect();
     let port = match input.port {
@@ -1061,7 +1066,7 @@ pub async fn servers_create(
     let task = input.task.unwrap_or_else(|| "instruct".into());
     let token = st.hf_token();
     // Local model folders (imported WSL paths) have no HF metadata to enrich.
-    let is_local_path = input.model_id.starts_with('/');
+    let is_local_path = model_id.starts_with('/');
     // Default max_model_len := min(declared context, VRAM context-fit) at quant.
     let max_model_len = match input.max_model_len {
         Some(l) if l > 0 => Some(l),
@@ -1069,7 +1074,7 @@ pub async fn servers_create(
         _ => {
             let stats = hf::enrich(
                 &st.http,
-                &input.model_id,
+                &model_id,
                 Some(&st.enrichment_cache),
                 token.as_deref(),
             )
@@ -1110,7 +1115,7 @@ pub async fn servers_create(
     } else {
         hf::enrich(
             &st.http,
-            &input.model_id,
+            &model_id,
             Some(&st.enrichment_cache),
             token.as_deref(),
         )
@@ -1124,8 +1129,8 @@ pub async fn servers_create(
     let def = ServerDef {
         backend: input.backend.unwrap_or_else(|| "vllm".into()),
         id: format!("srv-{ts:x}"),
-        name: input.name.trim().to_string(),
-        model_id: input.model_id,
+        name: name.trim().to_string(),
+        model_id,
         task,
         port,
         gpu_mem_util: input
@@ -1214,7 +1219,7 @@ pub fn servers_restart(
 }
 
 #[derive(serde::Deserialize)]
-pub struct UpdateServerEnvInput {
+pub struct ServerEnvInput {
     pub id: String,
     pub env: std::collections::BTreeMap<String, String>,
     pub restart: Option<bool>,
@@ -1224,7 +1229,7 @@ pub struct UpdateServerEnvInput {
 pub fn servers_update_env(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
-    input: UpdateServerEnvInput,
+    input: ServerEnvInput,
 ) -> Result<(), String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
@@ -1241,56 +1246,18 @@ pub fn servers_update_env(
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-pub struct UpdateServerInput {
-    pub id: String,
-    pub name: Option<String>,
-    pub model_id: Option<String>,
-    pub task: Option<String>,
-    pub port: Option<u16>,
-    pub gpu_mem_util: Option<f64>,
-    pub max_model_len: Option<usize>,
-    pub quant: Option<String>,
-    pub served_model_name: Option<String>,
-    pub enforce_eager: Option<bool>,
-    pub swap_space_gb: Option<usize>,
-    pub cpu_offload_gb: Option<usize>,
-    pub model_path: Option<String>,
-    pub mmproj_path: Option<String>,
-    pub ctx_size: Option<usize>,
-    pub n_gpu_layers: Option<usize>,
-    pub n_cpu_moe: Option<usize>,
-    pub fit: Option<bool>,
-    pub fit_target: Option<usize>,
-    pub device: Option<String>,
-    pub api_key: Option<String>,
-    pub log_verbosity: Option<u8>,
-    pub flash_attn: Option<bool>,
-    pub cache_type_k: Option<String>,
-    pub cache_type_v: Option<String>,
-    pub threads: Option<usize>,
-    pub batch_size: Option<usize>,
-    pub ubatch_size: Option<usize>,
-    pub parallel: Option<usize>,
-    pub jinja: Option<bool>,
-    pub no_kv_offload: Option<bool>,
-    pub metrics: Option<bool>,
-    pub extra_args: Option<Vec<String>>,
-    pub env: Option<std::collections::BTreeMap<String, String>>,
-    pub restart: Option<bool>,
-}
-
 #[tauri::command]
 pub fn servers_update(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
-    input: UpdateServerInput,
+    input: ServerInput,
 ) -> Result<ServerDef, String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
-    let idx = cfg.servers.iter().position(|s| s.id == input.id).ok_or("Server not found")?;
+    let id = input.id.ok_or_else(|| "id is required".to_string())?;
+    let idx = cfg.servers.iter().position(|s| s.id == id).ok_or("Server not found")?;
     // Collect existing ports before mutating the server
-    let existing_ports: Vec<u16> = cfg.servers.iter().filter(|s| s.id != input.id).map(|s| s.port).collect();
+    let existing_ports: Vec<u16> = cfg.servers.iter().filter(|s| s.id != id).map(|s| s.port).collect();
     let server = &mut cfg.servers[idx];
 
     if let Some(v) = input.name { server.name = v; }
@@ -1339,7 +1306,7 @@ pub fn servers_update(
     drop(cfg);
 
     if input.restart.unwrap_or(false) {
-        server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())?;
+        server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())?;
     }
     Ok(updated)
 }

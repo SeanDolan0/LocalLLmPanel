@@ -10,6 +10,80 @@ import type {
   WslConfigInfo,
 } from "../types";
 
+// ---------------------------------------------------------------------------
+// Shared Settings Field Components
+// ---------------------------------------------------------------------------
+function WslDistroField({
+  distros,
+  value,
+  onChange,
+  idSuffix,
+}: {
+  distros: string[];
+  value: string;
+  onChange: (value: string) => void;
+  idSuffix: string;
+}) {
+  return (
+    <Field
+      label="WSL Distribution"
+      hint={
+        distros.length > 0
+          ? `Installed distros: ${distros.join(", ")}`
+          : "e.g. Ubuntu-22.04"
+      }
+    >
+      <div className="space-y-1">
+        <input
+          list={`wsl-distros-${idSuffix}`}
+          className={inputCls}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <datalist id={`wsl-distros-${idSuffix}`}>
+          {distros.map((d) => (
+            <option key={d} value={d} />
+          ))}
+        </datalist>
+        {distros.length > 0 && !distros.includes(value) && (
+          <div className="text-[11px] text-amber-400">
+            ⚠️ "{value}" was not found in installed WSL distributions.
+          </div>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+function HfTokenField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field
+      label="Hugging Face Token"
+      hint="Passed as HF_TOKEN to model downloads and vLLM server launches."
+    >
+      <div className="space-y-1.5">
+        <input
+          className={inputCls}
+          type="password"
+          placeholder="hf_…"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <div className="flex items-center gap-1.5 text-[11px] text-emerald-400">
+          <span>🔒</span>
+          <span>Encrypted at rest with Windows DPAPI (CryptProtectData). Never stored in plaintext.</span>
+        </div>
+      </div>
+    </Field>
+  );
+}
+
 export default function Settings() {
   const [s, setS] = useState<SettingsT | null>(null);
   const [wsl, setWsl] = useState<WslConfigInfo | null>(null);
@@ -425,33 +499,12 @@ export default function Settings() {
               Core Environment
             </CardTitle>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Field
-                label="WSL Distribution"
-                hint={
-                  distros.length > 0
-                    ? `Installed distros: ${distros.join(", ")}`
-                    : "e.g. Ubuntu-22.04"
-                }
-              >
-                <div className="space-y-1">
-                  <input
-                    list="wsl-distros-simple"
-                    className={inputCls}
-                    value={s.distro}
-                    onChange={(e) => setS({ ...s, distro: e.target.value })}
-                  />
-                  <datalist id="wsl-distros-simple">
-                    {distros.map((d) => (
-                      <option key={d} value={d} />
-                    ))}
-                  </datalist>
-                  {distros.length > 0 && !distros.includes(s.distro) && (
-                    <div className="text-[11px] text-amber-400">
-                      ⚠️ "{s.distro}" was not found in installed WSL distributions.
-                    </div>
-                  )}
-                </div>
-              </Field>
+              <WslDistroField
+                distros={distros}
+                value={s.distro}
+                onChange={(value) => setS({ ...s, distro: value })}
+                idSuffix="simple"
+              />
 
               <Field
                 label="Default Quantization"
@@ -470,37 +523,21 @@ export default function Settings() {
               </Field>
 
               <div className="sm:col-span-2">
-                <Field
-                  label="Hugging Face Token"
-                  hint="Optional: Required for gated model families like Llama 3, Gemma, or Mistral."
-                >
-                  <div className="space-y-1.5">
-                    <input
-                      className={inputCls}
-                      type="password"
-                      placeholder="hf_…"
-                      value={s.hf_token}
-                      onChange={(e) => setS({ ...s, hf_token: e.target.value })}
-                    />
-                    <div className="flex items-center gap-1.5 text-[11px] text-emerald-400">
-                      <span>🔒</span>
-                      <span>Encrypted at rest with Windows DPAPI (CryptProtectData). Never stored in plaintext.</span>
-                    </div>
-                    <div className="sm:col-span-2">
-                      <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
-                        <div className="space-y-1.5">
-                          <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => setS({ ...s, github_token: e.target.value })} />
-                          <div className="flex gap-2">
-                            <Button variant="ghost" onClick={async () => { setGithubMsg("Testing…"); try { const r = await api.githubAccess(); setGithubMsg(`${r.message} Token used: ${r.token_used ? "yes" : "no"}.`); } catch (e) { setGithubMsg(String(e)); } }}>Test GitHub access</Button>
-                            <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
-                          </div>
-                          {githubMsg && <div className="text-xs text-slate-400">{githubMsg}</div>}
-                        </div>
-                      </Field>
-                    </div>
+              <HfTokenField
+                value={s.hf_token}
+                onChange={(value) => setS({ ...s, hf_token: value })}
+              />
+              <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
+                <div className="space-y-1.5">
+                  <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => setS({ ...s, github_token: e.target.value })} />
+                  <div className="flex gap-2">
+                    <Button variant="ghost" onClick={async () => { setGithubMsg("Testing…"); try { const r = await api.githubAccess(); setGithubMsg(`${r.message} Token used: ${r.token_used ? "yes" : "no"}.`); } catch (e) { setGithubMsg(String(e)); } }}>Test GitHub access</Button>
+                    <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
                   </div>
-                </Field>
-              </div>
+                  {githubMsg && <div className="text-xs text-slate-400">{githubMsg}</div>}
+                </div>
+              </Field>
+            </div>
             </div>
 
             <div className="mt-4 flex justify-end">
@@ -616,33 +653,12 @@ export default function Settings() {
               WSL & Model Storage
             </CardTitle>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Field
-                label="WSL Distribution"
-                hint={
-                  distros.length > 0
-                    ? `Installed distros: ${distros.join(", ")}`
-                    : "e.g. Ubuntu-22.04"
-                }
-              >
-                <div className="space-y-1">
-                  <input
-                    list="wsl-distros-adv"
-                    className={inputCls}
-                    value={s.distro}
-                    onChange={(e) => setS({ ...s, distro: e.target.value })}
-                  />
-                  <datalist id="wsl-distros-adv">
-                    {distros.map((d) => (
-                      <option key={d} value={d} />
-                    ))}
-                  </datalist>
-                  {distros.length > 0 && !distros.includes(s.distro) && (
-                    <div className="text-[11px] text-amber-400">
-                      ⚠️ "{s.distro}" was not found in installed WSL distributions.
-                    </div>
-                  )}
-                </div>
-              </Field>
+              <WslDistroField
+                distros={distros}
+                value={s.distro}
+                onChange={(value) => setS({ ...s, distro: value })}
+                idSuffix="adv"
+              />
 
               <Field
                 label="Custom Model Cache Path (HF_HOME)"
@@ -745,24 +761,10 @@ export default function Settings() {
               </div>
 
               <div className="sm:col-span-2">
-                <Field
-                  label="Hugging Face Token"
-                  hint="Passed as HF_TOKEN to model downloads and vLLM server launches."
-                >
-                  <div className="space-y-1.5">
-                    <input
-                      className={inputCls}
-                      type="password"
-                      placeholder="hf_…"
-                      value={s.hf_token}
-                      onChange={(e) => setS({ ...s, hf_token: e.target.value })}
-                    />
-                    <div className="flex items-center gap-1.5 text-[11px] text-emerald-400">
-                      <span>🔒</span>
-                      <span>Encrypted at rest with Windows DPAPI (CryptProtectData). Never stored in plaintext.</span>
-                    </div>
-                  </div>
-                </Field>
+<HfTokenField
+                value={s.hf_token}
+                onChange={(value) => setS({ ...s, hf_token: value })}
+              />
               </div>
             </div>
 

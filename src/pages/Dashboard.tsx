@@ -282,34 +282,20 @@ export default function Dashboard() {
           </CardTitle>
           {flashInferReady ? (
             <div className="space-y-1.5 text-sm">
-              <div className="flex items-center gap-2 text-xs">
-                <span className={`h-2 w-2 rounded-full ${flashInferReady.nvcc ? "bg-emerald-400" : "bg-red-400"}`} />
-                <span className="font-mono">nvcc</span>
-                <span className={flashInferReady.nvcc ? "text-emerald-300" : "text-red-300"}>
-                  {flashInferReady.nvcc ? "found" : "missing"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className={`h-2 w-2 rounded-full ${flashInferReady.gcc ? "bg-emerald-400" : "bg-red-400"}`} />
-                <span className="font-mono">gcc</span>
-                <span className={flashInferReady.gcc ? "text-emerald-300" : "text-red-300"}>
-                  {flashInferReady.gcc ? "found" : "missing"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className={`h-2 w-2 rounded-full ${flashInferReady.ninja ? "bg-emerald-400" : "bg-red-400"}`} />
-                <span className="font-mono">ninja</span>
-                <span className={flashInferReady.ninja ? "text-emerald-300" : "text-red-300"}>
-                  {flashInferReady.ninja ? "found" : "missing"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className={`h-2 w-2 rounded-full ${flashInferReady.python_dev ? "bg-emerald-400" : "bg-red-400"}`} />
-                <span className="font-mono">python3.12-dev</span>
-                <span className={flashInferReady.python_dev ? "text-emerald-300" : "text-red-300"}>
-                  {flashInferReady.python_dev ? "found" : "missing"}
-                </span>
-              </div>
+              {[
+                ["nvcc", "nvcc", "bg-emerald-400", "bg-red-400"],
+                ["gcc", "gcc", "bg-emerald-400", "bg-red-400"],
+                ["ninja", "ninja", "bg-emerald-400", "bg-red-400"],
+                ["python3.12-dev", "python_dev", "bg-emerald-400", "bg-red-400"],
+              ].map(([label, key, foundColor, missingColor]) => (
+                <div key={key} className="flex items-center gap-2 text-xs">
+                  <span className={`h-2 w-2 rounded-full ${flashInferReady[key as keyof typeof flashInferReady] ? foundColor : missingColor}`} />
+                  <span className="font-mono">{label}</span>
+                  <span className={flashInferReady[key as keyof typeof flashInferReady] ? "text-emerald-300" : "text-red-300"}>
+                    {flashInferReady[key as keyof typeof flashInferReady] ? "found" : "missing"}
+                  </span>
+                </div>
+              ))}
               {flashInferReady.cuda_home && (
                 <div className="flex items-center gap-2 text-xs">
                   <span className="h-2 w-2 rounded-full bg-cyan-400" />

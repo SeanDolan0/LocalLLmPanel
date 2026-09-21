@@ -69,21 +69,6 @@ export interface LlamaDevice {
   backend: string;
 }
 
-export interface ModelWithStats {
-  id: string;
-  downloads: number;
-  likes: number;
-  trending_score: number;
-  pipeline_tag: string | null;
-  params_b: number | null;
-  context: number | null;
-  context_source: string | null;
-  context_estimated: boolean;
-  head_dim: number | null;
-  max_tok_s: number | null;
-  quant_assumed: string;
-}
-
 export interface ModelStats {
   model_id: string;
   params_b: number | null;
@@ -231,6 +216,7 @@ export interface PullStatus {
   file?: string | null;
   percent?: number | null;
   speed_bps?: number | null;
+  eta_seconds?: number | null;
 }
 
 export interface WslLogEvent {

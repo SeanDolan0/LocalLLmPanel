@@ -16,37 +16,76 @@ pub const TERNARY_QUANT_HIERARCHY: &[&str] = &["I2_S"];
 /// ONNX catalog quantization hierarchy (best quality to most compressed).
 pub const ONNX_QUANT_HIERARCHY: &[&str] = &["Q8_0", "Q4_0"];
 
+/// Per-quantization sizing/speed/quality values. The single source of truth for
+/// [`quant_bpp`], [`quant_bytes_per_param`], [`quant_speed_multiplier`] and
+/// [`quant_quality_penalty`]; a label present here is also "recognized" for
+/// [`quant_is_recognized`].
+struct QuantSpec {
+    bpp: f64,
+    bytes_per_param: f64,
+    speed: f64,
+    penalty: f64,
+}
+
+const QUANT_SPECS: &[(&str, QuantSpec)] = &[
+    ("F32", QuantSpec { bpp: 4.0, bytes_per_param: 0.5, speed: 1.0, penalty: -5.0 }),
+    ("F16", QuantSpec { bpp: 2.0, bytes_per_param: 2.0, speed: 0.6, penalty: 0.0 }),
+    ("BF16", QuantSpec { bpp: 2.0, bytes_per_param: 2.0, speed: 0.6, penalty: 0.0 }),
+    ("Q8_0", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
+    ("Q6_K", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
+    ("Q5_K_M", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
+    ("Q4_K_M", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
+    ("Q4_0", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
+    ("Q3_K_M", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
+    ("Q2_K", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
+    // Native ternary (1.58-bit): i2_s / ggml TQ1_0/TQ2_0. Whole-model
+    // bytes/param derived from released GGUFs (BitNet-2B-4T ~1.2 GB,
+    // Falcon3-10B-1.58bit ~4.0 GB) — f16 embeddings dominate the ~2-bit linears.
+    // Native-trained ternary retains far more quality than naive 2-bit PTQ.
+    ("I2_S", QuantSpec { bpp: 0.42, bytes_per_param: 0.40, speed: 1.3, penalty: -6.0 }),
+    ("TQ2_0", QuantSpec { bpp: 0.42, bytes_per_param: 0.40, speed: 1.3, penalty: -6.0 }),
+    ("TQ1_0", QuantSpec { bpp: 0.42, bytes_per_param: 0.40, speed: 1.3, penalty: -6.0 }),
+    ("UD-Q2_K_XL", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
+    ("UD-Q2_K_L", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
+    ("UD-Q2_K_M", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
+    ("UD-Q2_K_S", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
+    ("UD-Q3_K_XL", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
+    ("UD-Q3_K_L", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
+    ("UD-Q3_K_M", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
+    ("UD-Q3_K_S", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
+    ("UD-Q4_K_XL", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
+    ("UD-Q4_K_L", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
+    ("UD-Q4_K_M", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
+    ("UD-Q4_K_S", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
+    ("UD-Q5_K_XL", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
+    ("UD-Q5_K_L", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
+    ("UD-Q5_K_M", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
+    ("UD-Q5_K_S", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
+    ("UD-Q6_K_XL", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
+    ("UD-Q6_K_L", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
+    ("UD-Q6_K_M", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
+    ("UD-Q6_K_S", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
+    ("UD-Q8_K_XL", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
+    ("UD-Q8_K_L", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
+    ("UD-Q8_K_M", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
+    ("UD-Q8_K_S", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
+    ("mlx-4bit", QuantSpec { bpp: 0.55, bytes_per_param: 0.5, speed: 1.15, penalty: -4.0 }),
+    ("mlx-8bit", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
+    ("AWQ-4bit", QuantSpec { bpp: 0.5, bytes_per_param: 0.5, speed: 1.2, penalty: -3.0 }),
+    ("AWQ-8bit", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
+    ("GPTQ-Int4", QuantSpec { bpp: 0.5, bytes_per_param: 0.5, speed: 1.2, penalty: -3.0 }),
+    ("GPTQ-Int8", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
+    ("AutoRound-4bit", QuantSpec { bpp: 0.5, bytes_per_param: 0.5, speed: 1.2, penalty: -3.0 }),
+    ("AutoRound-8bit", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
+];
+
+fn quant_spec(quant: &str) -> Option<&'static QuantSpec> {
+    QUANT_SPECS.iter().find(|(label, _)| *label == quant).map(|(_, spec)| spec)
+}
+
 /// Bytes per parameter for each quantization level.
 pub fn quant_bpp(quant: &str) -> f64 {
-    match quant {
-        "F32" => 4.0,
-        "F16" | "BF16" => 2.0,
-        "Q8_0" => 1.05,
-        "Q6_K" => 0.80,
-        "Q5_K_M" => 0.68,
-        "Q4_K_M" | "Q4_0" => 0.58,
-        "Q3_K_M" => 0.48,
-        "Q2_K" => 0.37,
-        // Native ternary (1.58-bit): i2_s / ggml TQ1_0/TQ2_0. Whole-model
-        // bytes/param derived from released GGUFs (BitNet-2B-4T ~1.2 GB,
-        // Falcon3-10B-1.58bit ~4.0 GB) — f16 embeddings dominate the ~2-bit linears.
-        "I2_S" | "TQ2_0" | "TQ1_0" => 0.42,
-        "UD-Q2_K_XL" | "UD-Q2_K_L" | "UD-Q2_K_M" | "UD-Q2_K_S" => 0.37,
-        "UD-Q3_K_XL" | "UD-Q3_K_L" | "UD-Q3_K_M" | "UD-Q3_K_S" => 0.48,
-        "UD-Q4_K_XL" | "UD-Q4_K_L" | "UD-Q4_K_M" | "UD-Q4_K_S" => 0.58,
-        "UD-Q5_K_XL" | "UD-Q5_K_L" | "UD-Q5_K_M" | "UD-Q5_K_S" => 0.68,
-        "UD-Q6_K_XL" | "UD-Q6_K_L" | "UD-Q6_K_M" | "UD-Q6_K_S" => 0.80,
-        "UD-Q8_K_XL" | "UD-Q8_K_L" | "UD-Q8_K_M" | "UD-Q8_K_S" => 1.05,
-        "mlx-4bit" => 0.55,
-        "mlx-8bit" => 1.0,
-        "AWQ-4bit" => 0.5,
-        "AWQ-8bit" => 1.0,
-        "GPTQ-Int4" => 0.5,
-        "GPTQ-Int8" => 1.0,
-        "AutoRound-4bit" => 0.5,
-        "AutoRound-8bit" => 1.0,
-        _ => 0.58,
-    }
+    quant_spec(quant).map_or(0.58, |s| s.bpp)
 }
 
 /// True for GGUF-style quant labels (`Q8_0`, `Q4_K_M`, ...), as opposed to
@@ -60,53 +99,13 @@ pub fn is_gguf_quant_label(quant: &str) -> bool {
 
 /// Speed multiplier for quantization (lower quant = faster inference).
 pub fn quant_speed_multiplier(quant: &str) -> f64 {
-    match quant {
-        "F16" | "BF16" => 0.6,
-        "Q8_0" => 0.8,
-        "Q6_K" => 0.95,
-        "Q5_K_M" => 1.0,
-        "Q4_K_M" | "Q4_0" => 1.15,
-        "Q3_K_M" => 1.25,
-        "Q2_K" => 1.35,
-        "I2_S" | "TQ2_0" | "TQ1_0" => 1.3,
-        "UD-Q2_K_XL" | "UD-Q2_K_L" | "UD-Q2_K_M" | "UD-Q2_K_S" => 1.35,
-        "UD-Q3_K_XL" | "UD-Q3_K_L" | "UD-Q3_K_M" | "UD-Q3_K_S" => 1.25,
-        "UD-Q4_K_XL" | "UD-Q4_K_L" | "UD-Q4_K_M" | "UD-Q4_K_S" => 1.15,
-        "UD-Q5_K_XL" | "UD-Q5_K_L" | "UD-Q5_K_M" | "UD-Q5_K_S" => 1.0,
-        "UD-Q6_K_XL" | "UD-Q6_K_L" | "UD-Q6_K_M" | "UD-Q6_K_S" => 0.95,
-        "UD-Q8_K_XL" | "UD-Q8_K_L" | "UD-Q8_K_M" | "UD-Q8_K_S" => 0.8,
-        "mlx-4bit" => 1.15,
-        "mlx-8bit" => 0.85,
-        "AWQ-4bit" | "GPTQ-Int4" | "AutoRound-4bit" => 1.2,
-        "AWQ-8bit" | "GPTQ-Int8" | "AutoRound-8bit" => 0.85,
-        _ => 1.0,
-    }
+    quant_spec(quant).map_or(1.0, |s| s.speed)
 }
 
 /// Bytes per parameter for a given quantization format.
 /// Used by the bandwidth-based tok/s estimator to compute model size in GB.
 pub fn quant_bytes_per_param(quant: &str) -> f64 {
-    match quant {
-        "F16" | "BF16" => 2.0,
-        "Q8_0" => 1.0,
-        "Q6_K" => 0.75,
-        "Q5_K_M" => 0.625,
-        "Q4_K_M" | "Q4_0" => 0.5,
-        "Q3_K_M" => 0.375,
-        "Q2_K" => 0.25,
-        "I2_S" | "TQ2_0" | "TQ1_0" => 0.40,
-        "UD-Q2_K_XL" | "UD-Q2_K_L" | "UD-Q2_K_M" | "UD-Q2_K_S" => 0.25,
-        "UD-Q3_K_XL" | "UD-Q3_K_L" | "UD-Q3_K_M" | "UD-Q3_K_S" => 0.375,
-        "UD-Q4_K_XL" | "UD-Q4_K_L" | "UD-Q4_K_M" | "UD-Q4_K_S" => 0.5,
-        "UD-Q5_K_XL" | "UD-Q5_K_L" | "UD-Q5_K_M" | "UD-Q5_K_S" => 0.625,
-        "UD-Q6_K_XL" | "UD-Q6_K_L" | "UD-Q6_K_M" | "UD-Q6_K_S" => 0.75,
-        "UD-Q8_K_XL" | "UD-Q8_K_L" | "UD-Q8_K_M" | "UD-Q8_K_S" => 1.0,
-        "mlx-4bit" => 0.5,
-        "mlx-8bit" => 1.0,
-        "AWQ-4bit" | "GPTQ-Int4" | "AutoRound-4bit" => 0.5,
-        "AWQ-8bit" | "GPTQ-Int8" | "AutoRound-8bit" => 1.0,
-        _ => 0.5, // default to ~4-bit
-    }
+    quant_spec(quant).map_or(0.5, |s| s.bytes_per_param)
 }
 
 /// True when `quant` is a quantization label the memory-sizing path recognises
@@ -114,84 +113,14 @@ pub fn quant_bytes_per_param(quant: &str) -> f64 {
 /// bytes/param fallback in [`quant_bpp`], which [`LlmModel::estimate_memory_gb`]
 /// and [`LlmModel::moe_active_vram_gb_at`] use for resident weights, so a caller
 /// that accepts a user-supplied quant should reject anything this returns false
-/// for rather than mis-sizing the model. Keep in sync with the arms of
-/// [`quant_bpp`].
+/// for rather than mis-sizing the model.
 pub fn quant_is_recognized(quant: &str) -> bool {
-    matches!(
-        quant,
-        "F32"
-            | "F16"
-            | "BF16"
-            | "Q8_0"
-            | "Q6_K"
-            | "Q5_K_M"
-            | "Q4_K_M"
-            | "Q4_0"
-            | "Q3_K_M"
-            | "Q2_K"
-            | "UD-Q2_K_XL"
-            | "UD-Q2_K_L"
-            | "UD-Q2_K_M"
-            | "UD-Q2_K_S"
-            | "UD-Q3_K_XL"
-            | "UD-Q3_K_L"
-            | "UD-Q3_K_M"
-            | "UD-Q3_K_S"
-            | "UD-Q4_K_XL"
-            | "UD-Q4_K_L"
-            | "UD-Q4_K_M"
-            | "UD-Q4_K_S"
-            | "UD-Q5_K_XL"
-            | "UD-Q5_K_L"
-            | "UD-Q5_K_M"
-            | "UD-Q5_K_S"
-            | "UD-Q6_K_XL"
-            | "UD-Q6_K_L"
-            | "UD-Q6_K_M"
-            | "UD-Q6_K_S"
-            | "UD-Q8_K_XL"
-            | "UD-Q8_K_L"
-            | "UD-Q8_K_M"
-            | "UD-Q8_K_S"
-            | "mlx-4bit"
-            | "mlx-8bit"
-            | "AWQ-4bit"
-            | "AWQ-8bit"
-            | "GPTQ-Int4"
-            | "GPTQ-Int8"
-            | "AutoRound-4bit"
-            | "AutoRound-8bit"
-    )
+    quant_spec(quant).is_some()
 }
 
 /// Quality penalty for quantization (lower quant = lower quality).
 pub fn quant_quality_penalty(quant: &str) -> f64 {
-    match quant {
-        "F16" | "BF16" => 0.0,
-        "Q8_0" => 0.0,
-        "Q6_K" => -1.0,
-        "Q5_K_M" => -2.0,
-        "Q4_K_M" | "Q4_0" => -5.0,
-        "Q3_K_M" => -8.0,
-        "Q2_K" => -12.0,
-        // Native-trained ternary retains far more quality than naive 2-bit PTQ.
-        "I2_S" | "TQ2_0" | "TQ1_0" => -6.0,
-        "UD-Q2_K_XL" | "UD-Q2_K_L" | "UD-Q2_K_M" | "UD-Q2_K_S" => -12.0,
-        "UD-Q3_K_XL" | "UD-Q3_K_L" | "UD-Q3_K_M" | "UD-Q3_K_S" => -8.0,
-        "UD-Q4_K_XL" | "UD-Q4_K_L" | "UD-Q4_K_M" | "UD-Q4_K_S" => -5.0,
-        "UD-Q5_K_XL" | "UD-Q5_K_L" | "UD-Q5_K_M" | "UD-Q5_K_S" => -2.0,
-        "UD-Q6_K_XL" | "UD-Q6_K_L" | "UD-Q6_K_M" | "UD-Q6_K_S" => -1.0,
-        "UD-Q8_K_XL" | "UD-Q8_K_L" | "UD-Q8_K_M" | "UD-Q8_K_S" => 0.0,
-        "mlx-4bit" => -4.0,
-        "mlx-8bit" => 0.0,
-        "AWQ-4bit" => -3.0,
-        "AWQ-8bit" => 0.0,
-        "GPTQ-Int4" => -3.0,
-        "GPTQ-Int8" => 0.0,
-        "AutoRound-4bit" => -3.0,
-        "AutoRound-8bit" => 0.0,
-        _ => -5.0,
-    }
+    quant_spec(quant).map_or(-5.0, |s| s.penalty)
 }
 
 /// Explicit Qwen minor version spelled out in a repo name (`Qwen3.8-27B` → 3.8).

@@ -12,20 +12,6 @@ use tauri::Emitter;
 
 pub const HF_API: &str = "https://huggingface.co/api/models";
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct GgufFile {
-    pub path: String,
-    pub size_bytes: u64,
-    pub is_mmproj: bool,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct GgufShardGroup {
-    pub first_shard: String,
-    pub files: Vec<GgufFile>,
-    pub size_bytes: u64,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufRepoFile {
     pub path: String,
@@ -64,55 +50,6 @@ pub async fn list_gguf_repo_files(
             })
         })
         .collect())
-}
-
-/// Group split GGUF shards while leaving standalone quantizations independent.
-pub fn group_gguf_files(files: &[GgufFile]) -> Vec<GgufShardGroup> {
-    let mut groups: std::collections::BTreeMap<String, Vec<GgufFile>> =
-        std::collections::BTreeMap::new();
-    for file in files.iter().filter(|f| !f.is_mmproj) {
-        let path = file.path.clone();
-        let key = if let Some(pos) = path.find("-000") {
-            if path[pos + 4..].find("-of-").is_some() {
-                path[..pos].to_string()
-            } else {
-                path.trim_end_matches(".gguf").to_string()
-            }
-        } else {
-            path.trim_end_matches(".gguf").to_string()
-        };
-        groups.entry(key).or_default().push(file.clone());
-    }
-    groups
-        .into_values()
-        .map(|mut files| {
-            files.sort_by(|a, b| a.path.cmp(&b.path));
-            GgufShardGroup {
-                first_shard: files.first().map(|f| f.path.clone()).unwrap_or_default(),
-                size_bytes: files.iter().map(|f| f.size_bytes).sum(),
-                files,
-            }
-        })
-        .collect()
-}
-
-pub fn gguf_fit_indicator(
-    file_size_bytes: u64,
-    vram_total_mb: u64,
-    ram_total_mb: u64,
-    wsl_running: bool,
-) -> &'static str {
-    let headroom_mb = if wsl_running { 4096 } else { 2048 };
-    let vram_budget = vram_total_mb.saturating_sub(headroom_mb) * 1024 * 1024;
-    let ram_budget =
-        ram_total_mb.saturating_sub(if wsl_running { 8192 } else { 4096 }) * 1024 * 1024;
-    if file_size_bytes <= vram_budget {
-        "fits fully in VRAM"
-    } else if file_size_bytes <= vram_budget.saturating_add(ram_budget) {
-        "needs MoE/CPU offload (fits VRAM+RAM)"
-    } else {
-        "does not fit"
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -358,7 +295,7 @@ pub async fn enrich(
                 cfg.get("text_config")
                     .and_then(|t| t.get("num_hidden_layers"))
             })
-            .and_then(usize_of);
+            .and_then(estimate::usize_of);
         let n_kv_heads = cfg
             .get("num_key_value_heads")
             .or_else(|| cfg.get("num_attention_heads"))
@@ -369,7 +306,7 @@ pub async fn enrich(
                         .or_else(|| t.get("num_kv_heads"))
                 })
             })
-            .and_then(usize_of);
+            .and_then(estimate::usize_of);
         let torch_dtype = cfg
             .get("torch_dtype")
             .or_else(|| cfg.get("text_config").and_then(|t| t.get("torch_dtype")))
@@ -887,12 +824,6 @@ async fn check_gguf(
     check_gguf_repo(client, &repo_id, sem, token).await
 }
 
-fn usize_of(v: &Value) -> Option<usize> {
-    v.as_u64()
-        .map(|n| n as usize)
-        .or_else(|| v.as_i64().and_then(|n| usize::try_from(n).ok()))
-}
-
 // ---------------------------------------------------------------------------
 // Pulling
 // ---------------------------------------------------------------------------
@@ -903,6 +834,8 @@ pub struct PullStatus {
     pub state: String, // downloading | complete | failed
     pub file: Option<String>,
     pub percent: Option<f64>,
+    pub speed_bps: Option<f64>, // bytes per second
+    pub eta_seconds: Option<f64>, // estimated time remaining in seconds
 }
 
 /// Start a background `hf download <model_id>` in the venv, streaming progress
@@ -952,7 +885,52 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
     };
     let mid = model_id.clone();
 
-    std::thread::spawn(move || {
+    /// Parse a progress line from huggingface_hub download output.
+/// Expected formats (HF_HUB_DISABLE_TQDM=1):
+///   "Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"
+///   "Fetching 10 files:  50%|█████     | 2/4 [00:30<00:30,  1.5s/it]"
+///   "Resolving dependencies..."
+fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>)> {
+    // Look for percentage pattern like " 10%" or "100%"
+    let percent_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").ok()?;
+    let percent_match = percent_re.captures(line)?;
+    let percent = percent_match.get(1)?.as_str().parse::<f64>().ok()?;
+
+    // Look for speed pattern like "120MB/s", "1.5GB/s", "500KB/s", "1.5s/it"
+    let speed_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?B)/s|(\d+(?:\.\d+)?)\s*s/it").ok()?;
+    let speed_bps = speed_re.captures(line).and_then(|cap| {
+        if let Some(bytes_match) = cap.get(1) {
+            let val = bytes_match.as_str().parse::<f64>().ok()?;
+            let unit = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            let multiplier = match unit.to_uppercase().as_str() {
+                "B" => 1.0,
+                "KB" => 1024.0,
+                "MB" => 1024.0 * 1024.0,
+                "GB" => 1024.0 * 1024.0 * 1024.0,
+                "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+                _ => 1.0,
+            };
+            Some(val * multiplier)
+        } else if let Some(it_match) = cap.get(3) {
+            // Items per second - can't convert to bytes without file sizes
+            None
+        } else {
+            None
+        }
+    });
+
+    // Look for ETA pattern like "[00:12<01:48" or "[00:30<00:30"
+    let eta_re = regex_lite::Regex::new(r"\[(?:\d{2}:\d{2})<(\d{2}):(\d{2})").ok()?;
+    let eta_seconds = eta_re.captures(line).and_then(|cap| {
+        let min = cap.get(1)?.as_str().parse::<f64>().ok()?;
+        let sec = cap.get(2)?.as_str().parse::<f64>().ok()?;
+        Some(min * 60.0 + sec)
+    });
+
+    Some((percent, speed_bps, eta_seconds))
+}
+
+std::thread::spawn(move || {
         // Replace shell-quote hazards minimally; model ids are safe by construction.
         let maybe_cd = if venv.contains("~") || venv.starts_with('/') {
             format!("cd {}/.. && ", venv)
@@ -966,13 +944,16 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
         let model_ev = model_id.clone();
         let app_ev = app.clone();
         let on_line = move |line: &str| {
+            let (percent, speed_bps, eta_seconds) = parse_progress_line(line).unwrap_or((0.0, None, None));
             let _ = app_ev.emit(
                 "pull-progress",
                 PullStatus {
                     model: model_ev.clone(),
                     state: "downloading".into(),
                     file: Some(line.to_string()),
-                    percent: None,
+                    percent: Some(percent),
+                    speed_bps,
+                    eta_seconds,
                 },
             );
         };
@@ -1018,7 +999,9 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
                 model: model_id.clone(),
                 state: state_label.into(),
                 file: err_msg,
-                percent: None,
+                percent: if state_label == "complete" { Some(100.0) } else { None },
+                speed_bps: None,
+                eta_seconds: None,
             },
         );
         let mut pulling = pulling_arc.lock().unwrap();
@@ -1034,53 +1017,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn groups_split_gguf_shards_and_ignores_mmproj() {
-        let files = vec![
-            GgufFile {
-                path: "model-Q4_K_M-00002-of-00003.gguf".into(),
-                size_bytes: 20,
-                is_mmproj: false,
-            },
-            GgufFile {
-                path: "model-Q4_K_M-00001-of-00003.gguf".into(),
-                size_bytes: 10,
-                is_mmproj: false,
-            },
-            GgufFile {
-                path: "model-Q4_K_M-00003-of-00003.gguf".into(),
-                size_bytes: 30,
-                is_mmproj: false,
-            },
-            GgufFile {
-                path: "mmproj-model-f16.gguf".into(),
-                size_bytes: 5,
-                is_mmproj: true,
-            },
-        ];
-        let groups = group_gguf_files(&files);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].first_shard, "model-Q4_K_M-00001-of-00003.gguf");
-        assert_eq!(groups[0].size_bytes, 60);
-        assert_eq!(groups[0].files.len(), 3);
-    }
-
-    #[test]
-    fn gguf_fit_indicator_accounts_for_headroom() {
-        assert_eq!(
-            gguf_fit_indicator(8 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, false),
-            "fits fully in VRAM"
-        );
-        assert_eq!(
-            gguf_fit_indicator(20 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, true),
-            "needs MoE/CPU offload (fits VRAM+RAM)"
-        );
-        assert_eq!(
-            gguf_fit_indicator(100 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, true),
-            "does not fit"
-        );
-    }
 
     #[tokio::test]
     async fn test_enrich_cache_hit_returns_cached_without_network() {

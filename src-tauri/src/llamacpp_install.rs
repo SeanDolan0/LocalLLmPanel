@@ -27,8 +27,6 @@ struct Release {
     tag_name: String,
     #[serde(default)]
     draft: bool,
-    #[serde(default)]
-    _prerelease: bool,
     assets: Vec<Asset>,
 }
 
@@ -880,7 +878,6 @@ mod tests {
             Release {
                 tag_name: "b2".into(),
                 draft: false,
-                _prerelease: false,
                 assets: vec![Asset {
                     name: "llama-b2-bin-win-vulkan-x64.zip".into(),
                     browser_download_url: "v".into(),
@@ -889,7 +886,6 @@ mod tests {
             Release {
                 tag_name: "b1".into(),
                 draft: false,
-                _prerelease: false,
                 assets: vec![Asset {
                     name: "llama-b1-bin-win-cuda-13.3-x64.zip".into(),
                     browser_download_url: "cuda".into(),

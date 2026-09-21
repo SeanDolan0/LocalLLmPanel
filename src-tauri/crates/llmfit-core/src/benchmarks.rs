@@ -1,14 +1,21 @@
 //! Client for the localmaxxing.com benchmark API.
 //!
-//! Fetches real-world benchmark results (tok/s, TTFT, VRAM usage) for
-//! hardware configurations that match the user's detected system specs.
-//! Includes an embedded cache as fallback when the API is unreachable.
+//! Reads from the embedded cache and llmfit community submissions collected
+//! at build time; no network calls happen at runtime.
 
-use crate::hardware::{GpuBackend, SystemSpecs};
+use crate::hardware::SystemSpecs;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-const BASE_URL: &str = "https://localmaxxing.com/api";
+/// Upper bound for a plausible measured decode rate. Local inference runs far
+/// below this; higher values come from degenerate timings, e.g. one token with
+/// a `eval_duration` of a few microseconds (#1038).
+pub const MAX_PLAUSIBLE_TPS: f64 = 10_000.0;
+
+/// Whether a tok/s value can be used as a measurement.
+pub fn is_plausible_tps(tps: f64) -> bool {
+    tps.is_finite() && tps > 0.0 && tps <= MAX_PLAUSIBLE_TPS
+}
 
 // Embedded benchmark cache — scraped by scripts/scrape_benchmarks.py
 const BENCHMARK_CACHE_JSON: &str = include_str!("../data/benchmark_cache.json");
@@ -19,40 +26,6 @@ const COMMUNITY_BENCH_JSON: &str =
     include_str!(concat!(env!("OUT_DIR"), "/community_benchmarks.json"));
 
 // ── Response types ───────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BenchmarkEntry {
-    pub id: String,
-    #[serde(default)]
-    pub hf_id: String,
-    #[serde(default)]
-    pub engine_name: String,
-    #[serde(default)]
-    pub quantization: String,
-    #[serde(default)]
-    pub tok_s_out: Option<f64>,
-    #[serde(default)]
-    pub tok_s_total: Option<f64>,
-    #[serde(default)]
-    pub ttft_ms: Option<f64>,
-    #[serde(default)]
-    pub context_length: Option<u32>,
-    #[serde(default)]
-    pub batch_size: Option<u32>,
-    #[serde(default)]
-    pub peak_vram_gb: Option<f64>,
-    #[serde(default)]
-    pub notes: Option<String>,
-    #[serde(default)]
-    pub hardware: Option<HardwareInfo>,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub verified: Option<bool>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,17 +171,6 @@ impl LeaderboardEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BenchmarkResponse {
-    pub benchmarks: Vec<BenchmarkEntry>,
-    #[serde(default)]
-    pub total: u64,
-    #[serde(default)]
-    pub limit: u64,
-    #[serde(default)]
-    pub offset: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaderboardResponse {
     pub rows: Vec<LeaderboardEntry>,
     #[serde(default)]
@@ -219,120 +181,11 @@ pub struct LeaderboardResponse {
     pub offset: u64,
 }
 
-// ── Query builder ────────────────────────────────────────────────────
-
-/// Map detected hardware to API query parameters for matching benchmarks.
-pub fn hw_query_params(specs: &SystemSpecs) -> Vec<(&'static str, String)> {
-    let mut params: Vec<(&str, String)> = Vec::new();
-
-    if specs.unified_memory {
-        params.push(("hwClass", "UNIFIED".to_string()));
-
-        // Apple Silicon
-        if specs.backend == GpuBackend::Metal {
-            params.push(("chipVendor", "apple".to_string()));
-            if let Some(ref gpu) = specs.gpu_name {
-                // e.g. "Apple M2 Max" → chipFamily "m2", chipVariant "max"
-                let lower = gpu.to_lowercase();
-                if let Some(rest) = lower.strip_prefix("apple ") {
-                    let parts: Vec<&str> = rest.split_whitespace().collect();
-                    if !parts.is_empty() {
-                        params.push(("chipFamily", parts[0].to_string()));
-                    }
-                    if parts.len() > 1 {
-                        params.push(("chipVariant", parts[1].to_string()));
-                    }
-                }
-            }
-        }
-    } else if specs.has_gpu {
-        params.push(("hwClass", "DISCRETE_GPU".to_string()));
-
-        if let Some(ref name) = specs.gpu_name {
-            params.push(("gpuName", name.clone()));
-        }
-    } else {
-        params.push(("hwClass", "CPU_ONLY".to_string()));
-    }
-
-    params
-}
-
-/// Map detected hardware to leaderboard query parameters.
-pub fn hw_leaderboard_params(specs: &SystemSpecs) -> Vec<(&'static str, String)> {
-    let mut params: Vec<(&str, String)> = Vec::new();
-
-    if specs.unified_memory {
-        params.push(("hwClass", "UNIFIED".to_string()));
-    } else if specs.has_gpu {
-        params.push(("hwClass", "DISCRETE_GPU".to_string()));
-    } else {
-        params.push(("hwClass", "CPU_ONLY".to_string()));
-    }
-
-    // Use hardware name for fuzzy match
-    if let Some(ref name) = specs.gpu_name {
-        params.push(("hardwareName", name.clone()));
-    }
-
-    // VRAM tier
-    if let Some(vram) = specs.total_gpu_vram_gb {
-        let tier = lookup_mem_tier(vram);
-        if tier > 0 {
-            params.push(("memTier", tier.to_string()));
-        }
-    } else if specs.unified_memory {
-        let tier = lookup_mem_tier(specs.total_ram_gb);
-        if tier > 0 {
-            params.push(("memTier", tier.to_string()));
-        }
-    }
-
-    // OS
-    let os = if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "linux"
-    };
-    params.push(("os", os.to_string()));
-
-    params
-}
-
-/// Bucket a memory size into the tier used as a *lookup key* against the
-/// cached community results.
-///
-/// Nearest-match is the right rule here and the wrong one in `share.rs`: a
-/// lookup wants the closest bucket that has data even when the fit is not
-/// exact, because returning nothing is worse than returning an approximation.
-/// A declared capacity wants the opposite.
-///
-/// That is why this is not the same function as `declared_mem_tier` in
-/// `share.rs` despite looking almost identical, and why the two ladders are
-/// allowed to differ. Please do not unify them.
-fn lookup_mem_tier(gb: f64) -> u32 {
-    const TIERS: [u32; 9] = [8, 12, 16, 24, 32, 48, 80, 96, 128];
-    let mut best = 0u32;
-    let mut best_dist = f64::MAX;
-    for &t in &TIERS {
-        let d = (gb - t as f64).abs();
-        if d < best_dist {
-            best_dist = d;
-            best = t;
-        }
-    }
-    best
-}
-
 // ── Embedded cache ───────────────────────────────────────────────────
 
 /// Cache structure matching the scraper output.
 #[derive(Debug, Clone, Deserialize)]
 struct BenchmarkCache {
-    #[serde(default)]
-    scraped_at: Option<String>,
     #[serde(default)]
     presets: std::collections::HashMap<String, CachedPreset>,
 }
@@ -349,7 +202,6 @@ fn embedded_cache() -> &'static BenchmarkCache {
     static CACHE: OnceLock<BenchmarkCache> = OnceLock::new();
     CACHE.get_or_init(|| {
         serde_json::from_str(BENCHMARK_CACHE_JSON).unwrap_or_else(|_| BenchmarkCache {
-            scraped_at: None,
             presets: std::collections::HashMap::new(),
         })
     })
@@ -364,21 +216,6 @@ pub fn cached_leaderboard_for_preset(label: &str) -> Option<LeaderboardResponse>
         limit: p.rows.len() as u64,
         offset: 0,
     })
-}
-
-/// Number of benchmarks in the embedded cache for a hardware preset label.
-/// Uses the server-reported total from scrape time when present (the cached
-/// rows themselves are capped per preset).
-pub fn cached_preset_benchmark_count(label: &str) -> Option<u64> {
-    embedded_cache()
-        .presets
-        .get(label)
-        .map(|p| p.total.max(p.rows.len() as u64))
-}
-
-/// Returns the scrape timestamp of the embedded cache, if available.
-pub fn cache_timestamp() -> Option<&'static str> {
-    embedded_cache().scraped_at.as_deref()
 }
 
 /// All preset labels present in the embedded benchmark cache. Used by the
@@ -580,9 +417,7 @@ pub fn community_results_for_specs(specs: &SystemSpecs) -> Vec<CommunityResult> 
             .map(|v| v.as_slice())
             .unwrap_or_default()
         {
-            let Some(tps) = r["avgTps"]
-                .as_f64()
-                .filter(|t| crate::bench::is_plausible_tps(*t))
+            let Some(tps) = r["avgTps"].as_f64().filter(|t| is_plausible_tps(*t))
             else {
                 continue;
             };
@@ -642,85 +477,6 @@ impl CommunityBenchIndex {
             source: MeasuredSource::CommunityLlmfit,
         })
     }
-}
-
-// ── Fetch functions ──────────────────────────────────────────────────
-
-/// GET a benchmark-API URL and parse the JSON response. All API calls go
-/// through here so they share one timeout — without it a black-holed
-/// connection blocks the caller indefinitely.
-fn get_json<T: serde::de::DeserializeOwned>(url: &str, api_key: Option<&str>) -> Result<T, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
-        .build()
-        .into();
-    let mut req = agent.get(url);
-    if let Some(key) = api_key {
-        req = req.header("Authorization", &format!("Bearer {}", key));
-    }
-    let resp = req.call().map_err(|e| format!("HTTP error: {}", e))?;
-    resp.into_body()
-        .read_json()
-        .map_err(|e| format!("JSON parse error: {}", e))
-}
-
-/// Fetch benchmarks matching the user's hardware.
-pub fn fetch_benchmarks(
-    specs: &SystemSpecs,
-    api_key: Option<&str>,
-    limit: u32,
-) -> Result<BenchmarkResponse, String> {
-    let mut params = hw_query_params(specs);
-    params.push(("limit", limit.to_string()));
-
-    let query: String = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, urlencoded(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let url = format!("{}/benchmarks?{}", BASE_URL, query);
-    get_json(&url, api_key)
-}
-
-/// Fetch benchmarks for a specific model on matching hardware.
-pub fn fetch_benchmarks_for_model(
-    specs: &SystemSpecs,
-    hf_id: &str,
-    api_key: Option<&str>,
-    limit: u32,
-) -> Result<BenchmarkResponse, String> {
-    let mut params = hw_query_params(specs);
-    params.push(("hfId", hf_id.to_string()));
-    params.push(("limit", limit.to_string()));
-
-    let query: String = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, urlencoded(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let url = format!("{}/benchmarks?{}", BASE_URL, query);
-    get_json(&url, api_key)
-}
-
-/// Fetch the leaderboard filtered to matching hardware.
-pub fn fetch_leaderboard(
-    specs: &SystemSpecs,
-    api_key: Option<&str>,
-    limit: u32,
-) -> Result<LeaderboardResponse, String> {
-    let mut params = hw_leaderboard_params(specs);
-    params.push(("limit", limit.to_string()));
-
-    let query: String = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, urlencoded(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let url = format!("{}/leaderboard?{}", BASE_URL, query);
-    get_json(&url, api_key)
 }
 
 // ── Hardware presets ─────────────────────────────────────────────────
@@ -911,54 +667,10 @@ static HARDWARE_PRESETS: [HardwarePreset; 27] = [
     },
 ];
 
-/// Fetch leaderboard for a specific hardware preset.
-pub fn fetch_leaderboard_for_preset(
-    preset: &HardwarePreset,
-    api_key: Option<&str>,
-    limit: u32,
-) -> Result<LeaderboardResponse, String> {
-    let mut params: Vec<(&str, String)> = Vec::new();
-    params.push(("hwClass", preset.hw_class.to_string()));
-    if let Some(name) = preset.hardware_name {
-        params.push(("hardwareName", name.to_string()));
-    }
-    if let Some(tier) = preset.mem_tier {
-        params.push(("memTier", tier.to_string()));
-    }
-    params.push(("limit", limit.to_string()));
-
-    let query: String = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, urlencoded(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let url = format!("{}/leaderboard?{}", BASE_URL, query);
-    get_json(&url, api_key)
-}
-
-/// Minimal percent-encoding for query values.
-fn urlencoded(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            b' ' => out.push('+'),
-            _ => {
-                out.push('%');
-                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
-                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardware::GpuBackend;
 
     fn row(json: &str) -> LeaderboardEntry {
         serde_json::from_str(json).expect("valid test row")

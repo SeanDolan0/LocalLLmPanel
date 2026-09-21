@@ -1,18 +1,10 @@
 pub mod analysis;
-pub mod bench;
 pub mod benchmarks;
-pub mod claim;
-pub mod concurrency;
-pub mod doctor;
 pub mod fit;
 pub mod hardware;
-pub mod hwprofile;
 pub mod models;
-pub mod plan;
 pub mod providers;
-pub mod quality;
 pub mod share;
-pub mod storage;
 pub mod task_bench;
 pub mod update;
 
@@ -21,16 +13,7 @@ pub use fit::{
     EstimateConfidence, FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents, SortColumn,
 };
 pub use hardware::{GpuBackend, SystemSpecs};
-pub use hwprofile::HardwareProfile;
 pub use models::{Capability, LlmModel, ModelDatabase, ModelFormat, UseCase};
-pub use plan::{
-    HardwareEstimate, PathEstimate, PlanCurrentStatus, PlanEstimate, PlanRequest, PlanRunPath,
-    UpgradeDelta, estimate_model_plan, estimate_model_plan_with_config, normalize_quant,
-    resolve_model_selector,
-};
 pub use providers::{
     LlamaCppProvider, LmStudioProvider, MlxProvider, ModelProvider, OllamaProvider, VllmProvider,
-};
-pub use update::{
-    UpdateOptions, cache_file, clear_cache, load_cache, save_cache, update_model_cache,
 };

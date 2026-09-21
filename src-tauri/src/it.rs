@@ -73,7 +73,7 @@ fn llamacpp_it() {
     };
     let mut child = crate::wsl::NativeChild::spawn(
         std::path::Path::new(&exe),
-        &server::build_llamacpp_args(&def),
+        &server::build_llamacpp_args_with_help(&def, ""),
         |_| {},
     )
     .expect("spawn llama-server");

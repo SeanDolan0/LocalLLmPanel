@@ -37,7 +37,6 @@ export default function Servers() {
 
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
-  const [globalDefaults] = useState<Record<string, string>>({});
   const [editingServer, setEditingServer] = useState<ServerDef | null>(null);
   
   // log buffers per server (event-driven + hydrated)
@@ -190,9 +189,6 @@ export default function Servers() {
         );
         if (e.status === "stopped") setLogs((prev) => ({ ...prev, [e.id]: "" }));
       }),
-      events.serverMetrics((e) => {
-        setRows((prev) => prev.map((r) => (r.def.id === (e as { id?: string }).id ? r : r)));
-      }),
     ];
     return () => {
       clearInterval(t);
@@ -322,7 +318,7 @@ export default function Servers() {
           initialGpuUtil={prefillGpuUtil}
           initialServed={prefillServed}
           initialTask={prefillTask}
-          initialGlobalDefaults={globalDefaults}
+          initialGlobalDefaults={{}}
           initialEnv={{}}
           initialServer={editingServer}
           onDone={(s) => {
@@ -711,7 +707,7 @@ function NewServerForm({
   const [env, setEnv] = useState<Record<string, string>>({});
   const [flashInferDisabled, setFlashInferDisabled] = useState<boolean>(() => {
     const defaults = initialGlobalDefaults ?? {};
-    return defaults["VLLM_USE_FLASHINFER_SAMPLER"] === "0" || true;
+    return defaults["VLLM_USE_FLASHINFER_SAMPLER"] === "0";
   });
 
   // Sync flashInferDisabled checkbox with env
@@ -1062,7 +1058,6 @@ function NewServerForm({
             </Field>
             <EnvironmentVarsEditor
               initialEnv={initialEnv}
-              globalDefaults={initialGlobalDefaults ?? {}}
               onChange={setEnv}
               onFlashInferToggle={(disabled) => setFlashInferDisabled(disabled)}
               flashInferDisabled={flashInferDisabled}
@@ -1084,7 +1079,6 @@ function NewServerForm({
 // Environment Variables Editor for vLLM servers
 interface EnvironmentVarsEditorProps {
   initialEnv?: Record<string, string>;
-  globalDefaults: Record<string, string>;
   onChange: (env: Record<string, string>) => void;
   onFlashInferToggle: (disabled: boolean) => void;
   flashInferDisabled: boolean;
@@ -1121,7 +1115,6 @@ function validateBooleanEnvVar(key: string, value: string): string | null {
 }
 
 function EnvironmentVarsEditor({
-  globalDefaults,
   initialEnv,
   onChange,
   onFlashInferToggle,
@@ -1132,18 +1125,11 @@ function EnvironmentVarsEditor({
   const [newValue, setNewValue] = useState("");
   const [warnings, setWarnings] = useState<Record<string, string>>({});
 
-  // Initialize localEnv from globalDefaults and initialEnv (but don't include VLLM_USE_FLASHINFER_SAMPLER since it's handled by checkbox)
+  // Initialize localEnv from initialEnv (but don't include VLLM_USE_FLASHINFER_SAMPLER since it's handled by checkbox)
   useEffect(() => {
     const filtered: Record<string, string> = {};
     const newWarnings: Record<string, string> = {};
-    for (const [k, v] of Object.entries(globalDefaults)) {
-      if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
-        filtered[k] = v;
-        const warn = validateBooleanEnvVar(k, v);
-        if (warn) newWarnings[k] = warn;
-      }
-    }
-    // Merge initialEnv (per-server overrides) on top of global defaults
+    // Merge initialEnv (per-server overrides)
     for (const [k, v] of Object.entries(initialEnv ?? {})) {
       if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
         filtered[k] = v;
@@ -1154,7 +1140,7 @@ function EnvironmentVarsEditor({
     setLocalEnv(filtered);
     setWarnings(newWarnings);
     onChange({ ...filtered, VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1" });
-  }, [globalDefaults, initialEnv, flashInferDisabled, onChange]);
+  }, [initialEnv, flashInferDisabled, onChange]);
 
   const handleAdd = () => {
     const key = newKey.trim();
@@ -1225,23 +1211,7 @@ function EnvironmentVarsEditor({
               vLLM's FlashInfer-based top-k/top-p sampler JIT-compiles a CUDA kernel on first use, which requires nvcc (CUDA toolkit), a C compiler, and ninja in WSL. Disabling uses the built-in PyTorch sampler and avoids this JIT entirely.
             </div>
           </div>
-        </label>
-
-        {/* Global Defaults (read-only) */}
-        {Object.keys(globalDefaults).length > 0 && (
-          <div className="space-y-1">
-            <div className="text-[11px] text-slate-500 font-medium uppercase tracking-wider">Global Defaults (from Settings)</div>
-            {Object.entries(globalDefaults).map(([key, value]) => (
-              <div key={key} className="flex items-center gap-2 text-sm bg-surface/50 rounded px-2 py-1.5">
-                <span className="font-mono text-xs text-slate-400 w-48 truncate">{key}</span>
-                <span className="flex-1 font-mono text-xs text-slate-300 truncate">{value}</span>
-                {key !== "VLLM_USE_FLASHINFER_SAMPLER" && (
-                  <span className="text-[10px] text-amber-400">inherited</span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+</label>
 
 {/* Per-server Overrides */}
         <div className="space-y-1">

@@ -32,62 +32,31 @@ pub struct RequestHead {
     pub content_length: usize,
 }
 
-/// All live instruct servers that are currently `Running`.
-fn running_instruct_servers(
-    servers: &BTreeMap<String, crate::state::LiveServer>,
-) -> Vec<&crate::state::LiveServer> {
+/// All live servers of `task` status that are currently `Running`.
+fn running_servers<'a>(
+    servers: &'a BTreeMap<String, crate::state::LiveServer>,
+    task: &str,
+) -> Vec<&'a crate::state::LiveServer> {
     servers
         .values()
-        .filter(|ls| ls.status == ServerStatus::Running && ls.def.task == "instruct")
+        .filter(|ls| ls.status == ServerStatus::Running && ls.def.task == task)
         .collect()
 }
 
 /// Route a requested model name to the port of the running server that
-/// serves it. Exact match on the served model name or HF id wins first,
-/// then a fuzzy suffix match against both (so `Qwen2.5-7B-Instruct` finds
-/// `Qwen/Qwen2.5-7B-Instruct`).
-pub fn find_server_port_for_model(
+/// serves it with the given task. Exact match on the served model name or
+/// HF id wins first, then a fuzzy suffix match against both (so
+/// `Qwen2.5-7B-Instruct` finds `Qwen/Qwen2.5-7B-Instruct`).
+pub fn find_server_port_for(
     servers: &BTreeMap<String, crate::state::LiveServer>,
     model: &str,
+    task: &str,
 ) -> Option<u16> {
     let m = model.trim();
     if m.is_empty() {
         return None;
     }
-    let running = running_instruct_servers(servers);
-    for ls in &running {
-        if ls.def.effective_model_name().eq_ignore_ascii_case(m)
-            || ls.def.model_id.eq_ignore_ascii_case(m)
-        {
-            return Some(ls.def.port);
-        }
-    }
-    let lower = m.to_lowercase();
-    for ls in &running {
-        let hf = ls.def.model_id.to_lowercase();
-        let name = ls.def.effective_model_name().to_lowercase();
-        if hf.ends_with(&lower) || name.ends_with(&lower) || lower.ends_with(&hf) {
-            return Some(ls.def.port);
-        }
-    }
-    None
-}
-
-/// Route a requested embedding model name to the port of the running
-/// server that serves it. Mirrors find_server_port_for_model but for
-/// task == "embed".
-pub fn find_server_port_for_embed(
-    servers: &BTreeMap<String, crate::state::LiveServer>,
-    model: &str,
-) -> Option<u16> {
-    let m = model.trim();
-    if m.is_empty() {
-        return None;
-    }
-    let running: Vec<&crate::state::LiveServer> = servers
-        .values()
-        .filter(|ls| ls.status == crate::state::ServerStatus::Running && ls.def.task == "embed")
-        .collect();
+    let running = running_servers(servers, task);
     for ls in &running {
         if ls.def.effective_model_name().eq_ignore_ascii_case(m)
             || ls.def.model_id.eq_ignore_ascii_case(m)
@@ -109,7 +78,7 @@ pub fn find_server_port_for_embed(
 /// OpenAI-style `data` rows for `GET /v1/models`. Prefer the served model
 /// name when present (that is the name a client would pass in `"model"`).
 pub fn model_rows(servers: &BTreeMap<String, crate::state::LiveServer>) -> Vec<serde_json::Value> {
-    running_instruct_servers(servers)
+    running_servers(servers, "instruct")
         .into_iter()
         .map(|ls| {
             let id = if ls.def.served_model_name.is_some() {
@@ -135,6 +104,33 @@ pub fn model_from_body(body: &[u8]) -> Option<String> {
         .get("model")
         .and_then(|m| m.as_str())
         .map(str::to_string)
+}
+
+/// Validate the Authorization header against the global gateway API key.
+/// Returns Ok(()) if auth passes or no global key is configured.
+/// Returns Err(status, message) if auth fails.
+pub fn check_gateway_auth(
+    headers: &HashMap<String, String>,
+    global_key: Option<&str>,
+) -> Result<(), (u16, String)> {
+    let Some(expected_key) = global_key.filter(|k| !k.is_empty()) else {
+        return Ok(()); // No global key configured, allow
+    };
+    let auth_header = headers
+        .get("authorization")
+        .or_else(|| headers.get("Authorization"));
+    match auth_header {
+        Some(h) if h.starts_with("Bearer ") => {
+            let provided = &h["Bearer ".len()..];
+            if provided == expected_key {
+                Ok(())
+            } else {
+                Err((401, "Invalid API key".to_string()))
+            }
+        }
+        Some(_) => Err((401, "Authorization header must use Bearer scheme".to_string())),
+        None => Err((401, "Missing Authorization header".to_string())),
+    }
 }
 
 /// Is the chunk of bytes between the request line and the blank line a
@@ -186,9 +182,8 @@ fn running_model_names(
     servers: &BTreeMap<String, crate::state::LiveServer>,
     task: &str,
 ) -> Vec<String> {
-    servers
-        .values()
-        .filter(|ls| ls.status == crate::state::ServerStatus::Running && ls.def.task == task)
+    running_servers(servers, task)
+        .into_iter()
         .map(|ls| ls.def.effective_model_name())
         .collect()
 }
@@ -258,6 +253,25 @@ async fn route(
     if head.method.as_str() == "OPTIONS" {
         return write_response(stream, 204, "text/plain", b"").await;
     }
+
+    // Auth check for all /v1/* routes except /health
+    let is_protected = head.target.starts_with("/v1/") && head.target != "/health";
+    if is_protected {
+        let cfg = state.config();
+        let global_key = cfg.advanced_settings.api_key.as_deref();
+        if let Err((status, msg)) = check_gateway_auth(&head.headers, global_key) {
+            return write_response(
+                stream,
+                status,
+                "application/json",
+                serde_json::json!({ "error": { "message": msg, "type": "authentication_error" } })
+                    .to_string()
+                    .as_bytes(),
+            )
+            .await;
+        }
+    }
+
     match (head.method.as_str(), head.target.as_str()) {
         ("GET", "/v1/models") => {
             let text = {
@@ -275,7 +289,7 @@ async fn route(
                 .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
             let port = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for_model(&servers, &model)
+                find_server_port_for(&servers, &model, "instruct")
             };
             match port {
                 Some(port) => proxy_chat(stream, state, port, body).await,
@@ -296,7 +310,7 @@ async fn route(
                 .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
             let port = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for_model(&servers, &model)
+                find_server_port_for(&servers, &model, "instruct")
             };
             match port {
                 Some(port) => proxy_post(stream, state, port, "/v1/completions", body).await,
@@ -317,7 +331,7 @@ async fn route(
                 .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
             let port = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for_embed(&servers, &model)
+                find_server_port_for(&servers, &model, "embed")
             };
             match port {
                 Some(port) => proxy_post(stream, state, port, "/v1/embeddings", body).await,
@@ -635,19 +649,19 @@ mod tests {
     #[test]
     fn test_route_exact_served_model_name() {
         let servers = running_map();
-        assert_eq!(find_server_port_for_model(&servers, "qwen-7b"), Some(8001));
-        assert_eq!(find_server_port_for_model(&servers, "Qwen-7B"), Some(8001));
+        assert_eq!(find_server_port_for(&servers, "qwen-7b", "instruct"), Some(8001));
+        assert_eq!(find_server_port_for(&servers, "Qwen-7B", "instruct"), Some(8001));
     }
 
     #[test]
     fn test_route_exact_hf_id() {
         let servers = running_map();
         assert_eq!(
-            find_server_port_for_model(&servers, "Qwen/Qwen2.5-7B-Instruct"),
+            find_server_port_for(&servers, "Qwen/Qwen2.5-7B-Instruct", "instruct"),
             Some(8001)
         );
         assert_eq!(
-            find_server_port_for_model(&servers, "meta-llama/Llama-3.1-8B-Instruct"),
+            find_server_port_for(&servers, "meta-llama/Llama-3.1-8B-Instruct", "instruct"),
             Some(8002)
         );
     }
@@ -657,11 +671,11 @@ mod tests {
         let servers = running_map();
         // Client asks for just the tail of the HF id
         assert_eq!(
-            find_server_port_for_model(&servers, "Qwen2.5-7B-Instruct"),
+            find_server_port_for(&servers, "Qwen2.5-7B-Instruct", "instruct"),
             Some(8001)
         );
         assert_eq!(
-            find_server_port_for_model(&servers, "Llama-3.1-8B-Instruct"),
+            find_server_port_for(&servers, "Llama-3.1-8B-Instruct", "instruct"),
             Some(8002)
         );
     }
@@ -671,12 +685,12 @@ mod tests {
         let servers = running_map();
         // Embed server must not be routed for chat
         assert_eq!(
-            find_server_port_for_model(&servers, "BAAI/bge-small-en"),
+            find_server_port_for(&servers, "BAAI/bge-small-en", "instruct"),
             None
         );
         // Stopped instruct server must not be routed
         assert_eq!(
-            find_server_port_for_model(&servers, "mistralai/Mistral-7B-Instruct-v0.3"),
+            find_server_port_for(&servers, "mistralai/Mistral-7B-Instruct-v0.3", "instruct"),
             None
         );
     }
@@ -684,9 +698,9 @@ mod tests {
     #[test]
     fn test_route_unknown_or_empty_model() {
         let servers = running_map();
-        assert_eq!(find_server_port_for_model(&servers, "nope/model"), None);
-        assert_eq!(find_server_port_for_model(&servers, ""), None);
-        assert_eq!(find_server_port_for_model(&servers, "   "), None);
+        assert_eq!(find_server_port_for(&servers, "nope/model", "instruct"), None);
+        assert_eq!(find_server_port_for(&servers, "", "instruct"), None);
+        assert_eq!(find_server_port_for(&servers, "   ", "instruct"), None);
     }
 
     #[test]
@@ -694,23 +708,20 @@ mod tests {
         let servers = running_map();
         // BAAI/bge-small-en is task=embed, port 8003 in running_map()
         assert_eq!(
-            find_server_port_for_embed(&servers, "BAAI/bge-small-en"),
+            find_server_port_for(&servers, "BAAI/bge-small-en", "embed"),
             Some(8003)
         );
-        assert_eq!(
-            find_server_port_for_embed(&servers, "bge-small-en"),
-            Some(8003)
-        );
+        assert_eq!(find_server_port_for(&servers, "bge-small-en", "embed"), Some(8003));
     }
 
     #[test]
     fn test_route_embed_ignores_instruct_servers() {
         let servers = running_map();
         assert_eq!(
-            find_server_port_for_embed(&servers, "Qwen/Qwen2.5-7B-Instruct"),
+            find_server_port_for(&servers, "Qwen/Qwen2.5-7B-Instruct", "embed"),
             None
         );
-        assert_eq!(find_server_port_for_embed(&servers, ""), None);
+        assert_eq!(find_server_port_for(&servers, "", "embed"), None);
     }
 
     #[test]
@@ -793,5 +804,53 @@ mod tests {
         assert!(CORS_HEADERS.contains("GET, POST, OPTIONS"));
         assert!(CORS_HEADERS.contains("Access-Control-Allow-Headers"));
         assert!(CORS_HEADERS.contains("Authorization"));
+    }
+
+    #[test]
+    fn test_check_gateway_auth_no_key_configured() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer anything".to_string());
+        assert!(check_gateway_auth(&headers, None).is_ok());
+        assert!(check_gateway_auth(&headers, Some("")).is_ok());
+    }
+
+    #[test]
+    fn test_check_gateway_auth_valid_key() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer secret123".to_string());
+        assert!(check_gateway_auth(&headers, Some("secret123")).is_ok());
+    }
+
+    #[test]
+    fn test_check_gateway_auth_invalid_key() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer wrong".to_string());
+        let err = check_gateway_auth(&headers, Some("secret123")).unwrap_err();
+        assert_eq!(err.0, 401);
+        assert!(err.1.contains("Invalid API key"));
+    }
+
+    #[test]
+    fn test_check_gateway_auth_missing_header() {
+        let headers = HashMap::new();
+        let err = check_gateway_auth(&headers, Some("secret123")).unwrap_err();
+        assert_eq!(err.0, 401);
+        assert!(err.1.contains("Missing Authorization header"));
+    }
+
+    #[test]
+    fn test_check_gateway_auth_wrong_scheme() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Basic secret123".to_string());
+        let err = check_gateway_auth(&headers, Some("secret123")).unwrap_err();
+        assert_eq!(err.0, 401);
+        assert!(err.1.contains("Bearer scheme"));
+    }
+
+    #[test]
+    fn test_check_gateway_auth_case_insensitive_header_name() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer secret123".to_string());
+        assert!(check_gateway_auth(&headers, Some("secret123")).is_ok());
     }
 }

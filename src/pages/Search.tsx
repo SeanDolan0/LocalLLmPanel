@@ -130,6 +130,179 @@ export function ContextBadge({ fit }: { fit: FitResultBackend }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Hugging Face Link Component (shared)
+// ---------------------------------------------------------------------------
+function HfLink({
+  modelId,
+  showText = false,
+  className = "",
+}: {
+  modelId: string;
+  showText?: boolean;
+  className?: string;
+}) {
+  return (
+    <a
+      href={`https://huggingface.co/${modelId}`}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        api.openUrl(`https://huggingface.co/${modelId}`).catch((err) => {
+          console.error("Failed to open Hugging Face URL:", err);
+        });
+      }}
+      className={`inline-flex items-center gap-1 shrink-0 cursor-pointer ${className}`}
+      title={showText ? `Open ${modelId} on Hugging Face` : "Open on Hugging Face"}
+    >
+      {showText && <span className="font-sans text-[11px]">Hugging Face</span>}
+      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+      </svg>
+    </a>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pull State Button Component (shared)
+// ---------------------------------------------------------------------------
+interface PullStateButtonProps {
+  pullState: PullStatus | null | undefined;
+  targetId: string;
+  isInstalled: boolean;
+  onPull: (id: string) => void;
+  onCancelPull?: (id: string) => void;
+  showDownloadProgress?: boolean;
+  pullButtonClassName?: string;
+  cancelButtonClassName?: string;
+  retryButtonClassName?: string;
+  badgeClassName?: string;
+}
+
+function PullStateButton({
+  pullState,
+  targetId,
+  isInstalled,
+  onPull,
+  onCancelPull,
+  showDownloadProgress = false,
+  pullButtonClassName = "text-xs px-2.5 py-1",
+  cancelButtonClassName = "text-xs px-2 py-0.5",
+  retryButtonClassName = "text-xs px-2 py-0.5",
+  badgeClassName = "",
+}: PullStateButtonProps) {
+  if (pullState && pullState.state !== "complete") {
+    if (pullState.state === "downloading" && showDownloadProgress) {
+      return <DownloadProgress pullState={pullState} onCancel={onCancelPull ? () => onCancelPull(targetId) : undefined} />;
+    }
+    return (
+      <div className={`flex items-center gap-1.5 ${badgeClassName}`}>
+        <Badge
+          color={
+            pullState.state === "failed" ? "red" : "indigo"
+          }
+          title={pullState.file || undefined}
+        >
+          {pullState.state}
+        </Badge>
+        {pullState.state === "downloading" && onCancelPull && (
+          <Button
+            variant="danger"
+            className={cancelButtonClassName}
+            onClick={() => onCancelPull(targetId)}
+            title="Cancel download"
+          >
+            Cancel
+          </Button>
+        )}
+        {pullState.state === "failed" && (
+          <Button
+            variant="ghost"
+            className={retryButtonClassName}
+            onClick={() => onPull(targetId)}
+            title="Retry download"
+          >
+            Retry
+          </Button>
+        )}
+      </div>
+    );
+  }
+  if (isInstalled || pullState?.state === "complete") {
+    return (
+      <Badge color="emerald" title="Model is already downloaded in your library">
+        In Library
+      </Badge>
+    );
+  }
+  return (
+    <Button
+      variant="ghost"
+      className={pullButtonClassName}
+      onClick={() => onPull(targetId)}
+      title="Download to local cache"
+    >
+      Pull
+    </Button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Error Banner Component (shared)
+// ---------------------------------------------------------------------------
+interface ErrorBannerProps {
+  message: string;
+  color: "red" | "amber";
+  onSettingsClick?: () => void;
+}
+
+function ErrorBanner({ message, color, onSettingsClick }: ErrorBannerProps) {
+  const isRateLimit = message.includes("429") || message.toLowerCase().includes("rate limit");
+  const bgColor = color === "red" ? "bg-red-500/10" : "bg-amber-500/10";
+  const borderColor = color === "red" ? "border-red-500/40" : "border-amber-500/40";
+  const textColor = color === "red" ? "text-red-300" : "text-amber-300";
+  const btnBgColor = color === "red" ? "bg-red-500/20" : "bg-amber-500/20";
+  const btnTextColor = color === "red" ? "text-red-200" : "text-amber-200";
+  const btnHoverBgColor = color === "red" ? "bg-red-500/30" : "bg-amber-500/30";
+
+  return (
+    <div className={`flex items-center justify-between rounded-lg border ${borderColor} ${bgColor} p-3 text-sm ${textColor}`}>
+      <span>{message}</span>
+      {isRateLimit && onSettingsClick && (
+        <button
+          onClick={onSettingsClick}
+          className={`ml-3 shrink-0 rounded ${btnBgColor} px-2.5 py-1 text-xs font-medium ${btnTextColor} hover:${btnHoverBgColor}`}
+        >
+          Open Settings
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Filter helper (shared)
+// ---------------------------------------------------------------------------
+function filterModels(
+  models: ModelWithFit[] | null | undefined,
+  activeCategory: string,
+  onlyRecommended: boolean,
+  getBestVariant: (m: ModelWithFit) => QuantVariantWithFit | undefined,
+  matchesCategory: (m: ModelWithFit, cat: string) => boolean,
+): ModelWithFit[] {
+  if (!models) return [];
+  return models.filter((m) => {
+    if (!matchesCategory(m, activeCategory)) return false;
+    if (onlyRecommended) {
+      const best = getBestVariant(m);
+      if (!best || best.fit.verdict === "DoesNotFit") return false;
+    }
+    return true;
+  });
+}
+
 // Helper to get best variant safely
 function getBestVariant(m: ModelWithFit): QuantVariantWithFit | undefined {
   if (!m.variants || m.variants.length === 0) return undefined;
@@ -197,6 +370,69 @@ function matchesCategory(m: ModelWithFit, cat: string): boolean {
     );
   }
   return true;
+}
+
+// Download progress formatting (fmtTransferRate is imported from ../api)
+function fmtDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return "Calculating…";
+  }
+  const totalSec = Math.max(0, Math.round(seconds));
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
+// Download Progress Bar Component
+interface DownloadProgressProps {
+  pullState: PullStatus;
+  onCancel?: () => void;
+}
+
+export function DownloadProgress({ pullState, onCancel }: DownloadProgressProps) {
+  const percent = pullState.percent ?? 0;
+  const speed = pullState.speed_bps;
+  const eta = pullState.eta_seconds;
+
+  return (
+    <div className="flex flex-col gap-1 w-full min-w-0">
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-2 rounded-full bg-surface-3 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-indigo-500 transition-all duration-300 ease-out"
+            style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+          />
+        </div>
+        <span className="font-mono text-xs text-slate-300 w-10 text-right">{percent.toFixed(0)}%</span>
+      </div>
+      <div className="flex items-center gap-3 text-[10px] text-slate-400">
+        <span className="flex items-center gap-1">
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+          <span>{fmtTransferRate(speed)}</span>
+        </span>
+        <span className="flex items-center gap-1">
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>{fmtDuration(eta)}</span>
+        </span>
+        {onCancel && (
+          <button
+            onClick={onCancel}
+            className="ml-auto text-[10px] text-rose-400 hover:text-rose-300 underline"
+            title="Cancel download"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function Search() {
@@ -382,29 +618,16 @@ export default function Search() {
   };
 
   // Filter recommendations
-  const filteredRecommendations = useMemo(() => {
-    return recommended.filter((m) => {
-      if (!matchesCategory(m, activeCategory)) return false;
-      if (onlyRecommended) {
-        const best = getBestVariant(m);
-        if (!best || best.fit.verdict === "DoesNotFit") return false;
-      }
-      return true;
-    });
-  }, [recommended, activeCategory, onlyRecommended]);
+  const filteredRecommendations = useMemo(
+    () => filterModels(recommended, activeCategory, onlyRecommended, getBestVariant, matchesCategory),
+    [recommended, activeCategory, onlyRecommended]
+  );
 
   // Filter search results
-  const filteredResults = useMemo(() => {
-    if (!results) return null;
-    return results.filter((m) => {
-      if (!matchesCategory(m, activeCategory)) return false;
-      if (onlyRecommended) {
-        const best = getBestVariant(m);
-        if (!best || best.fit.verdict === "DoesNotFit") return false;
-      }
-      return true;
-    });
-  }, [results, activeCategory, onlyRecommended]);
+  const filteredResults = useMemo(
+    () => filterModels(results, activeCategory, onlyRecommended, getBestVariant, matchesCategory),
+    [results, activeCategory, onlyRecommended]
+  );
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
@@ -526,30 +749,18 @@ export default function Search() {
 
       {/* Error Banners */}
       {searchErr && (
-        <div className="flex items-center justify-between rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
-          <span>{searchErr}</span>
-          {(searchErr.includes("429") || searchErr.toLowerCase().includes("rate limit")) && (
-            <button
-              onClick={() => navigate("/settings")}
-              className="ml-3 shrink-0 rounded bg-red-500/20 px-2.5 py-1 text-xs font-medium text-red-200 hover:bg-red-500/30"
-            >
-              Open Settings
-            </button>
-          )}
-        </div>
+        <ErrorBanner
+          message={searchErr}
+          color="red"
+          onSettingsClick={() => navigate("/settings")}
+        />
       )}
       {recsErr && results === null && (
-        <div className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-300">
-          <span>Could not load recommendations: {recsErr}</span>
-          {(recsErr.includes("429") || recsErr.toLowerCase().includes("rate limit")) && (
-            <button
-              onClick={() => navigate("/settings")}
-              className="ml-3 shrink-0 rounded bg-amber-500/20 px-2.5 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/30"
-            >
-              Open Settings
-            </button>
-          )}
-        </div>
+        <ErrorBanner
+          message={`Could not load recommendations: ${recsErr}`}
+          color="amber"
+          onSettingsClick={() => navigate("/settings")}
+        />
       )}
 
       {/* Recommended Models Section (Visible when no active search results) */}
@@ -676,24 +887,10 @@ export default function Search() {
                             <span className="font-medium text-slate-200 truncate hover:text-indigo-300" title={m.id}>
                               {m.id}
                             </span>
-                            <a
-                              href={`https://huggingface.co/${m.id}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                api.openUrl(`https://huggingface.co/${m.id}`).catch((err) => {
-                                  console.error("Failed to open Hugging Face URL:", err);
-                                });
-                              }}
+                            <HfLink
+                              modelId={m.id}
                               className="text-slate-500 hover:text-indigo-300 p-0.5 rounded transition-colors shrink-0"
-                              title="Open on Hugging Face"
-                            >
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                              </svg>
-                            </a>
+                            />
                           </div>
                           <div className="flex items-center gap-2 text-[11px] text-slate-500">
                             {m.pipeline_tag && <span>{m.pipeline_tag}</span>}
@@ -786,61 +983,16 @@ export default function Search() {
                             >
                               Deploy
                             </Button>
-                            {(() => {
-                              const targetId = variant?.repo_id || m.id;
-                              const isInstalled = isModelInstalled(targetId) || isModelInstalled(m.id);
-                              if (pullState && pullState.state !== "complete") {
-                                return (
-                                  <div className="flex items-center gap-1.5">
-                                    <Badge
-                                      color={
-                                        pullState.state === "failed"
-                                          ? "red"
-                                          : "indigo"
-                                      }
-                                    >
-                                      {pullState.state}
-                                    </Badge>
-                                    {pullState.state === "downloading" && (
-                                      <Button
-                                        variant="danger"
-                                        className="text-xs px-2 py-0.5"
-                                        onClick={() => cancelPull(targetId)}
-                                        title="Cancel download"
-                                      >
-                                        Cancel
-                                      </Button>
-                                    )}
-                                    {pullState.state === "failed" && (
-                                      <Button
-                                        variant="ghost"
-                                        className="text-xs px-2 py-0.5"
-                                        onClick={() => pull(targetId)}
-                                        title="Retry download"
-                                      >
-                                        Retry
-                                      </Button>
-                                    )}
-                                  </div>
-                                );
-                              }
-                              if (isInstalled || pullState?.state === "complete") {
-                                return (
-                                  <Badge color="emerald" title="Model is already downloaded in your library">
-                                    In Library
-                                  </Badge>
-                                );
-                              }
-                              return (
-                                <Button
-                                  variant="ghost"
-                                  className="text-xs px-2.5 py-1"
-                                  onClick={() => pull(targetId)}
-                                >
-                                  Pull
-                                </Button>
-                              );
-                            })()}
+                            <PullStateButton
+                              pullState={pullState}
+                              targetId={variant?.repo_id || m.id}
+                              isInstalled={isModelInstalled(variant?.repo_id || m.id) || isModelInstalled(m.id)}
+                              onPull={pull}
+                              onCancelPull={cancelPull}
+                              pullButtonClassName="text-xs px-2.5 py-1"
+                              cancelButtonClassName="text-xs px-2 py-0.5"
+                              retryButtonClassName="text-xs px-2 py-0.5"
+                            />
                           </div>
                         </td>
                       </tr>
@@ -1021,24 +1173,10 @@ function ModelCard({
             >
               {modelName}
             </h3>
-            <a
-              href={`https://huggingface.co/${model.id}`}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                api.openUrl(`https://huggingface.co/${model.id}`).catch((err) => {
-                  console.error("Failed to open Hugging Face URL:", err);
-                });
-              }}
+            <HfLink
+              modelId={model.id}
               className="text-slate-500 hover:text-indigo-400 p-0.5 rounded hover:bg-surface-3 transition-colors shrink-0 mt-0.5"
-              title="Open on Hugging Face"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </a>
+            />
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
             {author && (
@@ -1219,52 +1357,17 @@ function ModelCard({
           >
             Deploy
           </Button>
-          {pullState && pullState.state !== "complete" ? (
-            <div className="flex items-center gap-1.5">
-              <Badge
-                color={
-                  pullState.state === "failed"
-                    ? "red"
-                    : "indigo"
-                }
-                title={pullState.file || undefined}
-              >
-                {pullState.state}
-              </Badge>
-              {pullState.state === "downloading" && onCancelPull && (
-                <Button
-                  variant="danger"
-                  className="text-xs px-2 py-0.5"
-                  onClick={() => onCancelPull(variant?.repo_id || model.id)}
-                  title="Cancel download"
-                >
-                  Cancel
-                </Button>
-              )}
-              {pullState.state === "failed" && (
-                <Button
-                  variant="ghost"
-                  className="text-xs px-2 py-0.5"
-                  onClick={() => onPull(variant?.repo_id || model.id)}
-                  title="Retry download"
-                >
-                  Retry
-                </Button>
-              )}
-            </div>
-          ) : isInstalled || pullState?.state === "complete" ? (
-            <Badge color="emerald" title="Model is already downloaded in your library">
-              In Library
-            </Badge>
-          ) : (
-            <Button
-              variant="ghost"
-              className="text-xs px-2.5 py-1"
-              onClick={() => onPull(variant?.repo_id || model.id)}
-            >
-              Pull
-            </Button>
-          )}
+          <PullStateButton
+            pullState={pullState}
+            targetId={variant?.repo_id || model.id}
+            isInstalled={isInstalled ?? false}
+            onPull={onPull}
+            onCancelPull={onCancelPull}
+            showDownloadProgress
+            pullButtonClassName="text-xs px-2.5 py-1"
+            cancelButtonClassName="text-xs px-2 py-0.5"
+            retryButtonClassName="text-xs px-2 py-0.5"
+          />
         </div>
       </div>
     </div>
@@ -1325,25 +1428,11 @@ function ModelDetailModal({
             </div>
             <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
               <span className="truncate">{model.id}</span>
-              <a
-                href={`https://huggingface.co/${model.id}`}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  api.openUrl(`https://huggingface.co/${model.id}`).catch((err) => {
-                    console.error("Failed to open Hugging Face URL:", err);
-                  });
-                }}
+              <HfLink
+                modelId={model.id}
+                showText
                 className="text-indigo-400 hover:text-indigo-300 hover:underline flex items-center gap-1 font-sans text-[11px] cursor-pointer"
-                title="Open on Hugging Face"
-              >
-                <span>Hugging Face</span>
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                </svg>
-              </a>
+              />
             </div>
           </div>
           <button
@@ -1531,24 +1620,10 @@ function ModelDetailModal({
 
                         <div className="font-mono text-xs text-slate-400 truncate flex items-center gap-1.5" title={variant.repo_id}>
                           <span className="truncate">{variant.repo_id}</span>
-                          <a
-                            href={`https://huggingface.co/${variant.repo_id}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              api.openUrl(`https://huggingface.co/${variant.repo_id}`).catch((err) => {
-                                console.error("Failed to open Hugging Face URL:", err);
-                              });
-                            }}
+                          <HfLink
+                            modelId={variant.repo_id}
                             className="text-indigo-400/80 hover:text-indigo-300 transition-colors p-0.5 inline-flex items-center cursor-pointer shrink-0"
-                            title={`Open ${variant.repo_id} on Hugging Face`}
-                          >
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                            </svg>
-                          </a>
+                          />
                           {variant.gguf_file && (
                             <span className="text-amber-300/90 ml-1.5 font-sans">
                               (file: {variant.gguf_file})
@@ -1621,65 +1696,17 @@ function ModelDetailModal({
                           <RunModeBadge mode={fit.run_mode} />
                         </div>
 
-                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                          {(() => {
-                            const isInstalled = isModelInstalled
-                              ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id)
-                              : false;
-                            if (pullState && pullState.state !== "complete") {
-                              return (
-                                <div className="flex items-center gap-1.5">
-                                  <Badge
-                                    color={
-                                      pullState.state === "failed"
-                                        ? "red"
-                                        : "indigo"
-                                    }
-                                    title={pullState.file || undefined}
-                                  >
-                                    {pullState.state}
-                                  </Badge>
-                                  {pullState.state === "downloading" && onCancelPull && (
-                                    <Button
-                                      variant="danger"
-                                      className="text-xs px-2.5 py-1"
-                                      onClick={() => onCancelPull(variant.repo_id)}
-                                      title="Cancel download"
-                                    >
-                                      Cancel
-                                    </Button>
-                                  )}
-                                  {pullState.state === "failed" && (
-                                    <Button
-                                      variant="ghost"
-                                      className="text-xs px-2.5 py-1"
-                                      onClick={() => onPull(variant.repo_id)}
-                                      title="Retry download"
-                                    >
-                                      Retry
-                                    </Button>
-                                  )}
-                                </div>
-                              );
-                            }
-                            if (isInstalled || pullState?.state === "complete") {
-                              return (
-                                <Badge color="emerald" title="Model is already downloaded in your library">
-                                  In Library
-                                </Badge>
-                              );
-                            }
-                            return (
-                              <Button
-                                variant="ghost"
-                                className="text-xs px-2.5 py-1"
-                                onClick={() => onPull(variant.repo_id)}
-                                title="Download to local cache"
-                              >
-                                Pull
-                              </Button>
-                            );
-                          })()}
+<div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <PullStateButton
+            pullState={pullState}
+            targetId={variant.repo_id}
+            isInstalled={isModelInstalled ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id) : false}
+            onPull={onPull}
+            onCancelPull={onCancelPull}
+            pullButtonClassName="text-xs px-2.5 py-1"
+            cancelButtonClassName="text-xs px-2.5 py-1"
+            retryButtonClassName="text-xs px-2.5 py-1"
+          />
                           <Button
                             variant="primary"
                             className="text-xs px-3 py-1"

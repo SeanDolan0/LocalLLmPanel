@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum, fmtTransferRate } from "../api";
+import { DownloadProgress } from "./Search";
 import { Badge, Button, Card, CardTitle, Spinner, inputCls } from "../ui";
 import type { LibraryEntry, PullStatus } from "../types";
 
@@ -183,12 +184,7 @@ export default function Library() {
                   </div>
                   <span className="shrink-0 text-slate-300">{fmtTransferRate(p.speed_bps)}</span>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
-                  <div
-                    className={`h-full rounded-full bg-indigo-400 transition-all ${p.percent == null ? "w-1/3 animate-pulse" : ""}`}
-                    style={p.percent == null ? undefined : { width: `${Math.max(0, Math.min(100, p.percent))}%` }}
-                  />
-                </div>
+                <DownloadProgress pullState={p} onCancel={() => handleCancelPull(m)} />
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] text-slate-500">
                     {p.percent == null ? "Downloading…" : `${p.percent.toFixed(1)}%`}

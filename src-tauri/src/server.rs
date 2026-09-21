@@ -314,21 +314,6 @@ fn launch_script(
     parts.join(" && ")
 }
 
-pub fn build_start_command(def: &ServerDef, hf_token: &str) -> String {
-    let adv = crate::state::AdvancedSettings::default();
-    let global_default_env = BTreeMap::new();
-    launch_script("~/llm-lp/.venv", def, hf_token, &adv, &global_default_env)
-}
-
-pub fn build_start_command_with_advanced(
-    def: &ServerDef,
-    hf_token: &str,
-    adv: &crate::state::AdvancedSettings,
-) -> String {
-    let global_default_env = BTreeMap::new();
-    launch_script("~/llm-lp/.venv", def, hf_token, adv, &global_default_env)
-}
-
 /// Resolve a user-supplied model identifier or path to an existing GGUF file.
 /// Checks:
 /// 1. Direct file path on disk
@@ -454,14 +439,6 @@ pub fn resolve_gguf_model_path(
     }
 
     None
-}
-
-/// Build native llama-server arguments without shell quoting.
-///
-/// Capability filtering is applied by the installer/runtime layer; this
-/// function intentionally maps the persisted configuration deterministically.
-pub fn build_llamacpp_args(def: &ServerDef) -> Vec<String> {
-    build_llamacpp_args_with_help(def, "")
 }
 
 /// Build native llama-server arguments, enabling automatic fitting only when
@@ -2121,7 +2098,7 @@ mod tests {
         d.batch_size = Some(512);
         d.ubatch_size = Some(128);
         d.extra_args = vec!["--no-mmap".into(), "--verbose".into()];
-        let args = build_llamacpp_args(&d);
+        let args = build_llamacpp_args_with_help(&d, "");
         assert!(args
             .windows(2)
             .any(|w| w[0] == "-m" && w[1] == "C:\\models\\model.gguf"));
@@ -2145,7 +2122,7 @@ mod tests {
         d.parallel = 0;
         d.cache_type_k.clear();
         d.cache_type_v.clear();
-        let args = build_llamacpp_args(&d);
+        let args = build_llamacpp_args_with_help(&d, "");
         assert!(!args.contains(&"-fa".into()));
         assert!(!args.contains(&"--jinja".into()));
         assert!(!args.contains(&"--metrics".into()));
@@ -2158,7 +2135,7 @@ mod tests {
         d.backend = "llamacpp".into();
         d.n_cpu_moe = Some(24);
         let args = filter_llamacpp_args(
-            build_llamacpp_args(&d),
+            build_llamacpp_args_with_help(&d, ""),
             "  -m FNAME  --host HOST  --port PORT  -ngl N  -c N\n  -fa on\n  --metrics\n  --jinja\n",
         );
         assert!(!args.contains(&"--n-cpu-moe".into()));
@@ -2343,27 +2320,6 @@ llama_requests_processing 1
     }
 
     #[test]
-    fn test_build_start_command_swap_and_cpu_offload() {
-        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8010, "fp16", None);
-        d.swap_space_gb = Some(8);
-        d.cpu_offload_gb = Some(4);
-        let cmd = build_start_command(&d, "");
-        assert!(
-            cmd.contains("--kv-offloading-size 8"),
-            "command must include --kv-offloading-size 8: {cmd}"
-        );
-        assert!(
-            cmd.contains("--cpu-offload-gb 4"),
-            "command must include --cpu-offload-gb 4: {cmd}"
-        );
-        assert!(
-            cmd.contains("export VLLM_WSL2_ENABLE_PIN_MEMORY='1'"),
-            "command must include export VLLM_WSL2_ENABLE_PIN_MEMORY='1': {cmd}"
-        );
-        assert!(cmd.contains("export VLLM_WORKER_MULTIPROC_METHOD='spawn'"));
-    }
-
-    #[test]
     fn test_launch_script_prequantized_awq_omits_quantization_flag() {
         let script = launch_script(
             "~/llm-lp/.venv",
@@ -2397,46 +2353,6 @@ llama_requests_processing 1
             &BTreeMap::new(),
         );
         assert!(!script.contains("--quantization"));
-    }
-
-    #[test]
-    fn test_build_start_command_swap_and_cpu_offload_omitted_when_zero_or_none() {
-        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8010, "fp16", None);
-        d.swap_space_gb = Some(0);
-        d.cpu_offload_gb = Some(0);
-        let cmd_zero = build_start_command(&d, "");
-        assert!(
-            !cmd_zero.contains("--kv-offloading-size") && !cmd_zero.contains("--swap-space"),
-            "command must not include swap flags: {cmd_zero}"
-        );
-        assert!(
-            !cmd_zero.contains("--cpu-offload-gb"),
-            "command must not include --cpu-offload-gb: {cmd_zero}"
-        );
-
-        d.swap_space_gb = None;
-        d.cpu_offload_gb = None;
-        let cmd_none = build_start_command(&d, "");
-        assert!(
-            !cmd_none.contains("--kv-offloading-size") && !cmd_none.contains("--swap-space"),
-            "command must not include swap flags: {cmd_none}"
-        );
-        assert!(
-            !cmd_none.contains("--cpu-offload-gb"),
-            "command must not include --cpu-offload-gb: {cmd_none}"
-        );
-    }
-
-    #[test]
-    fn test_build_start_command_max_model_len_zero_falls_back_to_4096() {
-        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8010, "fp16", None);
-        d.max_model_len = Some(0);
-        let cmd = build_start_command(&d, "");
-        assert!(
-            cmd.contains("--max-model-len 4096"),
-            "max-model-len 0 must fall back to 4096: {cmd}"
-        );
-        assert!(!cmd.contains("--max-model-len 0"));
     }
 
     #[test]

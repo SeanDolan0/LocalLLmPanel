@@ -112,19 +112,6 @@ pub fn tokens_per_sec(bandwidth_gbs: f64, params_b: f64, quant: &str) -> f64 {
     bandwidth_gbs * 1e9 * 0.5 / bytes_per_token
 }
 
-/// Rough decode estimate for GGUF MoE expert offload. Expert traffic is
-/// constrained by host memory bandwidth rather than GPU bandwidth.
-pub fn llamacpp_moe_tokens_per_sec(
-    ram_bandwidth_gbs: f64,
-    active_params_b: f64,
-    total_file_gb: f64,
-) -> f64 {
-    if ram_bandwidth_gbs <= 0.0 || active_params_b <= 0.0 || total_file_gb <= 0.0 {
-        return 0.0;
-    }
-    ram_bandwidth_gbs * 1e9 * 0.35 / (active_params_b * 1e9).max(total_file_gb * 1e9 * 0.05)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TieredContextFit {
     pub vram_context: usize,
@@ -388,7 +375,7 @@ pub fn parse_context(config: &serde_json::Value) -> (usize, ContextSource) {
     ];
     for key in keys {
         if let Some(v) = config.get(key) {
-            if let Some(n) = as_usize(v) {
+            if let Some(n) = usize_of(v) {
                 // Apply RoPE scaling if present
                 let scaled = apply_rope_scaling(config, n);
                 return (scaled, ContextSource::Config);
@@ -430,7 +417,8 @@ fn apply_rope_scaling(config: &serde_json::Value, base_ctx: usize) -> usize {
     base_ctx
 }
 
-fn as_usize(v: &serde_json::Value) -> Option<usize> {
+/// Parse a JSON value as usize, accepting u64 or i64.
+pub fn usize_of(v: &serde_json::Value) -> Option<usize> {
     v.as_u64()
         .map(|n| n as usize)
         .or_else(|| v.as_i64().and_then(|n| usize::try_from(n).ok()))
@@ -481,7 +469,7 @@ pub const DEFAULT_CONTEXT: usize = 4096;
 /// `head_dim` explicitly, e.g. Qwen3, Llama 3.x).
 pub fn head_dim_from_config(cfg: &serde_json::Value) -> Option<usize> {
     // Direct check
-    if let Some(hd) = cfg.get("head_dim").and_then(as_usize) {
+    if let Some(hd) = cfg.get("head_dim").and_then(usize_of) {
         return Some(hd);
     }
     if let Some(hd) = derive_head_dim(cfg) {
@@ -490,7 +478,7 @@ pub fn head_dim_from_config(cfg: &serde_json::Value) -> Option<usize> {
     // Nested fallback
     for sub_key in ["text_config", "config", "model_config"] {
         if let Some(sub) = cfg.get(sub_key) {
-            if let Some(hd) = sub.get("head_dim").and_then(as_usize) {
+            if let Some(hd) = sub.get("head_dim").and_then(usize_of) {
                 return Some(hd);
             }
             if let Some(hd) = derive_head_dim(sub) {
@@ -502,8 +490,8 @@ pub fn head_dim_from_config(cfg: &serde_json::Value) -> Option<usize> {
 }
 
 fn derive_head_dim(cfg: &serde_json::Value) -> Option<usize> {
-    let hidden = cfg.get("hidden_size").and_then(as_usize)?;
-    let heads = cfg.get("num_attention_heads").and_then(as_usize)?;
+    let hidden = cfg.get("hidden_size").and_then(usize_of)?;
+    let heads = cfg.get("num_attention_heads").and_then(usize_of)?;
     if heads > 0 {
         Some(hidden / heads)
     } else {
@@ -522,7 +510,7 @@ pub fn estimate_params_from_config(cfg: &serde_json::Value) -> Option<f64> {
     let resolve = |key: &str| {
         sub.and_then(|s| s.get(key))
             .or_else(|| cfg.get(key))
-            .and_then(as_usize)
+            .and_then(usize_of)
     };
     let layers = resolve("num_hidden_layers")?;
     let hidden = resolve("hidden_size")?;
@@ -581,12 +569,6 @@ pub fn parse_params_from_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn moe_cpu_offload_estimate_is_ram_bandwidth_bound() {
-        assert!(llamacpp_moe_tokens_per_sec(117.0, 3.0, 21.0) > 0.0);
-        assert_eq!(llamacpp_moe_tokens_per_sec(0.0, 3.0, 21.0), 0.0);
-    }
     use serde_json::json;
 
     #[test]

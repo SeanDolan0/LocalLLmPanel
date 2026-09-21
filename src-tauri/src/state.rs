@@ -6,35 +6,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// Validate environment variable name: must match ^[A-Za-z_][A-Za-z0-9_]*$
-pub fn validate_env_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Environment variable name cannot be empty".into());
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return Err("Environment variable name must start with a letter or underscore".into());
-    }
-    for c in chars {
-        if !c.is_ascii_alphanumeric() && c != '_' {
-            return Err("Environment variable name can only contain letters, numbers, and underscores".into());
-        }
-    }
-    Ok(())
-}
-
-/// Safely single-quote escape a value for use in bash export statements.
-/// Handles embedded single quotes by ending the quote, adding escaped quote, and restarting.
-pub fn shell_escape_single_quoted(value: &str) -> String {
-    // '...' -> '\'' (end quote, escaped quote, start quote)
-    let mut result = String::with_capacity(value.len() + 2);
-    result.push('\'');
-    result.push_str(&value.replace('\'', "'\\''"));
-    result.push('\'');
-    result
-}
-
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
@@ -914,13 +885,6 @@ impl AppState {
                 .filter(|s| !s.is_empty())
         }
     }
-
-    pub fn save_config(&self) {
-        let cfg = self.config();
-        if let Err(e) = cfg.save() {
-            eprintln!("[state] failed to save config: {e}");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1412,41 +1376,6 @@ mod tests {
         assert_eq!(loaded.hf_token, "hf_super_secret_test_token_9988");
         let _ = std::fs::remove_file(&tmp_file);
         let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
-
-    #[test]
-    fn test_validate_env_name() {
-        use super::validate_env_name;
-        assert!(validate_env_name("FOO").is_ok());
-        assert!(validate_env_name("FOO_BAR").is_ok());
-        assert!(validate_env_name("_FOO").is_ok());
-        assert!(validate_env_name("FOO123").is_ok());
-        assert!(validate_env_name("VLLM_USE_FLASHINFER_SAMPLER").is_ok());
-        assert!(validate_env_name("").is_err());
-        assert!(validate_env_name("123FOO").is_err());
-        assert!(validate_env_name("FOO-BAR").is_err());
-        assert!(validate_env_name("FOO BAR").is_err());
-        assert!(validate_env_name("FOO.BAR").is_err());
-    }
-
-    #[test]
-    fn test_shell_escape_single_quoted() {
-        use super::shell_escape_single_quoted;
-        assert_eq!(shell_escape_single_quoted("simple"), "'simple'");
-        assert_eq!(shell_escape_single_quoted("hello world"), "'hello world'");
-        assert_eq!(shell_escape_single_quoted("don't"), "'don'\\''t'");
-        // Single quote character
-        assert_eq!(shell_escape_single_quoted("'"), "''\\'''");
-        assert_eq!(shell_escape_single_quoted("a'b'c"), "'a'\\''b'\\''c'");
-        // Hostile value gets properly escaped
-        assert_eq!(shell_escape_single_quoted("'; rm -rf ~ #'"), "''\\''; rm -rf ~ #'\\'''");
-        // Hostile value: should not inject shell commands
-        let hostile = "'; rm -rf ~ #";
-        let escaped = shell_escape_single_quoted(hostile);
-        assert!(escaped.starts_with("'") && escaped.ends_with("'"));
-        // The escaped value should contain the escape sequence for single quotes
-        assert!(escaped.contains("'\\''"));
-        // Verify the value can be recovered by shell (tested via integration test)
     }
 
     #[test]

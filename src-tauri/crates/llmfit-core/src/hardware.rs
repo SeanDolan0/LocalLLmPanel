@@ -2373,7 +2373,7 @@ impl SystemSpecs {
         self
     }
 
-    /// Apply a hardware profile's memory capacity (see [`crate::hwprofile`]).
+    /// Apply a hardware profile's memory capacity.
     ///
     /// `unified_memory` is set before the RAM override so that a unified
     /// profile makes VRAM track `total_ram_gb` — the two describe one pool, and
