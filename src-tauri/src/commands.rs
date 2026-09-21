@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -1159,6 +1160,7 @@ pub async fn servers_create(
         no_kv_offload: input.no_kv_offload.unwrap_or(false),
         metrics: input.metrics.unwrap_or(true),
         extra_args: input.extra_args.unwrap_or_default(),
+        env: BTreeMap::new(),
     };
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.push(def.clone());
@@ -1209,6 +1211,137 @@ pub fn servers_restart(
 ) -> Result<(), String> {
     let st = (*state).clone();
     server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateServerEnvInput {
+    pub id: String,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub restart: Option<bool>,
+}
+
+#[tauri::command]
+pub fn servers_update_env(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    input: UpdateServerEnvInput,
+) -> Result<(), String> {
+    let st = (*state).clone();
+    let mut cfg = st.config.lock().unwrap();
+    if let Some(server) = cfg.servers.iter_mut().find(|s| s.id == input.id) {
+        server.env = input.env;
+        cfg.save().map_err(|e| e.to_string())?;
+    } else {
+        return Err("Server not found".into());
+    }
+    if input.restart.unwrap_or(false) {
+        drop(cfg);
+        server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateServerInput {
+    pub id: String,
+    pub name: Option<String>,
+    pub model_id: Option<String>,
+    pub task: Option<String>,
+    pub port: Option<u16>,
+    pub gpu_mem_util: Option<f64>,
+    pub max_model_len: Option<usize>,
+    pub quant: Option<String>,
+    pub served_model_name: Option<String>,
+    pub enforce_eager: Option<bool>,
+    pub swap_space_gb: Option<usize>,
+    pub cpu_offload_gb: Option<usize>,
+    pub model_path: Option<String>,
+    pub mmproj_path: Option<String>,
+    pub ctx_size: Option<usize>,
+    pub n_gpu_layers: Option<usize>,
+    pub n_cpu_moe: Option<usize>,
+    pub fit: Option<bool>,
+    pub fit_target: Option<usize>,
+    pub device: Option<String>,
+    pub api_key: Option<String>,
+    pub log_verbosity: Option<u8>,
+    pub flash_attn: Option<bool>,
+    pub cache_type_k: Option<String>,
+    pub cache_type_v: Option<String>,
+    pub threads: Option<usize>,
+    pub batch_size: Option<usize>,
+    pub ubatch_size: Option<usize>,
+    pub parallel: Option<usize>,
+    pub jinja: Option<bool>,
+    pub no_kv_offload: Option<bool>,
+    pub metrics: Option<bool>,
+    pub extra_args: Option<Vec<String>>,
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    pub restart: Option<bool>,
+}
+
+#[tauri::command]
+pub fn servers_update(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    input: UpdateServerInput,
+) -> Result<ServerDef, String> {
+    let st = (*state).clone();
+    let mut cfg = st.config.lock().unwrap();
+    let idx = cfg.servers.iter().position(|s| s.id == input.id).ok_or("Server not found")?;
+    // Collect existing ports before mutating the server
+    let existing_ports: Vec<u16> = cfg.servers.iter().filter(|s| s.id != input.id).map(|s| s.port).collect();
+    let server = &mut cfg.servers[idx];
+
+    if let Some(v) = input.name { server.name = v; }
+    if let Some(v) = input.model_id { server.model_id = v; }
+    if let Some(v) = input.task { server.task = v; }
+    if let Some(v) = input.port {
+        // verify port is free and not used by other servers
+        if existing_ports.contains(&v) { return Err(format!("port {v} already used by another server")); }
+        if std::net::TcpListener::bind(("127.0.0.1", v)).is_err() { return Err(format!("port {v} is in use")); }
+        server.port = v;
+    }
+    if let Some(v) = input.gpu_mem_util { server.gpu_mem_util = v; }
+    if let Some(v) = input.max_model_len { server.max_model_len = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.quant { server.quant = v; }
+    if let Some(v) = input.served_model_name { server.served_model_name = if v.trim().is_empty() { None } else { Some(v) }; }
+    if let Some(v) = input.enforce_eager { server.enforce_eager = v; }
+    if let Some(v) = input.swap_space_gb { server.swap_space_gb = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.cpu_offload_gb { server.cpu_offload_gb = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.model_path { server.model_path = if v.trim().is_empty() { None } else { Some(v) }; }
+    if let Some(v) = input.mmproj_path { server.mmproj_path = if v.trim().is_empty() { None } else { Some(v) }; }
+    if let Some(v) = input.ctx_size { server.ctx_size = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.n_gpu_layers { server.n_gpu_layers = Some(v); }
+    if let Some(v) = input.n_cpu_moe { server.n_cpu_moe = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.fit { server.fit = v; }
+    if let Some(v) = input.fit_target { server.fit_target = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.device { server.device = if v.trim().is_empty() { None } else { Some(v) }; }
+    if let Some(v) = input.api_key { server.api_key = if v.trim().is_empty() { None } else { Some(v) }; }
+    if let Some(v) = input.log_verbosity { server.log_verbosity = Some(v); }
+    if let Some(v) = input.flash_attn { server.flash_attn = v; }
+    if let Some(v) = input.cache_type_k { server.cache_type_k = v; }
+    if let Some(v) = input.cache_type_v { server.cache_type_v = v; }
+    if let Some(v) = input.threads { server.threads = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.batch_size { server.batch_size = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.ubatch_size { server.ubatch_size = if v > 0 { Some(v) } else { None }; }
+    if let Some(v) = input.parallel { server.parallel = v; }
+    if let Some(v) = input.jinja { server.jinja = v; }
+    if let Some(v) = input.no_kv_offload { server.no_kv_offload = v; }
+    if let Some(v) = input.metrics { server.metrics = v; }
+    if let Some(v) = input.extra_args { server.extra_args = v; }
+    if let Some(v) = input.env { server.env = v; }
+
+    let updated = server.clone();
+    // Drop the mutable reference to server before saving
+    let _ = server;
+    cfg.save().map_err(|e| e.to_string())?;
+    drop(cfg);
+
+    if input.restart.unwrap_or(false) {
+        server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())?;
+    }
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -3013,8 +3146,41 @@ mod tests {
         assert_eq!(recipe.swap_space_gb, Some(2));
 
         let invalid_json = r#"{ "not": "a recipe" }"#;
-        let err = server_recipe_parse(invalid_json.to_string());
+let err = server_recipe_parse(invalid_json.to_string());
         assert!(err.is_err());
+    }
+
+    /// Optional phase: Install CUDA build tools for FlashInfer JIT compilation
+    #[tauri::command]
+    pub async fn install_cuda_build_tools(
+        app: AppHandle,
+        state: State<'_, Arc<AppState>>,
+    ) -> Result<ProvisionReport, String> {
+        let st = (*state).clone();
+        let app = app.clone();
+        let distro = st.resolve_distro();
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut on_log = |phase: &str, line: &str| {
+                let _ = app.emit(
+                    "wsl-log",
+                    serde_json::json!({ "phase": phase, "line": line }),
+                );
+            };
+            provision::phase_cuda_build_tools(&distro, &mut on_log)
+                .map(|_| ProvisionReport {
+                    phases_completed: vec!["cuda-tools".into()],
+                    distro: distro.clone(),
+                    vllm_version: None,
+                    torch_version: None,
+                    cuda_available: false,
+                    gpu_name: None,
+                    vram_mb: None,
+                    bf16_supported: false,
+                })
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("CUDA build tools task error: {e}"))?
     }
 
     #[test]

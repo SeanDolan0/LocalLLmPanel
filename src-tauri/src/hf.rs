@@ -88,10 +88,7 @@ pub fn group_gguf_files(files: &[GgufFile]) -> Vec<GgufShardGroup> {
         .map(|mut files| {
             files.sort_by(|a, b| a.path.cmp(&b.path));
             GgufShardGroup {
-                first_shard: files
-                    .first()
-                    .map(|f| f.path.clone())
-                    .unwrap_or_default(),
+                first_shard: files.first().map(|f| f.path.clone()).unwrap_or_default(),
                 size_bytes: files.iter().map(|f| f.size_bytes).sum(),
                 files,
             }
@@ -107,7 +104,8 @@ pub fn gguf_fit_indicator(
 ) -> &'static str {
     let headroom_mb = if wsl_running { 4096 } else { 2048 };
     let vram_budget = vram_total_mb.saturating_sub(headroom_mb) * 1024 * 1024;
-    let ram_budget = ram_total_mb.saturating_sub(if wsl_running { 8192 } else { 4096 }) * 1024 * 1024;
+    let ram_budget =
+        ram_total_mb.saturating_sub(if wsl_running { 8192 } else { 4096 }) * 1024 * 1024;
     if file_size_bytes <= vram_budget {
         "fits fully in VRAM"
     } else if file_size_bytes <= vram_budget.saturating_add(ram_budget) {
@@ -1040,10 +1038,26 @@ mod tests {
     #[test]
     fn groups_split_gguf_shards_and_ignores_mmproj() {
         let files = vec![
-            GgufFile { path: "model-Q4_K_M-00002-of-00003.gguf".into(), size_bytes: 20, is_mmproj: false },
-            GgufFile { path: "model-Q4_K_M-00001-of-00003.gguf".into(), size_bytes: 10, is_mmproj: false },
-            GgufFile { path: "model-Q4_K_M-00003-of-00003.gguf".into(), size_bytes: 30, is_mmproj: false },
-            GgufFile { path: "mmproj-model-f16.gguf".into(), size_bytes: 5, is_mmproj: true },
+            GgufFile {
+                path: "model-Q4_K_M-00002-of-00003.gguf".into(),
+                size_bytes: 20,
+                is_mmproj: false,
+            },
+            GgufFile {
+                path: "model-Q4_K_M-00001-of-00003.gguf".into(),
+                size_bytes: 10,
+                is_mmproj: false,
+            },
+            GgufFile {
+                path: "model-Q4_K_M-00003-of-00003.gguf".into(),
+                size_bytes: 30,
+                is_mmproj: false,
+            },
+            GgufFile {
+                path: "mmproj-model-f16.gguf".into(),
+                size_bytes: 5,
+                is_mmproj: true,
+            },
         ];
         let groups = group_gguf_files(&files);
         assert_eq!(groups.len(), 1);
@@ -1054,9 +1068,18 @@ mod tests {
 
     #[test]
     fn gguf_fit_indicator_accounts_for_headroom() {
-        assert_eq!(gguf_fit_indicator(8 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, false), "fits fully in VRAM");
-        assert_eq!(gguf_fit_indicator(20 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, true), "needs MoE/CPU offload (fits VRAM+RAM)");
-        assert_eq!(gguf_fit_indicator(100 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, true), "does not fit");
+        assert_eq!(
+            gguf_fit_indicator(8 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, false),
+            "fits fully in VRAM"
+        );
+        assert_eq!(
+            gguf_fit_indicator(20 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, true),
+            "needs MoE/CPU offload (fits VRAM+RAM)"
+        );
+        assert_eq!(
+            gguf_fit_indicator(100 * 1024 * 1024 * 1024, 12 * 1024, 32 * 1024, true),
+            "does not fit"
+        );
     }
 
     #[tokio::test]

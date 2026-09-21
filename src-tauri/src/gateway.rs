@@ -188,9 +188,7 @@ fn running_model_names(
 ) -> Vec<String> {
     servers
         .values()
-        .filter(|ls| {
-            ls.status == crate::state::ServerStatus::Running && ls.def.task == task
-        })
+        .filter(|ls| ls.status == crate::state::ServerStatus::Running && ls.def.task == task)
         .map(|ls| ls.def.effective_model_name())
         .collect()
 }
@@ -282,14 +280,12 @@ async fn route(
             match port {
                 Some(port) => proxy_chat(stream, state, port, body).await,
                 None => {
-                    let running =
-                        running_model_names(&state.servers.lock().unwrap(), "instruct");
+                    let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
                     write_response(
                         stream,
                         404,
                         "application/json",
-                        not_found_payload_with_hint(&model, "instruction", &running)
-                            .as_bytes(),
+                        not_found_payload_with_hint(&model, "instruction", &running).as_bytes(),
                     )
                     .await
                 }
@@ -305,14 +301,12 @@ async fn route(
             match port {
                 Some(port) => proxy_post(stream, state, port, "/v1/completions", body).await,
                 None => {
-                    let running =
-                        running_model_names(&state.servers.lock().unwrap(), "instruct");
+                    let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
                     write_response(
                         stream,
                         404,
                         "application/json",
-                        not_found_payload_with_hint(&model, "instruction", &running)
-                            .as_bytes(),
+                        not_found_payload_with_hint(&model, "instruction", &running).as_bytes(),
                     )
                     .await
                 }
@@ -328,14 +322,12 @@ async fn route(
             match port {
                 Some(port) => proxy_post(stream, state, port, "/v1/embeddings", body).await,
                 None => {
-                    let running =
-                        running_model_names(&state.servers.lock().unwrap(), "embed");
+                    let running = running_model_names(&state.servers.lock().unwrap(), "embed");
                     write_response(
                         stream,
                         404,
                         "application/json",
-                        not_found_payload_with_hint(&model, "embedding", &running)
-                            .as_bytes(),
+                        not_found_payload_with_hint(&model, "embedding", &running).as_bytes(),
                     )
                     .await
                 }
@@ -577,6 +569,7 @@ mod tests {
                 no_kv_offload: false,
                 metrics: true,
                 extra_args: Vec::new(),
+                env: BTreeMap::new(),
             },
             status,
             error: None,
@@ -729,7 +722,10 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["error"]["type"], "invalid_request_error");
-        assert!(v["error"]["message"].as_str().unwrap().contains("nope/model"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nope/model"));
         assert_eq!(v["running"][0], "qwen-7b");
     }
 

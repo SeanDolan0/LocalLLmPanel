@@ -221,7 +221,9 @@ pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
     if distro.trim().is_empty() {
         cmd.args(["--user", "root", "--exec", "bash", "-lc", script]);
     } else {
-        cmd.args(["-d", distro, "--user", "root", "--exec", "bash", "-lc", script]);
+        cmd.args([
+            "-d", distro, "--user", "root", "--exec", "bash", "-lc", script,
+        ]);
     }
     match cmd.output() {
         Ok(o) => RunOutput {
@@ -248,11 +250,7 @@ pub fn run_script_stream(distro: &str, script: &str, mut on_line: impl FnMut(&st
     } else {
         cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
     }
-    let mut child = match cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             return RunOutput {

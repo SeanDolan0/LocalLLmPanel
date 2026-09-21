@@ -37,6 +37,8 @@ export default function Servers() {
 
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
+  const [globalDefaults] = useState<Record<string, string>>({});
+  
   // log buffers per server (event-driven + hydrated)
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -301,6 +303,8 @@ export default function Servers() {
           initialGpuUtil={prefillGpuUtil}
           initialServed={prefillServed}
           initialTask={prefillTask}
+          initialGlobalDefaults={globalDefaults}
+          initialEnv={{}}
           onDone={(s) => {
             setShowNew(false);
             clearPrefills();
@@ -605,6 +609,8 @@ function NewServerForm({
   initialGpuUtil,
   initialServed,
   initialTask,
+  initialGlobalDefaults,
+  initialEnv,
   onDone,
   onCancel,
   onErr,
@@ -622,6 +628,8 @@ function NewServerForm({
   initialGpuUtil?: number;
   initialServed?: string;
   initialTask?: "instruct" | "embed";
+  initialGlobalDefaults?: Record<string, string>;
+  initialEnv?: Record<string, string>;
   onDone: (s: { id: string }) => void;
   onCancel: () => void;
   onErr: (e: string) => void;
@@ -667,6 +675,19 @@ function NewServerForm({
   const [flashAttn, setFlashAttn] = useState(true);
   const [jinja, setJinja] = useState(true);
   const [moePresetApplied, setMoePresetApplied] = useState(false);
+  const [env, setEnv] = useState<Record<string, string>>({});
+  const [flashInferDisabled, setFlashInferDisabled] = useState<boolean>(() => {
+    const defaults = initialGlobalDefaults ?? {};
+    return defaults["VLLM_USE_FLASHINFER_SAMPLER"] === "0" || true;
+  });
+
+  // Sync flashInferDisabled checkbox with env
+  useEffect(() => {
+    setEnv((prev) => ({
+      ...prev,
+      VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1",
+    }));
+  }, [flashInferDisabled]);
 
   useEffect(() => {
     if (initialModelId) {
@@ -758,6 +779,7 @@ function NewServerForm({
         log_verbosity: backend === "llamacpp" && logVerbosity.trim() ? parseInt(logVerbosity, 10) : undefined,
         flash_attn: backend === "llamacpp" ? flashAttn : undefined,
         jinja: backend === "llamacpp" ? jinja : undefined,
+        env: backend === "vllm" && Object.keys(env).length > 0 ? env : undefined,
       });
       onDone(s);
     } catch (e) {
@@ -999,6 +1021,13 @@ function NewServerForm({
             <Field label="Served model name (optional)">
               <input className={inputCls} placeholder="blank = model id" value={served} onChange={(e) => setServed(e.target.value)} />
             </Field>
+            <EnvironmentVarsEditor
+              initialEnv={initialEnv}
+              globalDefaults={initialGlobalDefaults ?? {}}
+              onChange={setEnv}
+              onFlashInferToggle={(disabled) => setFlashInferDisabled(disabled)}
+              flashInferDisabled={flashInferDisabled}
+            />
           </>
         )}
       </div>
@@ -1012,6 +1041,163 @@ function NewServerForm({
   );
 }
 
+
+// Environment Variables Editor for vLLM servers
+interface EnvironmentVarsEditorProps {
+  initialEnv?: Record<string, string>;
+  globalDefaults: Record<string, string>;
+  onChange: (env: Record<string, string>) => void;
+  onFlashInferToggle: (disabled: boolean) => void;
+  flashInferDisabled: boolean;
+}
+
+function EnvironmentVarsEditor({
+  globalDefaults,
+  initialEnv,
+  onChange,
+  onFlashInferToggle,
+  flashInferDisabled,
+}: EnvironmentVarsEditorProps) {
+  const [localEnv, setLocalEnv] = useState<Record<string, string>>({});
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+
+  // Initialize localEnv from globalDefaults and initialEnv (but don't include VLLM_USE_FLASHINFER_SAMPLER since it's handled by checkbox)
+  useEffect(() => {
+    const filtered: Record<string, string> = {};
+    for (const [k, v] of Object.entries(globalDefaults)) {
+      if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
+        filtered[k] = v;
+      }
+    }
+    // Merge initialEnv (per-server overrides) on top of global defaults
+    for (const [k, v] of Object.entries(initialEnv ?? {})) {
+      if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
+        filtered[k] = v;
+      }
+    }
+    setLocalEnv(filtered);
+    onChange({ ...filtered, VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1" });
+  }, [globalDefaults, initialEnv, flashInferDisabled, onChange]);
+
+  const handleAdd = () => {
+    const key = newKey.trim();
+    const value = newValue;
+    if (!key) return;
+    // Validate env name: ^[A-Za-z_][A-Za-z0-9_]*$
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      alert("Invalid environment variable name. Use only letters, numbers, and underscores, starting with a letter or underscore.");
+      return;
+    }
+    setLocalEnv((prev) => ({ ...prev, [key]: value }));
+    setNewKey("");
+    setNewValue("");
+  };
+
+  const handleRemove = (key: string) => {
+    setLocalEnv((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const handleChange = (key: string, value: string) => {
+    setLocalEnv((prev) => ({ ...prev, [key]: value }));
+  };
+
+  // Merge localEnv with flashInfer setting and call onChange
+  useEffect(() => {
+    onChange({ ...localEnv, VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1" });
+  }, [localEnv, flashInferDisabled, onChange]);
+
+  return (
+    <Field label="Environment Variables" hint="Per-server environment variables. Global defaults (from Settings) are shown as read-only and can be overridden.">
+      <div className="space-y-2">
+        {/* FlashInfer Sampler Toggle */}
+        <label className="flex items-center gap-2 text-sm text-slate-300 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+          <input
+            type="checkbox"
+            checked={flashInferDisabled}
+            onChange={(e) => onFlashInferToggle(e.target.checked)}
+            className="h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-100">
+              Disable FlashInfer sampler (<code className="bg-black/40 px-1 py-0.5 rounded text-cyan-300">VLLM_USE_FLASHINFER_SAMPLER=0</code>) — recommended unless the CUDA toolkit is installed in WSL
+            </div>
+            <div className="text-xs text-slate-400">
+              vLLM's FlashInfer-based top-k/top-p sampler JIT-compiles a CUDA kernel on first use, which requires nvcc (CUDA toolkit), a C compiler, and ninja in WSL. Disabling uses the built-in PyTorch sampler and avoids this JIT entirely.
+            </div>
+          </div>
+        </label>
+
+        {/* Global Defaults (read-only) */}
+        {Object.keys(globalDefaults).length > 0 && (
+          <div className="space-y-1">
+            <div className="text-[11px] text-slate-500 font-medium uppercase tracking-wider">Global Defaults (from Settings)</div>
+            {Object.entries(globalDefaults).map(([key, value]) => (
+              <div key={key} className="flex items-center gap-2 text-sm bg-surface/50 rounded px-2 py-1.5">
+                <span className="font-mono text-xs text-slate-400 w-48 truncate">{key}</span>
+                <span className="flex-1 font-mono text-xs text-slate-300 truncate">{value}</span>
+                {key !== "VLLM_USE_FLASHINFER_SAMPLER" && (
+                  <span className="text-[10px] text-amber-400">inherited</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Per-server Overrides */}
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-[11px] text-slate-500 font-medium uppercase tracking-wider">
+            Per-Server Overrides
+            <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={handleAdd} disabled={!newKey.trim()}>
+              Add
+            </Button>
+          </div>
+          <div className="flex gap-1.5">
+            <input
+              className={inputCls}
+              placeholder="VAR_NAME"
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              style={{ width: "140px" }}
+            />
+            <input
+              className={inputCls}
+              placeholder="value"
+              value={newValue}
+              onChange={(e) => setNewValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              style={{ flex: 1 }}
+            />
+          </div>
+          {Object.keys(localEnv).length === 0 && (
+            <div className="text-xs text-slate-500 italic">No per-server overrides. Add variables above or configure global defaults in Settings.</div>
+          )}
+          {Object.entries(localEnv).map(([key, value]) => (
+            <div key={key} className="flex items-center gap-2">
+              <span className="font-mono text-xs text-slate-400 w-48 truncate">{key}</span>
+              <input
+                className={inputCls}
+                value={value}
+                onChange={(e) => handleChange(key, e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => handleRemove(key)}>
+                ✕
+              </Button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Field>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 function MarkdownContent({ content }: { content: string }) {

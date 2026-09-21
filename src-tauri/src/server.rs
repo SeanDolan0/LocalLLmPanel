@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +13,39 @@ pub use crate::state::MetricsSnapshot;
 use crate::state::{AppState, LiveServer, ServerDef, ServerStatus, VecDequeLog};
 use crate::wsl;
 use tauri::Emitter;
+
+// Validation and escaping functions for environment variables
+fn validate_env_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Environment variable name cannot be empty".into());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err("Environment variable name must start with a letter or underscore".into());
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() && c != '_' {
+            return Err("Environment variable name can only contain letters, numbers, and underscores".into());
+        }
+    }
+    Ok(())
+}
+
+fn shell_escape_single_quoted(value: &str) -> String {
+    let mut result = String::with_capacity(value.len() + 2);
+    result.push('\'');
+    for chunk in value.split('\'') {
+        if !result.ends_with('\'') {
+            result.push_str(chunk);
+        } else {
+            result.push_str("'\\''");
+            result.push_str(chunk);
+        }
+    }
+    result.push('\'');
+    result
+}
 
 const DEFAULT_PORT_START: u16 = 8000;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
@@ -92,13 +126,29 @@ fn launch_script(
     def: &ServerDef,
     hf_token: &str,
     adv: &crate::state::AdvancedSettings,
+    global_default_env: &BTreeMap<String, String>,
 ) -> String {
+    // Merge global default_env with per-server env (per-server wins)
+    let mut merged_env = global_default_env.clone();
+    merged_env.extend(def.env.clone());
+
     let mut parts: Vec<String> = vec![
         format!("mkdir -p {}/../run", venv_dir),
         format!("cd {}/..", venv_dir),
         format!(". {}/bin/activate", venv_dir),
         format!("echo $$ > {}/../run/{}.pid", venv_dir, def.id),
     ];
+
+    // Export environment variables (merged global defaults + per-server overrides)
+    for (name, value) in merged_env {
+        if let Err(e) = validate_env_name(&name) {
+            eprintln!("[launch_script] Invalid env name '{}': {}, skipping", name, e);
+            continue;
+        }
+        let escaped = shell_escape_single_quoted(&value);
+        parts.insert(0, format!("export {}={}", name, escaped));
+    }
+
     let mut args: Vec<String> = Vec::new();
     args.push("--model".into());
     args.push(shell_quote(&def.model_id));
@@ -241,7 +291,8 @@ fn launch_script(
 
 pub fn build_start_command(def: &ServerDef, hf_token: &str) -> String {
     let adv = crate::state::AdvancedSettings::default();
-    launch_script("~/llm-lp/.venv", def, hf_token, &adv)
+    let global_default_env = BTreeMap::new();
+    launch_script("~/llm-lp/.venv", def, hf_token, &adv, &global_default_env)
 }
 
 pub fn build_start_command_with_advanced(
@@ -249,7 +300,8 @@ pub fn build_start_command_with_advanced(
     hf_token: &str,
     adv: &crate::state::AdvancedSettings,
 ) -> String {
-    launch_script("~/llm-lp/.venv", def, hf_token, adv)
+    let global_default_env = BTreeMap::new();
+    launch_script("~/llm-lp/.venv", def, hf_token, adv, &global_default_env)
 }
 
 /// Resolve a user-supplied model identifier or path to an existing GGUF file.
@@ -353,10 +405,8 @@ pub fn resolve_gguf_model_path(
                                             }
                                             if blobs_dir.is_dir() {
                                                 if let Ok(blobs) = std::fs::read_dir(&blobs_dir) {
-                                                    let mut sorted_blobs: Vec<_> = blobs
-                                                        .flatten()
-                                                        .map(|b| b.path())
-                                                        .collect();
+                                                    let mut sorted_blobs: Vec<_> =
+                                                        blobs.flatten().map(|b| b.path()).collect();
                                                     sorted_blobs.sort_by_key(|p| {
                                                         p.metadata().map(|m| m.len()).unwrap_or(0)
                                                     });
@@ -501,7 +551,12 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
     while i < extra.len() {
         if extra[i] == "--override-kv" {
             if let Some(value) = extra.get(i + 1) {
-                extra_overrides.extend(value.split(',').filter(|v| !v.trim().is_empty()).map(str::to_string));
+                extra_overrides.extend(
+                    value
+                        .split(',')
+                        .filter(|v| !v.trim().is_empty())
+                        .map(str::to_string),
+                );
                 i += 2;
                 continue;
             }
@@ -527,14 +582,39 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             i += 1;
             if matches!(
                 arg.as_str(),
-                "-m" | "--model" | "--host" | "--port" | "-c" | "--ctx-size"
-                    | "-ngl" | "--n-gpu-layers" | "--gpu-layers" | "--n-cpu-moe" | "-ncmoe"
-                    | "--fit" | "-fit" | "--fit-target" | "-fitt" | "--device" | "-dev"
+                "-m" | "--model"
+                    | "--host"
+                    | "--port"
+                    | "-c"
+                    | "--ctx-size"
+                    | "-ngl"
+                    | "--n-gpu-layers"
+                    | "--gpu-layers"
+                    | "--n-cpu-moe"
+                    | "-ncmoe"
+                    | "--fit"
+                    | "-fit"
+                    | "--fit-target"
+                    | "-fitt"
+                    | "--device"
+                    | "-dev"
                     | "--api-key"
-                    | "--log-verbosity" | "-lv" | "-fa" | "--flash-attn"
-                    | "--cache-type-k" | "-ctk" | "--cache-type-v" | "-ctv"
-                    | "-t" | "--threads" | "-b" | "--batch-size" | "-ub"
-                    | "--ubatch-size" | "-np" | "--parallel"
+                    | "--log-verbosity"
+                    | "-lv"
+                    | "-fa"
+                    | "--flash-attn"
+                    | "--cache-type-k"
+                    | "-ctk"
+                    | "--cache-type-v"
+                    | "-ctv"
+                    | "-t"
+                    | "--threads"
+                    | "-b"
+                    | "--batch-size"
+                    | "-ub"
+                    | "--ubatch-size"
+                    | "-np"
+                    | "--parallel"
             ) {
                 i += 1;
             }
@@ -553,7 +633,14 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             }
         }
         if !merged.is_empty() {
-            args.extend(["--override-kv".into(), merged.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")]);
+            args.extend([
+                "--override-kv".into(),
+                merged
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ]);
         }
     }
     args.extend(filtered_extra);
@@ -731,23 +818,23 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     let mut vram_notice: Option<String> = None;
     if def.backend == "vllm" {
         if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
-        if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
-            let startup_overhead_mb = 1400.0;
-            let available_mb = (snap.vram_free_mb as f64 - startup_overhead_mb).max(0.0);
-            let safe_ratio = available_mb / snap.vram_total_mb as f64;
-            let cap = if snap.vram_total_mb >= 20000 {
-                0.92
-            } else if snap.vram_total_mb >= 15000 {
-                0.90
-            } else {
-                0.86
-            };
-            let safe_max = safe_ratio.clamp(0.10, cap);
-            let safe_max_rounded = (safe_max * 100.0).floor() / 100.0;
-            if def.gpu_mem_util > safe_max_rounded {
-                let orig = def.gpu_mem_util;
-                def.gpu_mem_util = safe_max_rounded;
-                vram_notice = Some(format!(
+            if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
+                let startup_overhead_mb = 1400.0;
+                let available_mb = (snap.vram_free_mb as f64 - startup_overhead_mb).max(0.0);
+                let safe_ratio = available_mb / snap.vram_total_mb as f64;
+                let cap = if snap.vram_total_mb >= 20000 {
+                    0.92
+                } else if snap.vram_total_mb >= 15000 {
+                    0.90
+                } else {
+                    0.86
+                };
+                let safe_max = safe_ratio.clamp(0.10, cap);
+                let safe_max_rounded = (safe_max * 100.0).floor() / 100.0;
+                if def.gpu_mem_util > safe_max_rounded {
+                    let orig = def.gpu_mem_util;
+                    def.gpu_mem_util = safe_max_rounded;
+                    vram_notice = Some(format!(
                     "[LocalLLmPanel] Free VRAM is {} MB / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} (accounting for PyTorch/NCCL startup buffers) to prevent startup crash.",
                     snap.vram_free_mb, snap.vram_total_mb, (snap.vram_free_mb as f64 / snap.vram_total_mb as f64) * 100.0, orig, def.gpu_mem_util
                 ));
@@ -802,15 +889,18 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         }
         let help = crate::llamacpp_install::command_output(&exe, &["--help"])
             .unwrap_or_else(|_| cfg.llamacpp_help.clone().unwrap_or_default());
-        let args = filter_llamacpp_args(
-            build_llamacpp_args_with_help(&def, &help),
-            &help,
-        );
+        let args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
         let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
             .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
         (None, Some(child), None)
     } else {
-        let script = launch_script(&cfg.venv_dir, &def, &cfg.hf_token, &cfg.advanced_settings);
+        let script = launch_script(
+            &cfg.venv_dir,
+            &def,
+            &cfg.hf_token,
+            &cfg.advanced_settings,
+            &cfg.default_env,
+        );
         let child = wsl::WslChild::spawn(&distro, &script, log_cb)
             .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
         let pid = child.pid();
@@ -876,18 +966,16 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         while Instant::now() < deadline {
             let exited = {
                 let mut servers = state_task.servers.lock().unwrap();
-                servers
-                    .get_mut(&id_task)
-                    .and_then(|ls| {
-                        ls.wsl_child
-                            .as_mut()
-                            .and_then(|c| c.try_wait().ok().flatten())
-                            .or_else(|| {
-                                ls.native_child
-                                    .as_mut()
-                                    .and_then(|c| c.try_wait().ok().flatten())
-                            })
-                    })
+                servers.get_mut(&id_task).and_then(|ls| {
+                    ls.wsl_child
+                        .as_mut()
+                        .and_then(|c| c.try_wait().ok().flatten())
+                        .or_else(|| {
+                            ls.native_child
+                                .as_mut()
+                                .and_then(|c| c.try_wait().ok().flatten())
+                        })
+                })
             };
             if let Some(exit) = exited {
                 let error = process_failure(
@@ -915,12 +1003,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 &backend_for_monitor,
                 "health check timeout",
             );
-            emit_status(
-                app.as_ref(),
-                &id_task,
-                ServerStatus::Error,
-                Some(error),
-            );
+            emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
             update_status(&state_task, &id_task, ServerStatus::Error);
             return;
         }
@@ -944,18 +1027,16 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             let (exited, stopping) = {
                 let mut servers = state_task.servers.lock().unwrap();
                 let mut ls = servers.get_mut(&id_task);
-                let exit = ls
-                    .as_mut()
-                    .and_then(|ls| {
-                        ls.wsl_child
-                            .as_mut()
-                            .and_then(|c| c.try_wait().ok().flatten())
-                            .or_else(|| {
-                                ls.native_child
-                                    .as_mut()
-                                    .and_then(|c| c.try_wait().ok().flatten())
-                            })
-                    });
+                let exit = ls.as_mut().and_then(|ls| {
+                    ls.wsl_child
+                        .as_mut()
+                        .and_then(|c| c.try_wait().ok().flatten())
+                        .or_else(|| {
+                            ls.native_child
+                                .as_mut()
+                                .and_then(|c| c.try_wait().ok().flatten())
+                        })
+                });
                 let stopping = ls.map(|ls| ls.stopping).unwrap_or(false);
                 (exit, stopping)
             };
@@ -1084,14 +1165,32 @@ fn update_status(state: &Arc<AppState>, id: &str, status: ServerStatus) {
     if let Some(ls) = servers.get_mut(id) {
         ls.status = status;
     }
-
 }
 
 /// Turn an early backend exit into an actionable error instead of only
 /// reporting an opaque exit code.
 pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String {
     let lower = log_tail.to_ascii_lowercase();
-    let hint = if lower.contains("erroroutofdevicememory")
+    let hint = if lower.contains("could not find nvcc")
+        || lower.contains("cuda_home")
+        || (lower.contains("flashinfer") && lower.contains("nvcc"))
+    {
+        "vLLM's FlashInfer sampler needs the CUDA toolkit (nvcc) in WSL. Disable it with VLLM_USE_FLASHINFER_SAMPLER=0, or install the CUDA toolkit in WSL."
+    } else if lower.contains("failed to find c compiler")
+        || lower.contains("compiler not found")
+        || (lower.contains("c compiler") && lower.contains("not found"))
+    {
+        "Install a C compiler in WSL: run 'sudo apt update && sudo apt install -y gcc'."
+    } else if lower.contains("python.h")
+        || (lower.contains("python") && lower.contains("dev") && lower.contains("not found"))
+    {
+        "Install Python development headers in WSL: run 'sudo apt update && sudo apt install -y python3.12-dev'."
+    } else if lower.contains("no such file or directory: 'ninja'")
+        || lower.contains("ninja: command not found")
+        || lower.contains("ninja not found")
+    {
+        "Install ninja build tool in WSL: run 'sudo apt update && sudo apt install -y ninja-build'."
+    } else if lower.contains("erroroutofdevicememory")
         || lower.contains("unable to allocate")
         || lower.contains("failed to allocate")
         || lower.contains("failed to fit params")
@@ -1361,6 +1460,8 @@ pub async fn chat_with_tools(
     state: &Arc<AppState>,
     server_id: &str,
     messages: Vec<serde_json::Value>,
+    max_tokens: u32,
+    disable_thinking: bool,
 ) -> Result<serde_json::Value> {
     let (port, model, api_key) = {
         let servers = state.servers.lock().unwrap();
@@ -1957,6 +2058,7 @@ mod tests {
             no_kv_offload: false,
             metrics: true,
             extra_args: Vec::new(),
+            env: BTreeMap::new(),
         }
     }
 
@@ -1967,6 +2069,7 @@ mod tests {
             &def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None),
             "",
             &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
         );
         assert!(script.contains("exec python -m vllm.entrypoints.openai.api_server"));
         assert!(script.contains("--model 'Qwen/Qwen2.5-0.5B-Instruct'"));
@@ -1992,9 +2095,15 @@ mod tests {
         d.ubatch_size = Some(128);
         d.extra_args = vec!["--no-mmap".into(), "--verbose".into()];
         let args = build_llamacpp_args(&d);
-        assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "C:\\models\\model.gguf"));
-        assert!(args.windows(2).any(|w| w[0] == "--mmproj" && w[1] == "C:\\models\\mmproj.gguf"));
-        assert!(args.windows(2).any(|w| w[0] == "--n-cpu-moe" && w[1] == "24"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-m" && w[1] == "C:\\models\\model.gguf"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--mmproj" && w[1] == "C:\\models\\mmproj.gguf"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--n-cpu-moe" && w[1] == "24"));
         assert!(args.windows(2).any(|w| w[0] == "-fa" && w[1] == "on"));
         assert!(args.ends_with(&["--no-mmap".into(), "--verbose".into()]));
     }
@@ -2075,6 +2184,53 @@ mod tests {
     }
 
     #[test]
+    fn startup_failure_hint_flashinfer_nvcc() {
+        let hint = startup_failure_hint(
+            "vllm",
+            "exit code: 1",
+            "ERROR flashinfer/sampling.py ... get_sampling_module().top_k_mask_logits\n\
+             ERROR flashinfer/jit/cpp_ext.py, line 61, in get_cuda_path\n\
+             RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist",
+        );
+        assert!(hint.contains("FlashInfer"));
+        assert!(hint.contains("nvcc") || hint.contains("CUDA toolkit"));
+        assert!(hint.contains("VLLM_USE_FLASHINFER_SAMPLER=0"));
+    }
+
+    #[test]
+    fn startup_failure_hint_c_compiler_missing() {
+        let hint = startup_failure_hint(
+            "vllm",
+            "exit code: 1",
+            "error: failed to find C compiler\n\
+             note: the msvc targets depend on the msvc linker",
+        );
+        assert!(hint.contains("gcc"));
+    }
+
+    #[test]
+    fn startup_failure_hint_python_h_missing() {
+        let hint = startup_failure_hint(
+            "vllm",
+            "exit code: 1",
+            "fatal error: Python.h: No such file or directory\n\
+             #include <Python.h>",
+        );
+        assert!(hint.contains("python3.12-dev"));
+    }
+
+    #[test]
+    fn startup_failure_hint_ninja_missing() {
+        let hint = startup_failure_hint(
+            "vllm",
+            "exit code: 1",
+            "No such file or directory: 'ninja'\n\
+             ninja: command not found",
+        );
+        assert!(hint.contains("ninja-build"));
+    }
+
+    #[test]
     fn llamacpp_metrics_sample_is_parsed() {
         let sample = r#"
 # HELP llama_tokens_predicted_total Tokens generated
@@ -2103,6 +2259,7 @@ llama_requests_processing 1
             ),
             "hf_secret_123",
             &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
         );
         assert!(script.contains("--runner pooling"));
         assert!(script.contains("--quantization fp8"));
@@ -2140,6 +2297,7 @@ llama_requests_processing 1
             ),
             "hf_token_xyz",
             &adv,
+            &BTreeMap::new(),
         );
         assert!(script.contains("export HF_HOME=/mnt/d/ai/hf"));
         assert!(script.contains("mkdir -p /mnt/d/ai/hf"));
@@ -2188,6 +2346,7 @@ llama_requests_processing 1
             ),
             "",
             &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
         );
         assert!(!script.contains("--quantization"));
     }
@@ -2205,6 +2364,7 @@ llama_requests_processing 1
             ),
             "",
             &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
         );
         assert!(!script.contains("--quantization"));
     }
@@ -2316,5 +2476,134 @@ llama_requests_processing 1
         let req_blank = client.post("http://127.0.0.1:8000/v1/chat/completions");
         let req_no_auth = apply_vllm_auth(req_blank, None).build().unwrap();
         assert!(req_no_auth.headers().get("Authorization").is_none());
+    }
+
+    #[test]
+    fn test_validate_env_name() {
+        assert!(validate_env_name("FOO").is_ok());
+        assert!(validate_env_name("FOO_BAR").is_ok());
+        assert!(validate_env_name("_FOO").is_ok());
+        assert!(validate_env_name("FOO123").is_ok());
+        assert!(validate_env_name("VLLM_USE_FLASHINFER_SAMPLER").is_ok());
+        assert!(validate_env_name("").is_err());
+        assert!(validate_env_name("123FOO").is_err());
+        assert!(validate_env_name("FOO-BAR").is_err());
+        assert!(validate_env_name("FOO BAR").is_err());
+        assert!(validate_env_name("FOO.BAR").is_err());
+    }
+
+    #[test]
+    fn test_shell_escape_single_quoted() {
+        assert_eq!(shell_escape_single_quoted("simple"), "'simple'");
+        assert_eq!(shell_escape_single_quoted("hello world"), "'hello world'");
+        assert_eq!(shell_escape_single_quoted("don't"), "'don'\\''t'");
+        assert_eq!(shell_escape_single_quoted("'"), "'\\''");
+        assert_eq!(shell_escape_single_quoted("a'b'c"), "'a'\\''b'\\''c'");
+        // Hostile value: should not inject shell commands
+        let hostile = "'; rm -rf ~ #";
+        let escaped = shell_escape_single_quoted(hostile);
+        assert!(escaped.starts_with("'") && escaped.ends_with("'"));
+        let inner = &escaped[1..escaped.len()-1];
+        assert!(!inner.contains("'"));
+        assert!(inner.contains("'\\''")); // escaped quotes
+    }
+
+    #[test]
+    fn test_launch_script_merges_global_and_per_server_env() {
+        use std::collections::BTreeMap;
+        let mut global_env = BTreeMap::new();
+        global_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
+        global_env.insert("GLOBAL_VAR".to_string(), "global_value".to_string());
+
+        let mut def = def(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "instruct",
+            8010,
+            "fp16",
+            None,
+        );
+        def.env.insert("PER_SERVER_VAR".to_string(), "per_server_value".to_string());
+        // Per-server should override global
+        def.env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "1".to_string());
+
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def,
+            "",
+            &crate::state::AdvancedSettings::default(),
+            &global_env,
+        );
+
+        // Global default should be present
+        assert!(script.contains("export GLOBAL_VAR='global_value'"));
+        // Per-server var should be present
+        assert!(script.contains("export PER_SERVER_VAR='per_server_value'"));
+        // Per-server should override global default
+        assert!(script.contains("export VLLM_USE_FLASHINFER_SAMPLER='1'"));
+        assert!(!script.contains("export VLLM_USE_FLASHINFER_SAMPLER='0'"));
+    }
+
+    #[test]
+    fn test_launch_script_invalid_env_name_skipped() {
+        use std::collections::BTreeMap;
+        let mut global_env = BTreeMap::new();
+        global_env.insert("VALID_VAR".to_string(), "valid".to_string());
+        global_env.insert("INVALID-VAR".to_string(), "invalid".to_string()); // hyphen not allowed
+
+        let def = def(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "instruct",
+            8010,
+            "fp16",
+            None,
+        );
+
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def,
+            "",
+            &crate::state::AdvancedSettings::default(),
+            &global_env,
+        );
+
+        // Valid var should be present
+        assert!(script.contains("export VALID_VAR='valid'"));
+        // Invalid var should be skipped (not crash)
+        assert!(!script.contains("INVALID-VAR"));
+    }
+
+    #[test]
+    fn test_launch_script_env_escaping_hostile_values() {
+        use std::collections::BTreeMap;
+        let mut global_env = BTreeMap::new();
+        global_env.insert("HOSTILE".to_string(), "'; rm -rf ~ #'".to_string());
+
+        let def = def(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "instruct",
+            8010,
+            "fp16",
+            None,
+        );
+
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def,
+            "",
+            &crate::state::AdvancedSettings::default(),
+            &global_env,
+        );
+
+        // Should be safely escaped
+        assert!(script.contains("export HOSTILE='\\''; rm -rf ~ #'\\''"));
+        // Should not contain unescaped single quotes that could inject commands
+        let lines: Vec<&str> = script.lines().collect();
+        for line in lines {
+            if line.starts_with("export HOSTILE=") {
+                // After export HOSTILE=, the rest should be properly quoted
+                let value_part = &line["export HOSTILE=".len()..];
+                assert!(value_part.starts_with("'") && value_part.ends_with("'"));
+            }
+        }
     }
 }

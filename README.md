@@ -7,6 +7,9 @@ A native Windows desktop app (**Tauri 2** + React/TypeScript) that manages **vLL
 - **Pull models** in the background (`hf download`, progress streamed to the UI).
 - **Run multiple servers** concurrently (instruct + embedding) with per-server quantization (`--quantization`), GPU memory util, max-model-len, ports, and live log tails, metrics, and a minimal chat playground.
 - **Run llama.cpp `llama-server.exe` natively on Windows**, including GGUF models, split-shard downloads, CUDA builds, Jinja tool calling, and MoE expert CPU offload.
+- **Per-server & global environment variables** for vLLM servers (merged with per-server overriding global defaults).
+- **FlashInfer JIT workaround**: `VLLM_USE_FLASHINFER_SAMPLER=0` disables vLLM's FlashInfer sampler (which requires nvcc/CUDA toolkit in WSL) and uses the built-in PyTorch sampler instead.
+- **One-click CUDA build tools installer** for FlashInfer JIT readiness (installs gcc, python3.12-dev, ninja-build, and NVIDIA CUDA toolkit from WSL-Ubuntu repo).
 
 ## Requirements
 
@@ -59,6 +62,14 @@ Requires ~5 GB disk + network. If `nvidia-smi` is unavailable inside WSL, the te
 4. **Servers → New server** → pick the model, task `instruct` (or `embed`), press Start.
 5. Logs stream live; the chat drawer works once `/health` is green; VRAM gauge updates on Dashboard.
 6. Measured tok/s replaces the estimate after the first generation run.
+
+### vLLM FlashInfer sampler workaround
+
+vLLM's FlashInfer-based top-k/top-p sampler JIT-compiles a CUDA kernel on first use, which requires `nvcc` (CUDA toolkit), a C compiler (`gcc`), and `ninja` in WSL. If these are not installed, vLLM crashes with `RuntimeError: Could not find nvcc`.
+
+**Quick fix (recommended):** The panel sets `VLLM_USE_FLASHINFER_SAMPLER=0` globally by default, which makes vLLM use its built-in PyTorch sampler and avoids the JIT entirely. This works on any WSL2 setup without additional tooling.
+
+**Full CUDA toolkit (optional):** If you want FlashInfer's optimized sampling, use **Dashboard → FlashInfer JIT Ready → Check → Install CUDA Build Tools**. This installs `gcc`, `python3.12-dev`, `ninja-build`, and the NVIDIA CUDA toolkit (matching your PyTorch CUDA version) from the official WSL-Ubuntu repository. **Warning:** downloads several GB and takes 5–15 minutes.
 
 ### Native llama.cpp first run
 

@@ -16,6 +16,7 @@ use crate::provision;
 use crate::server;
 use crate::state::{AppState, ServerDef};
 use crate::wsl;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -68,6 +69,7 @@ fn llamacpp_it() {
         no_kv_offload: false,
         metrics: true,
         extra_args: Vec::new(),
+        env: BTreeMap::new(),
     };
     let mut child = crate::wsl::NativeChild::spawn(
         std::path::Path::new(&exe),
@@ -196,6 +198,7 @@ fn wsl_it() {
             no_kv_offload: false,
             metrics: true,
             extra_args: Vec::new(),
+            env: BTreeMap::new(),
         });
         cfg.servers.push(ServerDef {
             backend: "vllm".into(),
@@ -234,6 +237,7 @@ fn wsl_it() {
             no_kv_offload: false,
             metrics: true,
             extra_args: Vec::new(),
+            env: BTreeMap::new(),
         });
         cfg.save().expect("save config");
     }

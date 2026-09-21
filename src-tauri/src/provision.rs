@@ -307,6 +307,119 @@ fn phase_verify(
     Ok(report)
 }
 
+/// Optional phase: Install CUDA build tools for FlashInfer JIT compilation.
+/// This installs gcc, python3.12-dev, ninja-build, and the CUDA toolkit from NVIDIA's WSL-Ubuntu repo.
+/// Must be run as root (via wsl --user root) because apt needs root.
+/// Returns the phase name if successful, or an error if the user cancels or it fails.
+pub fn phase_cuda_build_tools(
+    distro: &str,
+    on_log: &mut impl FnMut(&str, &str),
+) -> Result<String> {
+    on_log("cuda-tools", "Checking for existing CUDA build tools…");
+
+    // Check what's already installed
+    let check = wsl::run_script(
+        distro,
+        r#"
+            which nvcc >/dev/null 2>&1 && echo "nvcc=yes" || echo "nvcc=no"
+            which gcc >/dev/null 2>&1 && echo "gcc=yes" || echo "gcc=no"
+            which ninja >/dev/null 2>&1 && echo "ninja=yes" || echo "ninja=no"
+            test -f /usr/include/python3.12/Python.h && echo "python_dev=yes" || echo "python_dev=no"
+        "#,
+    );
+
+    let mut nvcc = false;
+    let mut gcc = false;
+    let mut ninja = false;
+    let mut python_dev = false;
+    for line in check.stdout.lines() {
+        if line.starts_with("nvcc=yes") { nvcc = true; }
+        else if line.starts_with("gcc=yes") { gcc = true; }
+        else if line.starts_with("ninja=yes") { ninja = true; }
+        else if line.starts_with("python_dev=yes") { python_dev = true; }
+    }
+
+    if nvcc && gcc && ninja && python_dev {
+        on_log("cuda-tools", "All CUDA build tools already installed (skipping).");
+        return Ok("cuda-tools".into());
+    }
+
+    on_log("cuda-tools", "Installing CUDA build tools (gcc, python3.12-dev, ninja-build, CUDA toolkit)…");
+    on_log("cuda-tools", "⚠ This downloads several GB and may take 5-15 minutes. First FlashInfer JIT compile will be slow.");
+
+    // Get PyTorch CUDA version to match toolkit version
+    let torch_cuda = wsl::run_script(
+        distro,
+        "~/llm-lp/.venv/bin/python -c \"import torch; print(torch.version.cuda)\" 2>/dev/null || echo 'unknown'",
+    );
+    let torch_cuda_version = torch_cuda.stdout.trim();
+    let cuda_major = if torch_cuda_version != "unknown" && !torch_cuda_version.is_empty() {
+        torch_cuda_version.split('.').next().unwrap_or("12")
+    } else {
+        "12"
+    };
+
+    on_log("cuda-tools", &format!("Targeting CUDA toolkit major version: {cuda_major} (matching PyTorch)"));
+
+    // Install basic build tools first (gcc, python3.12-dev, ninja-build)
+    let apt_script = format!(
+        r#"
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y -qq
+        apt-get install -y -qq gcc python3.12-dev ninja-build wget gpg
+        "#
+    );
+    let out = wsl::run_script_root(distro, &apt_script);
+    if !out.ok {
+        on_log("cuda-tools", &format!("Failed to install base build tools: {}", out.combined()));
+        bail!("CUDA build tools installation failed: {}", out.combined());
+    }
+    on_log("cuda-tools", "Base build tools (gcc, python3.12-dev, ninja-build) installed.");
+
+    // Add NVIDIA CUDA repository for WSL-Ubuntu
+    let repo_script = format!(
+        r#"
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        # Determine Ubuntu version
+        UBUNTU_VERSION=$(lsb_release -rs)
+        # NVIDIA's WSL-Ubuntu repo
+        wget -q https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/ubuntu${{UBUNTU_VERSION//./}}/x86_64/cuda-keyring_1.1-1_all.deb
+        dpkg -i cuda-keyring_1.1-1_all.deb
+        apt-get update -y -qq
+        # Install CUDA toolkit (compiler, nvcc, libraries) - no driver
+        apt-get install -y -qq cuda-toolkit-{cuda_major}-0
+        "#
+    );
+    on_log("cuda-tools", "Adding NVIDIA CUDA repository and installing CUDA toolkit…");
+    let out = wsl::run_script_root(distro, &repo_script);
+    if !out.ok {
+        on_log("cuda-tools", &format!("CUDA toolkit install failed (may need manual intervention): {}", out.combined()));
+        // Don't bail - base tools are installed, user can retry
+    } else {
+        on_log("cuda-tools", "CUDA toolkit installed successfully.");
+    }
+
+    // Verify nvcc is now available
+    let verify = wsl::run_script(distro, "which nvcc && nvcc --version | head -1");
+    if verify.ok && verify.stdout.contains("nvcc") {
+        on_log("cuda-tools", &format!("nvcc verified: {}", verify.stdout.lines().next().unwrap_or("ok")));
+    } else {
+        on_log("cuda-tools", "WARNING: nvcc not found in PATH after install. May need shell restart or manual PATH setup.");
+    }
+
+    // Set CUDA_HOME for future sessions
+    let cuda_home_script = r#"
+        echo 'export CUDA_HOME=/usr/local/cuda' >> ~/.bashrc
+        echo 'export PATH=$CUDA_HOME/bin:$PATH' >> ~/.bashrc
+        echo 'export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+    "#;
+    let _ = wsl::run_script(distro, cuda_home_script);
+
+    Ok("cuda-tools".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

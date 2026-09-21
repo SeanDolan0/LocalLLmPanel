@@ -157,6 +157,7 @@ export interface ServerDef {
   no_kv_offload: boolean;
   metrics: boolean;
   extra_args: string[];
+  env?: Record<string, string>;
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -221,6 +222,7 @@ export interface Settings {
   resume_servers_on_launch?: boolean;
   auto_restart_crashed?: boolean;
   launch_at_login?: boolean;
+  default_env?: Record<string, string>;
 }
 
 export interface PullStatus {
@@ -281,6 +283,7 @@ export interface CreateServerInput {
   no_kv_offload?: boolean;
   metrics?: boolean;
   extra_args?: string[];
+  env?: Record<string, string>;
 }
 
 export interface WslConfigInfo {
@@ -524,4 +527,13 @@ export interface ConfigExportPackage {
   resume_servers_on_launch: boolean;
   auto_restart_crashed: boolean;
   launch_at_login: boolean;
+}
+
+export interface FlashInferReady {
+  nvcc: boolean;
+  gcc: boolean;
+  ninja: boolean;
+  python_dev: boolean;
+  cuda_home: string | null;
+  torch_cuda_version: string | null;
 }

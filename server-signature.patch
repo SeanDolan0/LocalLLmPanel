@@ -1,0 +1,11 @@
+diff --git a/src-tauri/src/server.rs b/src-tauri/src/server.rs
+--- a/src-tauri/src/server.rs
++++ b/src-tauri/src/server.rs
+@@ -1360,5 +1360,7 @@
+ pub async fn chat_with_tools(
+     state: &Arc<AppState>,
+     server_id: &str,
+     messages: Vec<serde_json::Value>,
++    max_tokens: u32,
++    disable_thinking: bool,
+ ) -> Result<serde_json::Value> {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, events, fmtGB, fmtNum } from "../api";
 import { Button, Card, CardTitle, Gauge, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
-import type { EnvStatus, ProvisionReport, SystemMetricPoint, WslLogEvent } from "../types";
+import type { EnvStatus, ProvisionReport, SystemMetricPoint, WslLogEvent, FlashInferReady } from "../types";
 
 export default function Dashboard() {
   const [env, setEnv] = useState<EnvStatus | null>(null);
@@ -13,6 +13,8 @@ export default function Dashboard() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [installingLlamacpp, setInstallingLlamacpp] = useState(false);
   const [llamacppErr, setLlamacppErr] = useState<string | null>(null);
+  const [flashInferReady, setFlashInferReady] = useState<FlashInferReady | null>(null);
+  const [checkingFlashInfer, setCheckingFlashInfer] = useState(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -69,6 +71,35 @@ export default function Dashboard() {
     } finally {
       setProvisioning(false);
       refresh();
+    }
+  };
+
+  const checkFlashInfer = async () => {
+    setCheckingFlashInfer(true);
+    try {
+      const ready = await api.checkFlashInferReady();
+      setFlashInferReady(ready);
+    } catch (e) {
+      console.error("FlashInfer check failed:", e);
+    } finally {
+      setCheckingFlashInfer(false);
+    }
+  };
+
+  const installCudaTools = async () => {
+    if (!confirm("This will install CUDA build tools (gcc, python3.12-dev, ninja-build, CUDA toolkit) in WSL. It downloads several GB and may take 5-15 minutes. Continue?")) {
+      return;
+    }
+    setCheckingFlashInfer(true);
+    try {
+      await api.installCudaBuildTools();
+      // Re-check after install
+      const ready = await api.checkFlashInferReady();
+      setFlashInferReady(ready);
+    } catch (e) {
+      alert(`CUDA build tools installation failed: ${e}`);
+    } finally {
+      setCheckingFlashInfer(false);
     }
   };
 
@@ -232,6 +263,79 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="text-sm text-slate-500">nvidia-smi not visible inside WSL.</div>
+          )}
+        </Card>
+
+        <Card>
+          <CardTitle>
+            FlashInfer JIT Ready
+            <div className="flex items-center gap-1 ml-2">
+              <Button variant="ghost" className="text-[11px]" onClick={checkFlashInfer} disabled={checkingFlashInfer}>
+                {checkingFlashInfer ? <Spinner label="checking…" /> : "Check"}
+              </Button>
+              {!flashInferReady?.nvcc || !flashInferReady?.gcc || !flashInferReady?.ninja || !flashInferReady?.python_dev ? (
+                <Button variant="subtle" className="text-[11px]" onClick={installCudaTools} disabled={checkingFlashInfer}>
+                  Install CUDA Build Tools
+                </Button>
+              ) : null}
+            </div>
+          </CardTitle>
+          {flashInferReady ? (
+            <div className="space-y-1.5 text-sm">
+              <div className="flex items-center gap-2 text-xs">
+                <span className={`h-2 w-2 rounded-full ${flashInferReady.nvcc ? "bg-emerald-400" : "bg-red-400"}`} />
+                <span className="font-mono">nvcc</span>
+                <span className={flashInferReady.nvcc ? "text-emerald-300" : "text-red-300"}>
+                  {flashInferReady.nvcc ? "found" : "missing"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className={`h-2 w-2 rounded-full ${flashInferReady.gcc ? "bg-emerald-400" : "bg-red-400"}`} />
+                <span className="font-mono">gcc</span>
+                <span className={flashInferReady.gcc ? "text-emerald-300" : "text-red-300"}>
+                  {flashInferReady.gcc ? "found" : "missing"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className={`h-2 w-2 rounded-full ${flashInferReady.ninja ? "bg-emerald-400" : "bg-red-400"}`} />
+                <span className="font-mono">ninja</span>
+                <span className={flashInferReady.ninja ? "text-emerald-300" : "text-red-300"}>
+                  {flashInferReady.ninja ? "found" : "missing"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className={`h-2 w-2 rounded-full ${flashInferReady.python_dev ? "bg-emerald-400" : "bg-red-400"}`} />
+                <span className="font-mono">python3.12-dev</span>
+                <span className={flashInferReady.python_dev ? "text-emerald-300" : "text-red-300"}>
+                  {flashInferReady.python_dev ? "found" : "missing"}
+                </span>
+              </div>
+              {flashInferReady.cuda_home && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="h-2 w-2 rounded-full bg-cyan-400" />
+                  <span className="font-mono">CUDA_HOME</span>
+                  <span className="text-cyan-300 font-mono text-[10px] truncate max-w-[200px]">{flashInferReady.cuda_home}</span>
+                </div>
+              )}
+              {flashInferReady.torch_cuda_version && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                  <span className="font-mono">PyTorch CUDA</span>
+                  <span className="text-indigo-300">{flashInferReady.torch_cuda_version}</span>
+                </div>
+              )}
+              {!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev ? (
+                <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+                  Missing build tools. Install in WSL: <code className="bg-black/40 px-1 py-0.5 rounded">sudo apt update && sudo apt install -y gcc ninja-build python3.12-dev</code> + CUDA toolkit from NVIDIA WSL repo.
+                </div>
+              ) : (
+                <div className="mt-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                  All FlashInfer JIT build tools present. First compilation will be slow (~30-60s), subsequent runs cached.
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-sm text-slate-500">Click "Check" to verify nvcc, gcc, ninja, and python3.12-dev in WSL.</div>
           )}
         </Card>
 

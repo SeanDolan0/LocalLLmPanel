@@ -71,6 +71,10 @@ export const api = {
   serversStart: (id: string) => invoke<void>("servers_start", { id }),
   serversStop: (id: string) => invoke<void>("servers_stop", { id }),
   serversRestart: (id: string) => invoke<void>("servers_restart", { id }),
+  serversUpdate: (id: string, input: Partial<CreateServerInput> & { restart?: boolean }) =>
+    invoke<ServerDef>("servers_update", { input: { id, ...input } }),
+  serversUpdateEnv: (id: string, env: Record<string, string>, restart?: boolean) =>
+    invoke<void>("servers_update_env", { input: { id, env, restart } }),
   serversLogs: (id: string, since: number) => invoke<string>("servers_logs", { id, since }),
   serversMetrics: (id: string) => invoke<MetricsSnapshot | null>("servers_metrics", { id }),
   serversChat: (id: string, messages: ChatMessage[]) =>
@@ -164,6 +168,8 @@ export const api = {
   serverRecipeExport: (serverId: string) => invoke<string>("server_recipe_export", { serverId }),
   serverRecipeParse: (json: string) =>
     invoke<import("./types").ServerRecipe>("server_recipe_parse", { json }),
+  checkFlashInferReady: () => invoke<import("./types").FlashInferReady>("check_flashinfer_ready"),
+  installCudaBuildTools: () => invoke<import("./types").ProvisionReport>("install_cuda_build_tools"),
 };
 
 export async function getMemorySettings(): Promise<MemorySettings> {

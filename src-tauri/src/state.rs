@@ -6,6 +6,42 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// Validate environment variable name: must match ^[A-Za-z_][A-Za-z0-9_]*$
+pub fn validate_env_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Environment variable name cannot be empty".into());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err("Environment variable name must start with a letter or underscore".into());
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() && c != '_' {
+            return Err("Environment variable name can only contain letters, numbers, and underscores".into());
+        }
+    }
+    Ok(())
+}
+
+/// Safely single-quote escape a value for use in bash export statements.
+/// Handles embedded single quotes by ending the quote, adding escaped quote, and restarting.
+pub fn shell_escape_single_quoted(value: &str) -> String {
+    // '...' -> '\'' (end quote, escaped quote, start quote)
+    let mut result = String::with_capacity(value.len() + 2);
+    result.push('\'');
+    for chunk in value.split('\'') {
+        if !result.ends_with('\'') {
+            result.push_str(chunk);
+        } else {
+            result.push_str("'\\''");
+            result.push_str(chunk);
+        }
+    }
+    result.push('\'');
+    result
+}
+
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
@@ -215,6 +251,9 @@ pub struct ServerDef {
     pub metrics: bool,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Per-server environment variables (merged with global default_env, per-server wins).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 fn default_backend() -> String {
@@ -427,6 +466,9 @@ pub struct PersistedConfig {
     /// WSL paths of locally imported model folders (Task 9 local import).
     #[serde(default)]
     pub imported_local_models: Vec<String>,
+    /// Global default environment variables for vLLM servers (merged under each server's env).
+    #[serde(default)]
+    pub default_env: BTreeMap<String, String>,
 }
 
 pub type AppConfig = PersistedConfig;
@@ -434,6 +476,8 @@ pub type AppConfig = PersistedConfig;
 impl Default for PersistedConfig {
     fn default() -> Self {
         let distro = crate::wsl::detect_default_distro().unwrap_or_else(|| "Ubuntu".to_string());
+        let mut default_env = BTreeMap::new();
+        default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         PersistedConfig {
             distro,
             llm_dir: "~/llm-lp".to_string(),
@@ -466,6 +510,7 @@ impl Default for PersistedConfig {
             auto_restart_crashed: true,
             launch_at_login: false,
             imported_local_models: Vec::new(),
+            default_env,
         }
     }
 }
@@ -500,6 +545,10 @@ impl PersistedConfig {
                     cfg.github_token = plain;
                 }
             }
+        }
+        // Ensure default_env has the FlashInfer sampler disabled by default for existing configs.
+        if cfg.default_env.is_empty() {
+            cfg.default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         }
         cfg
     }
@@ -927,6 +976,7 @@ mod tests {
             no_kv_offload: false,
             metrics: true,
             extra_args: Vec::new(),
+            env: BTreeMap::new(),
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -1261,6 +1311,7 @@ mod tests {
             no_kv_offload: false,
             metrics: true,
             extra_args: Vec::new(),
+            env: BTreeMap::new(),
         });
 
         let text = serde_json::to_string(&cfg).unwrap();
@@ -1310,6 +1361,7 @@ mod tests {
             no_kv_offload: false,
             metrics: true,
             extra_args: Vec::new(),
+            env: BTreeMap::new(),
         };
 
         let recipe = ServerRecipe::from_server_def(&def);
@@ -1367,5 +1419,100 @@ mod tests {
         assert_eq!(loaded.hf_token, "hf_super_secret_test_token_9988");
         let _ = std::fs::remove_file(&tmp_file);
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_validate_env_name() {
+        use super::validate_env_name;
+        assert!(validate_env_name("FOO").is_ok());
+        assert!(validate_env_name("FOO_BAR").is_ok());
+        assert!(validate_env_name("_FOO").is_ok());
+        assert!(validate_env_name("FOO123").is_ok());
+        assert!(validate_env_name("VLLM_USE_FLASHINFER_SAMPLER").is_ok());
+        assert!(validate_env_name("").is_err());
+        assert!(validate_env_name("123FOO").is_err());
+        assert!(validate_env_name("FOO-BAR").is_err());
+        assert!(validate_env_name("FOO BAR").is_err());
+        assert!(validate_env_name("FOO.BAR").is_err());
+    }
+
+    #[test]
+    fn test_shell_escape_single_quoted() {
+        use super::shell_escape_single_quoted;
+        assert_eq!(shell_escape_single_quoted("simple"), "'simple'");
+        assert_eq!(shell_escape_single_quoted("hello world"), "'hello world'");
+        assert_eq!(shell_escape_single_quoted("don't"), "'don'\\''t'");
+        assert_eq!(shell_escape_single_quoted("'"), "'\\''");
+        assert_eq!(shell_escape_single_quoted("a'b'c"), "'a'\\''b'\\''c'");
+        assert_eq!(shell_escape_single_quoted("'; rm -rf ~ #'"), "'; rm -rf ~ #'");
+        // Hostile value: should not inject shell commands
+        let hostile = "'; rm -rf ~ #";
+        let escaped = shell_escape_single_quoted(hostile);
+        assert!(escaped.starts_with("'") && escaped.ends_with("'"));
+        // The escaped version should not contain unescaped single quotes
+        let inner = &escaped[1..escaped.len()-1];
+        assert!(!inner.contains("'"));
+        assert!(inner.contains("'\\''")); // escaped quotes
+    }
+
+    #[test]
+    fn test_serverdef_env_field_roundtrip() {
+        use super::ServerDef;
+        let json = r#"{
+            "id": "s1",
+            "name": "test",
+            "model_id": "test/model",
+            "task": "instruct",
+            "port": 8000,
+            "gpu_mem_util": 0.9,
+            "max_model_len": 2048,
+            "quant": "fp16",
+            "served_model_name": null,
+            "enforce_eager": true,
+            "params_b": 1.0,
+            "env": {"CUSTOM_VAR": "custom_value", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+        }"#;
+        let s: ServerDef = serde_json::from_str(json).unwrap();
+        assert_eq!(s.env.get("CUSTOM_VAR"), Some(&"custom_value".to_string()));
+        assert_eq!(s.env.get("VLLM_USE_FLASHINFER_SAMPLER"), Some(&"0".to_string()));
+
+        let serialized = serde_json::to_string(&s).unwrap();
+        let deserialized: ServerDef = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.env, s.env);
+    }
+
+    #[test]
+    fn test_persistedconfig_default_env() {
+        use super::PersistedConfig;
+        let cfg = PersistedConfig::default();
+        assert_eq!(cfg.default_env.get("VLLM_USE_FLASHINFER_SAMPLER"), Some(&"0".to_string()));
+    }
+
+    #[test]
+    fn test_old_config_loads_with_default_env() {
+        use super::PersistedConfig;
+        let old = r#"{
+            "distro": "Ubuntu-22.04",
+            "llm_dir": "~/llm-lp",
+            "venv_dir": "~/llm-lp/.venv",
+            "hf_token": "",
+            "default_quant": "fp16",
+            "servers": [{
+                "id": "old",
+                "name": "old server",
+                "model_id": "org/model",
+                "task": "instruct",
+                "port": 8000,
+                "gpu_mem_util": 0.92,
+                "max_model_len": 4096,
+                "quant": "fp16",
+                "served_model_name": null,
+                "params_b": null,
+                "n_gpu_layers": 99
+            }],
+            "measured": {}
+        }"#;
+        let cfg: PersistedConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.default_env.get("VLLM_USE_FLASHINFER_SAMPLER"), Some(&"0".to_string()));
     }
 }
