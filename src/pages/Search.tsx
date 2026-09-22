@@ -579,9 +579,37 @@ export default function Search() {
     }
   }, [debouncedQuery]);
 
+  const ggufRepoIds = useMemo(() => {
+    const ids = new Set<string>();
+    const collect = (models: ModelWithFit[]) => {
+      for (const m of models) {
+        for (const vwf of m.variants ?? []) {
+          if (vwf.variant.format === "GGUF") ids.add(vwf.variant.repo_id.toLowerCase());
+        }
+      }
+    };
+    collect(recommended);
+    collect(results ?? []);
+    if (selectedModel) collect([selectedModel]);
+    return ids;
+  }, [recommended, results, selectedModel]);
+
   const pull = (repoId: string) => {
     if (isModelInstalled(repoId)) return;
-    api.pullModel(repoId).catch((e) => setSearchErr(String(e)));
+    if (ggufRepoIds.has(repoId.toLowerCase())) {
+      api
+        .ggufFiles(repoId)
+        .then((files) => {
+          const targets = files.filter((f) => !f.is_mmproj);
+          if (!targets.length) {
+            throw new Error(`No GGUF files found in ${repoId}`);
+          }
+          return api.downloadGguf(repoId, targets.map((f) => f.path));
+        })
+        .catch((e) => setSearchErr(String(e)));
+    } else {
+      api.pullModel(repoId).catch((e) => setSearchErr(String(e)));
+    }
   };
 
   const cancelPull = (repoId: string) => {

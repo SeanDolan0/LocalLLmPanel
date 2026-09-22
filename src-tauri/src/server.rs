@@ -1201,6 +1201,10 @@ pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String
         || lower.contains("ninja not found")
     {
         "Install ninja build tool in WSL: run 'sudo apt update && sudo apt install -y ninja-build'."
+    } else if lower.contains("matches the legacy prism q2_0 layout") || lower.contains("legacy prism q2_0") {
+        "This GGUF uses legacy Prism Q2_0 (type ID 42, group size 128). Modern llama.cpp and PrismML builds require the PQ2_0 variant (type ID 142) or official group-64 Q2_0. Convert the tensor types in the GGUF to PQ2_0 or download the updated PQ2_0 release."
+    } else if (lower.contains("has offset") && lower.contains("expected")) || lower.contains("failed to read tensor data") {
+        "GGUF tensor offset mismatch. The model's quantization format (e.g. ternary group size 128) does not match what the running llama.cpp binary expects. Ensure you are running the PrismML llama.cpp channel for ternary models, or use a GGUF quantized for standard llama.cpp (e.g. Q2_g64 / PQ2_0)."
     } else if lower.contains("erroroutofdevicememory")
         || lower.contains("unable to allocate")
         || lower.contains("failed to allocate")
@@ -1349,32 +1353,6 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
     let _ = term_ok;
     emit_status(app, id, ServerStatus::Stopped, None);
     Ok(())
-}
-
-/// Resume any servers that had was_running=true when the app last ran.
-pub async fn resume_servers_if_configured(state: &Arc<AppState>, app: Option<&tauri::AppHandle>) {
-    let (should_resume, servers_to_resume) = {
-        let cfg = state.config.lock().unwrap();
-        if !cfg.resume_servers_on_launch {
-            (false, Vec::new())
-        } else {
-            let to_resume: Vec<String> = cfg
-                .servers
-                .iter()
-                .filter(|s| s.was_running)
-                .map(|s| s.id.clone())
-                .collect();
-            (true, to_resume)
-        }
-    };
-    if should_resume && !servers_to_resume.is_empty() {
-        let distro = state.resolve_distro();
-        if crate::wsl::run_script(&distro, "echo ok").ok {
-            for id in servers_to_resume {
-                let _ = start_server(state, app, &id);
-            }
-        }
-    }
 }
 
 /// Restart = tolerant stop then start.
@@ -2047,6 +2025,7 @@ mod tests {
             max_model_len: Some(2048),
             quant: quant.into(),
             served_model_name: served.map(|s| s.into()),
+            llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,

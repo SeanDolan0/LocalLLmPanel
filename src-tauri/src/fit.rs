@@ -470,6 +470,7 @@ mod tests {
             2500.0,
             true,
             None,
+            None,
         );
         assert_eq!(r.run_mode, RunMode::Gpu);
         assert_eq!(r.verdict, FitVerdict::Comfortable);
@@ -498,7 +499,7 @@ mod tests {
             head_dim: Some(128),
         };
         let v = variant("fp16", false);
-        let r = score_variant(&hw, &v, &arch_70b, None, 0.92, 2500.0, true, None);
+        let r = score_variant(&hw, &v, &arch_70b, None, 0.92, 2500.0, true, None, None);
         assert_eq!(r.run_mode, RunMode::DoesNotFit);
         assert_eq!(r.verdict, FitVerdict::DoesNotFit);
         assert_eq!(r.extended_context, 0);
@@ -580,6 +581,7 @@ mod tests {
             2500.0,
             true,
             None,
+            None,
         );
         assert_eq!(r.verdict, FitVerdict::Comfortable);
         assert_eq!(r.run_mode, RunMode::Gpu);
@@ -598,7 +600,7 @@ mod tests {
             None,
             0.92,
             2500.0,
-            true,
+            false,
             None,
             None,
         );
@@ -747,8 +749,8 @@ mod tests {
         let arch = arch_0_5b();
         let v_fp16 = variant("fp16", false);
         let v_gguf = variant_gguf_sized("gguf", 500_000_000);
-        let r_fp16 = score_variant(&hw, &v_fp16, &arch, None, 0.92, 2500.0, true, None);
-        let r_gguf = score_variant(&hw, &v_gguf, &arch, None, 0.92, 2500.0, true, None);
+        let r_fp16 = score_variant(&hw, &v_fp16, &arch, None, 0.92, 2500.0, true, None, None);
+        let r_gguf = score_variant(&hw, &v_gguf, &arch, None, 0.92, 2500.0, true, None, None);
         let mut results = vec![(v_gguf, r_gguf), (v_fp16, r_fp16)];
         rank_variants(&mut results);
         assert!(!results[0].0.is_gguf, "Native should rank first");
@@ -767,6 +769,7 @@ mod tests {
             2500.0,
             true,
             None,
+            None,
         );
         let mut r2 = score_variant(
             &hw_12gb(),
@@ -776,6 +779,7 @@ mod tests {
             0.92,
             2500.0,
             true,
+            None,
             None,
         );
 
@@ -805,8 +809,8 @@ mod tests {
         let arch = arch_0_5b();
         let v_fp16 = variant("fp16", false);
         let v_fp8 = variant("fp8", false);
-        let r_fp16 = score_variant(&hw, &v_fp16, &arch, None, 0.92, 2500.0, true, None);
-        let r_fp8 = score_variant(&hw, &v_fp8, &arch, None, 0.92, 2500.0, true, None);
+        let r_fp16 = score_variant(&hw, &v_fp16, &arch, None, 0.92, 2500.0, true, None, None);
+        let r_fp8 = score_variant(&hw, &v_fp8, &arch, None, 0.92, 2500.0, true, None, None);
         let results = vec![(v_fp16, r_fp16), (v_fp8, r_fp8)];
         let idx = best_variant(&results, None);
         assert!(idx < results.len());

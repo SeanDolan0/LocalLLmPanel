@@ -31,6 +31,7 @@ import type {
   BenchmarkCancelPayload,
   BenchmarkErrorPayload,
   LlamacppInstallStatus,
+  GgufRepoFile,
 } from "./types";
 
 export type {
@@ -59,6 +60,9 @@ export const api = {
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),
   pullStatus: () => invoke<{ pulling: string[] }>("pull_status"),
   pullCancel: (modelId: string) => invoke<void>("pull_cancel", { modelId }),
+  ggufFiles: (repoId: string) => invoke<GgufRepoFile[]>("gguf_files", { repoId }),
+  downloadGguf: (repoId: string, files: string[]) =>
+    invoke<void>("download_gguf", { repoId, files }),
   serversList: () => invoke<ServerListRow[]>("servers_list"),
   serversCreate: (input: CreateServerInput) => invoke<ServerDef>("servers_create", { input }),
   serversDelete: (id: string) => invoke<void>("servers_delete", { id }),
@@ -130,7 +134,6 @@ export const api = {
         | "default_quant"
         | "advanced_settings"
         | "minimize_to_tray"
-        | "resume_servers_on_launch"
         | "auto_restart_crashed"
         | "launch_at_login"
       >

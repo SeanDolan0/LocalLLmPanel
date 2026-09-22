@@ -1,7 +1,7 @@
 //! WSL command helpers: distro detection, sync run, and streaming runs
 //! (used by provisioning, model pulling, and server launchers).
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 
 use crate::state::GpuSnapshot;
@@ -271,18 +271,56 @@ pub fn run_script_stream(distro: &str, script: &str, mut on_line: impl FnMut(&st
     if let Some(out) = stdout {
         let tx_out = tx.clone();
         handles.push(std::thread::spawn(move || {
-            let reader = BufReader::new(out);
-            for line in reader.lines().flatten() {
-                let _ = tx_out.send((true, line));
+            let mut reader = BufReader::new(out);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                for &b in &chunk[..n] {
+                    if b == b'\n' || b == b'\r' {
+                        if !buf.is_empty() {
+                            let _ = tx_out.send((true, String::from_utf8_lossy(&buf).into_owned()));
+                            buf.clear();
+                        }
+                    } else {
+                        buf.push(b);
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                let _ = tx_out.send((true, String::from_utf8_lossy(&buf).into_owned()));
             }
         }));
     }
     if let Some(err) = stderr {
         let tx_err = tx.clone();
         handles.push(std::thread::spawn(move || {
-            let reader = BufReader::new(err);
-            for line in reader.lines().flatten() {
-                let _ = tx_err.send((false, line));
+            let mut reader = BufReader::new(err);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                for &b in &chunk[..n] {
+                    if b == b'\n' || b == b'\r' {
+                        if !buf.is_empty() {
+                            let _ = tx_err.send((false, String::from_utf8_lossy(&buf).into_owned()));
+                            buf.clear();
+                        }
+                    } else {
+                        buf.push(b);
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                let _ = tx_err.send((false, String::from_utf8_lossy(&buf).into_owned()));
             }
         }));
     }

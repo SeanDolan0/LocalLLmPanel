@@ -868,6 +868,50 @@ pub struct PullStatus {
     pub eta_seconds: Option<f64>, // estimated time remaining in seconds
 }
 
+/// Parse a progress line from a tqdm progress bar (hf download).
+/// Non-progress lines (e.g. "Resolving dependencies...") return None.
+///
+/// Formats (with progress bars enabled, streamed via '\r' separators):
+///   "Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"
+///   "Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"
+fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>)> {
+    // Look for percentage pattern like " 10%" or "100%"
+    let percent_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").ok()?;
+    let percent_match = percent_re.captures(line)?;
+    let percent = percent_match.get(1)?.as_str().parse::<f64>().ok()?;
+
+    // Look for speed pattern like "120MB/s", "1.5GB/s", "500KB/s", "1.5s/it"
+    let speed_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?B)/s|(\d+(?:\.\d+)?)\s*s/it").ok()?;
+    let speed_bps = speed_re.captures(line).and_then(|cap| {
+        if let Some(bytes_match) = cap.get(1) {
+            let val = bytes_match.as_str().parse::<f64>().ok()?;
+            let unit = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            let multiplier = match unit.to_uppercase().as_str() {
+                "B" => 1.0,
+                "KB" => 1024.0,
+                "MB" => 1024.0 * 1024.0,
+                "GB" => 1024.0 * 1024.0 * 1024.0,
+                "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+                _ => 1.0,
+            };
+            Some(val * multiplier)
+        } else {
+            // Items per second - can't convert to bytes without file sizes
+            None
+        }
+    });
+
+    // Look for ETA pattern like "[00:12<01:48" or "[00:30<00:30"
+    let eta_re = regex_lite::Regex::new(r"\[(?:\d{2}:\d{2})<(\d{2}):(\d{2})").ok()?;
+    let eta_seconds = eta_re.captures(line).and_then(|cap| {
+        let min = cap.get(1)?.as_str().parse::<f64>().ok()?;
+        let sec = cap.get(2)?.as_str().parse::<f64>().ok()?;
+        Some(min * 60.0 + sec)
+    });
+
+    Some((percent, speed_bps, eta_seconds))
+}
+
 /// Start a background `hf download <model_id>` in the venv, streaming progress
 /// lines to the `pull-progress` event. Idempotent per model.
 ///
@@ -915,52 +959,7 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
     };
     let mid = model_id.clone();
 
-    /// Parse a progress line from huggingface_hub download output.
-/// Expected formats (HF_HUB_DISABLE_TQDM=1):
-///   "Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"
-///   "Fetching 10 files:  50%|█████     | 2/4 [00:30<00:30,  1.5s/it]"
-///   "Resolving dependencies..."
-fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>)> {
-    // Look for percentage pattern like " 10%" or "100%"
-    let percent_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").ok()?;
-    let percent_match = percent_re.captures(line)?;
-    let percent = percent_match.get(1)?.as_str().parse::<f64>().ok()?;
-
-    // Look for speed pattern like "120MB/s", "1.5GB/s", "500KB/s", "1.5s/it"
-    let speed_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?B)/s|(\d+(?:\.\d+)?)\s*s/it").ok()?;
-    let speed_bps = speed_re.captures(line).and_then(|cap| {
-        if let Some(bytes_match) = cap.get(1) {
-            let val = bytes_match.as_str().parse::<f64>().ok()?;
-            let unit = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            let multiplier = match unit.to_uppercase().as_str() {
-                "B" => 1.0,
-                "KB" => 1024.0,
-                "MB" => 1024.0 * 1024.0,
-                "GB" => 1024.0 * 1024.0 * 1024.0,
-                "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
-                _ => 1.0,
-            };
-            Some(val * multiplier)
-        } else if let Some(it_match) = cap.get(3) {
-            // Items per second - can't convert to bytes without file sizes
-            None
-        } else {
-            None
-        }
-    });
-
-    // Look for ETA pattern like "[00:12<01:48" or "[00:30<00:30"
-    let eta_re = regex_lite::Regex::new(r"\[(?:\d{2}:\d{2})<(\d{2}):(\d{2})").ok()?;
-    let eta_seconds = eta_re.captures(line).and_then(|cap| {
-        let min = cap.get(1)?.as_str().parse::<f64>().ok()?;
-        let sec = cap.get(2)?.as_str().parse::<f64>().ok()?;
-        Some(min * 60.0 + sec)
-    });
-
-    Some((percent, speed_bps, eta_seconds))
-}
-
-std::thread::spawn(move || {
+    std::thread::spawn(move || {
         // Replace shell-quote hazards minimally; model ids are safe by construction.
         let maybe_cd = if venv.contains("~") || venv.starts_with('/') {
             format!("cd {}/.. && ", venv)
@@ -1295,6 +1294,19 @@ mod tests {
             "unsloth/Qwen3.8-27B-GGUF"
         );
         assert_eq!(clean_model_query("Qwen2.5"), "Qwen2.5");
+    }
+
+    #[test]
+    fn test_parse_progress_line_real_frames() {
+        assert_eq!(
+            parse_progress_line("Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"),
+            Some((50.0, None, Some(0.0)))
+        );
+        assert_eq!(
+            parse_progress_line("Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"),
+            Some((10.0, Some(120.0 * 1024.0 * 1024.0), Some(108.0)))
+        );
+        assert_eq!(parse_progress_line("Resolving dependencies..."), None);
     }
 
     #[test]

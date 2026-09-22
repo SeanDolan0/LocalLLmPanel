@@ -205,7 +205,6 @@ export interface Settings {
   measured: Record<string, MeasuredStats>;
   advanced_settings: AdvancedSettings;
   minimize_to_tray?: boolean;
-  resume_servers_on_launch?: boolean;
   auto_restart_crashed?: boolean;
   launch_at_login?: boolean;
   default_env?: Record<string, string>;
@@ -225,6 +224,12 @@ export interface Settings {
       dir?: string;
     };
   };
+}
+
+export interface GgufRepoFile {
+  path: string;
+  size_bytes: number;
+  is_mmproj: boolean;
 }
 
 export interface PullStatus {
@@ -531,7 +536,6 @@ export interface ConfigExportPackage {
   memory_settings: MemorySettings;
   advanced_settings: AdvancedSettings;
   minimize_to_tray: boolean;
-  resume_servers_on_launch: boolean;
   auto_restart_crashed: boolean;
   launch_at_login: boolean;
 }

@@ -101,13 +101,6 @@ pub fn run() {
                 });
             }
 
-            let app_handle_for_resume = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let state: tauri::State<Arc<AppState>> = app_handle_for_resume.state();
-                server::resume_servers_if_configured(&state, Some(&app_handle_for_resume)).await;
-            });
-
             gateway::spawn_supervisor(app.handle().clone());
 
             Ok(())
@@ -128,6 +121,7 @@ pub fn run() {
             commands::pull_cancel,
             commands::servers_list,
             commands::servers_create,
+            commands::servers_update,
             commands::servers_delete,
             commands::servers_start,
             commands::servers_stop,

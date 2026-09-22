@@ -557,6 +557,7 @@ mod tests {
                 max_model_len: None,
                 quant: "fp16".to_string(),
                 served_model_name: served.map(|s| s.to_string()),
+                llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
                 enforce_eager: true,
                 params_b: None,
                 swap_space_gb: None,

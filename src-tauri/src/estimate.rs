@@ -642,7 +642,7 @@ mod tests {
         let full_bpt = kv_bytes_per_token(64, 8, 128);
         assert_eq!(full_bpt, 262144.0);
         // Hybrid is 1/4 of full
-        assert_eq!(bpt * 4, full_bpt);
+        assert_eq!(bpt * 4.0, full_bpt);
     }
 
     #[test]

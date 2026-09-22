@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 src-tauri/target/
+src-tauri/crates/*/target/
 dist/
 dist-release/
 # Logs

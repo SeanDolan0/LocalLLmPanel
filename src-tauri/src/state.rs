@@ -475,8 +475,6 @@ pub struct PersistedConfig {
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
     #[serde(default = "default_true")]
-    pub resume_servers_on_launch: bool,
-    #[serde(default = "default_true")]
     pub auto_restart_crashed: bool,
     #[serde(default)]
     pub launch_at_login: bool,
@@ -543,7 +541,6 @@ impl Default for PersistedConfig {
             memory_settings: MemorySettings::default(),
             advanced_settings: AdvancedSettings::default(),
             minimize_to_tray: true,
-            resume_servers_on_launch: true,
             auto_restart_crashed: true,
             launch_at_login: false,
             imported_local_models: Vec::new(),
@@ -691,7 +688,6 @@ pub struct ConfigExportPackage {
     pub memory_settings: MemorySettings,
     pub advanced_settings: AdvancedSettings,
     pub minimize_to_tray: bool,
-    pub resume_servers_on_launch: bool,
     pub auto_restart_crashed: bool,
     pub launch_at_login: bool,
 }
@@ -713,7 +709,6 @@ impl ConfigExportPackage {
             memory_settings: cfg.memory_settings.clone(),
             advanced_settings: cfg.advanced_settings.clone(),
             minimize_to_tray: cfg.minimize_to_tray,
-            resume_servers_on_launch: cfg.resume_servers_on_launch,
             auto_restart_crashed: cfg.auto_restart_crashed,
             launch_at_login: cfg.launch_at_login,
         }
@@ -993,6 +988,7 @@ mod tests {
             max_model_len: Some(4096),
             quant: "fp16".into(),
             served_model_name: None,
+            llamacpp_channel: LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,
@@ -1311,7 +1307,6 @@ mod tests {
         use super::{PersistedConfig, ServerDef};
         let mut cfg = PersistedConfig::default();
         assert!(cfg.minimize_to_tray);
-        assert!(cfg.resume_servers_on_launch);
         assert!(cfg.auto_restart_crashed);
         assert!(!cfg.launch_at_login);
 
@@ -1328,6 +1323,7 @@ mod tests {
             max_model_len: None,
             quant: "fp16".into(),
             served_model_name: None,
+            llamacpp_channel: LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,
@@ -1378,6 +1374,7 @@ mod tests {
             max_model_len: Some(8192),
             quant: "fp8".into(),
             served_model_name: Some("qwen-7b".into()),
+            llamacpp_channel: LlamaCppChannel::Upstream,
             enforce_eager: false,
             params_b: Some(7.6),
             swap_space_gb: Some(4),

@@ -3,7 +3,6 @@
 use anyhow::{anyhow, Context, Result};
 use regex_lite::Regex;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -63,7 +62,7 @@ impl ChannelConfig {
             LlamaCppChannel::Prism => ChannelConfig {
                 api_url: PRISM_RELEASES_API,
                 page_url: PRISM_RELEASES_PAGE,
-                parse_main_regex: Regex::new(r"^llama-prism-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
+                parse_main_regex: Regex::new(r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
                 parse_runtime_regex: Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
                 main_prefix: "llama-prism-".to_string(),
             },
@@ -127,93 +126,13 @@ pub fn choose_assets(assets: &[Asset]) -> Result<(Asset, Option<Asset>)> {
     Ok((selection.candidate.main, selection.candidate.runtime))
 }
 
-fn parse_main(name: &str) -> Option<CudaVersion> {
-    let re = Regex::new(r"^llama-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").ok()?;
-    let captures = re.captures(name)?;
-    Some(CudaVersion(
-        captures.get(1)?.as_str().parse().ok()?,
-        captures.get(2)?.as_str().parse().ok()?,
-    ))
-}
-
-fn parse_runtime(name: &str) -> Option<CudaVersion> {
-    let re = Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").ok()?;
-    let captures = re.captures(name)?;
-    Some(CudaVersion(
-        captures.get(1)?.as_str().parse().ok()?,
-        captures.get(2)?.as_str().parse().ok()?,
-    ))
-}
-
-fn diagnostic(assets: &[Asset], driver: Option<CudaVersion>) -> String {
-    let mut lines = vec![format!(
-        "No suitable Windows x64 CUDA archive found (driver CUDA: {}).",
-        driver.map_or_else(|| "unknown".into(), |v| v.to_string())
-    )];
-    for asset in assets
-        .iter()
-        .filter(|a| a.name.to_ascii_lowercase().contains("win"))
-    {
-        let reason = if asset.name.to_ascii_lowercase().contains("arm64") {
-            "rejected: arm64"
-        } else if parse_main(&asset.name).is_some() {
-            "rejected: CUDA version is newer than the driver"
-        } else if !asset.name.to_ascii_lowercase().contains("cuda") {
-            "rejected: non-CUDA variant"
-        } else {
-            "rejected: not an exact Windows x64 CUDA archive"
-        };
-        lines.push(format!(
-            "  {} ({}; {} bytes total assets)",
-            asset.name,
-            reason,
-            assets.len()
-        ));
-    }
-    lines.push(format!("Releases: {}", UPSTREAM_RELEASES_PAGE));
-    lines.join("\n")
-}
-
 fn choose_assets_for_machine(
     channel: LlamaCppChannel,
     assets: &[Asset],
     driver: Option<CudaVersion>,
     compute_cap: Option<(u32, u32)>,
 ) -> Result<Selection> {
-    let mut mains: Vec<(CudaVersion, &Asset)> = assets
-        .iter()
-        .filter_map(|asset| parse_main(&asset.name).map(|version| (version, asset)))
-        .collect();
-    mains.sort_by(|a, b| b.0.cmp(&a.0));
-    let usable = mains
-        .iter()
-        .filter(|(version, _)| driver.map_or(true, |max| *version <= max));
-    let (version, main) = usable
-        .clone()
-        .find(|(version, _)| {
-            compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version >= CudaVersion(12, 8)
-        })
-        .or_else(|| usable.clone().next())
-        .ok_or_else(|| anyhow!(diagnostic(assets, driver)))?;
-    let runtime = assets
-        .iter()
-        .find(|asset| parse_runtime(&asset.name) == Some(*version))
-        .cloned();
-    let warning = if compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version < CudaVersion(12, 8)
-    {
-        Some(format!("CUDA {} predates Blackwell native support; it may be slow or fail. Update the NVIDIA driver to use CUDA 12.8 or newer.", version))
-    } else {
-        None
-    };
-    Ok(Selection {
-        tag: parse_main_tag(&main.name, channel),
-        candidate: CudaCandidate {
-            main: (*main).clone(),
-            runtime,
-            version: *version,
-        },
-        warning,
-    })
+    choose_assets_for_machine_channel(channel, assets, driver, compute_cap)
 }
 
 fn parse_main_tag(name: &str, channel: LlamaCppChannel) -> String {
@@ -325,7 +244,6 @@ pub fn install_for_channel(
     let tag = selection.tag;
     let main = selection.candidate.main;
     let runtime = selection.candidate.runtime;
-    let config = ChannelConfig::for_channel(channel);
     let install_dir = destination.join(format!("{channel:?}-{}-cuda-{}", tag, selection.candidate.version).to_lowercase());
     std::fs::create_dir_all(&install_dir)?;
     let temp = destination.join(format!(".llamacpp-{channel:?}-{}.zip", std::process::id()).to_lowercase());
@@ -375,8 +293,14 @@ pub fn executable_from_config_channel(cfg: &crate::state::PersistedConfig, chann
         .as_ref()
         .map(PathBuf::from)
         .filter(|p| p.is_file())
-        .or_else(|| find_file(Path::new(&channel_config.dir), "llama-server.exe"))
-        .or_else(|| find_on_path("llama-server.exe"))
+        .or_else(|| find_channel_file(Path::new(&channel_config.dir), channel, "llama-server.exe"))
+        .or_else(|| {
+            if channel == LlamaCppChannel::Upstream {
+                find_on_path("llama-server.exe")
+            } else {
+                None
+            }
+        })
 }
 
 pub fn executable_from_config(cfg: &crate::state::PersistedConfig) -> Option<PathBuf> {
@@ -430,6 +354,34 @@ fn expand_archive(zip: &Path, destination: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn find_channel_file(root: &Path, channel: LlamaCppChannel, name: &str) -> Option<PathBuf> {
+    let direct = root.join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let dir_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let matches_channel = match channel {
+                LlamaCppChannel::Prism => dir_name.contains("prism"),
+                LlamaCppChannel::Upstream => !dir_name.contains("prism"),
+            };
+            if matches_channel {
+                if let Some(found) = find_file(&path, name) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
@@ -764,9 +716,9 @@ mod tests {
     use super::{
         choose_assets, choose_assets_for_machine, executable_from_config, expand_archive,
         github_client, github_releases_with_info, github_request, hidden_command, parse_devices,
-        select_release, Asset, CudaVersion, Release, RELEASES_API,
+        select_release_for_channel, Asset, CudaVersion, Release, UPSTREAM_RELEASES_API,
     };
-    use crate::state::PersistedConfig;
+    use crate::state::{LlamaCppChannel, PersistedConfig};
 
     #[test]
     fn detects_llama_server_from_path_when_not_configured() {
@@ -788,7 +740,12 @@ mod tests {
 
         let mut cfg = PersistedConfig::default();
         cfg.llamacpp_executable = None;
-        cfg.llamacpp_dir = root.join("not-configured").to_string_lossy().into_owned();
+        let not_configured = root.join("not-configured").to_string_lossy().into_owned();
+        cfg.llamacpp_dir = not_configured.clone();
+        if let Some(ch) = cfg.llamacpp_channels.get_mut(&LlamaCppChannel::Upstream) {
+            ch.dir = not_configured;
+            ch.executable = None;
+        }
 
         assert_eq!(executable_from_config(&cfg), Some(executable.clone()));
 
@@ -883,7 +840,7 @@ mod tests {
             browser_download_url: "old".into(),
         }];
         let selected =
-            choose_assets_for_machine(&assets, Some(CudaVersion(12, 4)), Some((12, 0))).unwrap();
+            choose_assets_for_machine(LlamaCppChannel::Upstream, &assets, Some(CudaVersion(12, 4)), Some((12, 0))).unwrap();
         assert!(selected.warning.is_some());
     }
 
@@ -904,15 +861,31 @@ mod tests {
             },
         ];
         let selected =
-            choose_assets_for_machine(&assets, Some(CudaVersion(13, 3)), Some((8, 9))).unwrap();
+            choose_assets_for_machine(LlamaCppChannel::Upstream, &assets, Some(CudaVersion(13, 3)), Some((8, 9))).unwrap();
         assert_eq!(selected.candidate.version, CudaVersion(13, 3));
         assert_eq!(
             selected.candidate.runtime.unwrap().browser_download_url,
             "rt"
         );
-        assert!(CudaVersion(12, 4) < CudaVersion(12, 8));
-        assert!(CudaVersion(12, 8) < CudaVersion(13, 3));
-        assert!(CudaVersion(13, 3) < CudaVersion(13, 4));
+    }
+
+    #[test]
+    fn parses_prism_release_assets_with_commit_hash() {
+        let assets = vec![
+            Asset {
+                name: "llama-prism-b10709-9a9394a-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "https://example.com/prism-main.zip".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "https://example.com/prism-rt.zip".into(),
+            },
+        ];
+        let selected =
+            choose_assets_for_machine(LlamaCppChannel::Prism, &assets, Some(CudaVersion(13, 3)), Some((12, 0))).unwrap();
+        assert_eq!(selected.candidate.version, CudaVersion(13, 3));
+        assert_eq!(selected.candidate.main.name, "llama-prism-b10709-9a9394a-bin-win-cuda-13.3-x64.zip");
+        assert_eq!(selected.tag, "b10709-9a9394a");
     }
 
     #[test]
@@ -935,13 +908,13 @@ mod tests {
     #[test]
     fn github_requests_never_inherit_hf_tokens() {
         let client = github_client().unwrap();
-        let anonymous = github_request(&client, RELEASES_API, None).build().unwrap();
+        let anonymous = github_request(&client, UPSTREAM_RELEASES_API, None).build().unwrap();
         assert!(anonymous.headers().get("Authorization").is_none());
-        let blank = github_request(&client, RELEASES_API, Some(" \t "))
+        let blank = github_request(&client, UPSTREAM_RELEASES_API, Some(" \t "))
             .build()
             .unwrap();
         assert!(blank.headers().get("Authorization").is_none());
-        let token = github_request(&client, RELEASES_API, Some(" test-token "))
+        let token = github_request(&client, UPSTREAM_RELEASES_API, Some(" test-token "))
             .build()
             .unwrap();
         assert!(token.headers().contains_key("Authorization"));
@@ -1040,7 +1013,7 @@ mod tests {
                 }],
             },
         ];
-        let selection = select_release(&releases, Some(CudaVersion(13, 3)), None).unwrap();
+        let selection = select_release_for_channel(LlamaCppChannel::Upstream, &releases, Some(CudaVersion(13, 3)), None).unwrap();
         assert_eq!(selection.tag, "b1");
         assert!(selection.warning.unwrap().contains("b2"));
     }
@@ -1052,7 +1025,7 @@ mod tests {
             .user_agent("LocalLLmPanel/1.0")
             .build()
             .unwrap()
-            .get(RELEASES_API)
+            .get(UPSTREAM_RELEASES_API)
             .send()
             .unwrap()
             .error_for_status()
@@ -1062,7 +1035,7 @@ mod tests {
         assert!(releases
             .iter()
             .flat_map(|release| release.assets.iter())
-            .any(|asset| super::parse_main(&asset.name).is_some()));
+            .any(|asset| super::parse_main_channel(&asset.name, super::LlamaCppChannel::Upstream).is_some()));
     }
 
     #[test]

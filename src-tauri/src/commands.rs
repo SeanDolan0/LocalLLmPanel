@@ -1193,13 +1193,19 @@ pub async fn servers_create(
 }
 
 #[tauri::command]
-pub fn servers_delete(
+pub async fn servers_delete(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    server::stop_server(&st, Some(&app), &id).ok();
+    let st2 = st.clone();
+    let id2 = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        server::stop_server(&st2, Some(&app), &id2).ok();
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     st.server_metrics.lock().unwrap().remove(&id);
     let mut cfg = st.config.lock().unwrap();
     cfg.servers.retain(|s| s.id != id);
@@ -1218,23 +1224,30 @@ pub fn servers_start(
 }
 
 #[tauri::command]
-pub fn servers_stop(
+pub async fn servers_stop(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    server::stop_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || server::stop_server(&st, Some(&app), &id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn servers_restart(
+pub async fn servers_restart(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(serde::Deserialize)]
@@ -1279,13 +1292,17 @@ pub fn servers_update(
     let existing_ports: Vec<u16> = cfg.servers.iter().filter(|s| s.id != id).map(|s| s.port).collect();
     let server = &mut cfg.servers[idx];
 
+    if let Some(v) = input.backend { server.backend = v; }
+    if let Some(v) = input.llamacpp_channel { server.llamacpp_channel = v; }
     if let Some(v) = input.name { server.name = v; }
     if let Some(v) = input.model_id { server.model_id = v; }
     if let Some(v) = input.task { server.task = v; }
     if let Some(v) = input.port {
-        // verify port is free and not used by other servers
+        // verify port is free and not used by other servers, unless unchanged (a running server owns it)
         if existing_ports.contains(&v) { return Err(format!("port {v} already used by another server")); }
-        if std::net::TcpListener::bind(("127.0.0.1", v)).is_err() { return Err(format!("port {v} is in use")); }
+        if v != server.port && std::net::TcpListener::bind(("127.0.0.1", v)).is_err() {
+            return Err(format!("port {v} is in use"));
+        }
         server.port = v;
     }
     if let Some(v) = input.gpu_mem_util { server.gpu_mem_util = v; }
@@ -1595,7 +1612,6 @@ pub struct SettingsPatch {
     pub default_quant: Option<String>,
     pub advanced_settings: Option<crate::state::AdvancedSettings>,
     pub minimize_to_tray: Option<bool>,
-    pub resume_servers_on_launch: Option<bool>,
     pub auto_restart_crashed: Option<bool>,
     pub launch_at_login: Option<bool>,
 }
@@ -1649,9 +1665,6 @@ pub fn settings_set(
     }
     if let Some(m) = patch.minimize_to_tray {
         cfg.minimize_to_tray = m;
-    }
-    if let Some(r) = patch.resume_servers_on_launch {
-        cfg.resume_servers_on_launch = r;
     }
     if let Some(a) = patch.auto_restart_crashed {
         cfg.auto_restart_crashed = a;
@@ -1763,7 +1776,6 @@ pub fn config_import(
     cfg.memory_settings = pkg.memory_settings;
     cfg.advanced_settings = pkg.advanced_settings;
     cfg.minimize_to_tray = pkg.minimize_to_tray;
-    cfg.resume_servers_on_launch = pkg.resume_servers_on_launch;
     cfg.auto_restart_crashed = pkg.auto_restart_crashed;
     cfg.launch_at_login = pkg.launch_at_login;
 
@@ -2556,6 +2568,7 @@ pub fn wsl_distros() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LlamaCppChannel;
 
     #[test]
     fn tool_call_response_length_is_not_reported_as_template_failure() {

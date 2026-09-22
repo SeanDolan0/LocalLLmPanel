@@ -318,8 +318,8 @@ export default function Servers() {
           initialGpuUtil={prefillGpuUtil}
           initialServed={prefillServed}
           initialTask={prefillTask}
-          initialGlobalDefaults={{}}
-          initialEnv={{}}
+          initialGlobalDefaults={editingServer?.env ?? {}}
+          initialEnv={editingServer?.env ?? {}}
           initialServer={editingServer}
           onDone={(s) => {
             setShowNew(false);
@@ -370,6 +370,7 @@ export default function Servers() {
                     <span>·</span>
                     <span>{quantLabel(r.def.quant)}</span>
                     {r.def.max_model_len ? <span>· ctx {fmtNum(r.def.max_model_len)}</span> : null}
+                    {r.def.backend === "llamacpp" && r.def.ctx_size ? <span>· ctx {fmtNum(r.def.ctx_size)}</span> : null}
                     {r.def.params_b ? <span>· ~{r.def.params_b.toFixed(2)}B</span> : null}
                     {r.def.swap_space_gb != null && r.def.swap_space_gb > 0 && (
                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-950/80 text-cyan-300 border border-cyan-800">
@@ -762,6 +763,19 @@ function NewServerForm({
       setLlamaCppChannel(initialServer.llamacpp_channel === "prism" ? "prism" : "upstream");
       setCacheTypeK(initialServer.cache_type_k);
       setCacheTypeV(initialServer.cache_type_v);
+      if (initialServer.ctx_size) setCtxSize(String(initialServer.ctx_size));
+      if (initialServer.n_gpu_layers) setNGpuLayers(String(initialServer.n_gpu_layers));
+      if (initialServer.n_cpu_moe) setNCpuMoe(String(initialServer.n_cpu_moe));
+      setFit(initialServer.fit ?? true);
+      if (initialServer.fit_target) setFitTarget(String(initialServer.fit_target));
+      if (initialServer.device) setDevice(initialServer.device);
+      if (initialServer.api_key) setApiKey(initialServer.api_key);
+      if (initialServer.log_verbosity !== undefined && initialServer.log_verbosity !== null) {
+        setLogVerbosity(String(initialServer.log_verbosity));
+      }
+      setFlashAttn(initialServer.flash_attn);
+      setJinja(initialServer.jinja);
+      if (initialServer.mmproj_path) setMmprojPath(initialServer.mmproj_path);
     }
   }, [
     initialModelId,
@@ -1109,7 +1123,7 @@ function NewServerForm({
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
         <Button onClick={submit} disabled={creating || !modelId.trim()}>
-          {creating ? <Spinner label="creating…" /> : "Create"}
+          {creating ? <Spinner label={isEditing ? "saving…" : "creating…"} /> : isEditing ? "Save" : "Create"}
         </Button>
       </div>
     </Card>

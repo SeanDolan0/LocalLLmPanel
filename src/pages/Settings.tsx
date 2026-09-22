@@ -229,7 +229,6 @@ export default function Settings() {
         default_quant: s.default_quant,
         advanced_settings: s.advanced_settings,
         minimize_to_tray: s.minimize_to_tray,
-        resume_servers_on_launch: s.resume_servers_on_launch,
         auto_restart_crashed: s.auto_restart_crashed,
         launch_at_login: s.launch_at_login,
       });
@@ -327,23 +326,6 @@ export default function Settings() {
             </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               Starts LocalLLM Panel automatically when signing into Windows (via HKCU Run registry).
-            </div>
-          </div>
-        </label>
-
-        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">
-          <input
-            type="checkbox"
-            checked={!!s.resume_servers_on_launch}
-            onChange={(e) => setS({ ...s, resume_servers_on_launch: e.target.checked })}
-            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
-          />
-          <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-200">
-              Auto-Resume Running Servers
-            </div>
-            <div className="text-xs text-slate-400 leading-relaxed">
-              Automatically boots up model servers that were actively running when the panel was closed.
             </div>
           </div>
         </label>
