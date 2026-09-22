@@ -1,6 +1,6 @@
 [package]
 name = "llm-panel"
-version = "1.7.0"
+version = "1.7.1"
 description = "Local vLLM Panel — manage vLLM servers inside WSL2"
 authors = ["Local LLM Panel"]
 edition = "2021"
@@ -20,9 +20,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "gzip", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking", "gzip", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net", "io-util"] }
 dirs = "6"
 anyhow = "1"
