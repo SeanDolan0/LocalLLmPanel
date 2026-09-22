@@ -17,6 +17,8 @@ pub struct GgufRepoFile {
     pub path: String,
     pub size_bytes: u64,
     pub is_mmproj: bool,
+    /// Quant label parsed from the filename (e.g. "Q4_K_M"); None for non-quant helpers.
+    pub quant: Option<String>,
 }
 
 pub async fn list_gguf_repo_files(
@@ -46,6 +48,7 @@ pub async fn list_gguf_repo_files(
             Some(GgufRepoFile {
                 is_mmproj: path.to_ascii_lowercase().starts_with("mmproj"),
                 size_bytes: v.get("size").and_then(Value::as_u64).unwrap_or(0),
+                quant: parse_gguf_quant_label(&path),
                 path,
             })
         })
@@ -866,6 +869,8 @@ pub struct PullStatus {
     pub percent: Option<f64>,
     pub speed_bps: Option<f64>, // bytes per second
     pub eta_seconds: Option<f64>, // estimated time remaining in seconds
+    pub bytes_downloaded: Option<u64>, // bytes on disk for current file
+    pub bytes_total: Option<u64>, // total bytes for current file
 }
 
 /// Parse a progress line from a tqdm progress bar (hf download).
@@ -874,7 +879,7 @@ pub struct PullStatus {
 /// Formats (with progress bars enabled, streamed via '\r' separators):
 ///   "Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"
 ///   "Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"
-fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>)> {
+fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>, Option<u64>, Option<u64>)> {
     // Look for percentage pattern like " 10%" or "100%"
     let percent_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").ok()?;
     let percent_match = percent_re.captures(line)?;
@@ -909,7 +914,33 @@ fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>)> {
         Some(min * 60.0 + sec)
     });
 
-    Some((percent, speed_bps, eta_seconds))
+    // Look for downloaded/total bytes like "500M/5.3G" or "12.0k/1.0k"
+    let bytes_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?)(?:B)?\s*/\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:B)?").ok()?;
+    let (bytes_downloaded, bytes_total) = bytes_re
+        .captures(line)
+        .and_then(|cap| {
+            let mult = |s: &str| match s.to_uppercase().as_str() {
+                "K" => Some(1024u64),
+                "M" => Some(1024u64 * 1024),
+                "G" => Some(1024u64 * 1024 * 1024),
+                "T" => Some(1024u64 * 1024 * 1024 * 1024),
+                "" => Some(1u64),
+                _ => None,
+            };
+            let dl = cap.get(1)?.as_str().parse::<f64>().ok()?;
+            let dl_u = mult(cap.get(2)?.as_str())?;
+            let tot = cap.get(3)?.as_str().parse::<f64>().ok()?;
+            let tot_u = mult(cap.get(4)?.as_str())?;
+            // Skip bare numeric ratios like "5/10" (file counts, no byte units)
+            if dl_u == 1 && tot_u == 1 {
+                return None;
+            }
+            Some(((dl * dl_u as f64) as u64, (tot * tot_u as f64) as u64))
+        })
+        .map(|(dl, tot)| (Some(dl), Some(tot)))
+        .unwrap_or((None, None));
+
+    Some((percent, speed_bps, eta_seconds, bytes_downloaded, bytes_total))
 }
 
 /// Start a background `hf download <model_id>` in the venv, streaming progress
@@ -973,7 +1004,8 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
         let model_ev = model_id.clone();
         let app_ev = app.clone();
         let on_line = move |line: &str| {
-            let (percent, speed_bps, eta_seconds) = parse_progress_line(line).unwrap_or((0.0, None, None));
+            let (percent, speed_bps, eta_seconds, bytes_downloaded, bytes_total) =
+                parse_progress_line(line).unwrap_or((0.0, None, None, None, None));
             let _ = app_ev.emit(
                 "pull-progress",
                 PullStatus {
@@ -983,6 +1015,8 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
                     percent: Some(percent),
                     speed_bps,
                     eta_seconds,
+                    bytes_downloaded,
+                    bytes_total,
                 },
             );
         };
@@ -1031,6 +1065,8 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
                 percent: if state_label == "complete" { Some(100.0) } else { None },
                 speed_bps: None,
                 eta_seconds: None,
+                bytes_downloaded: None,
+                bytes_total: None,
             },
         );
         let mut pulling = pulling_arc.lock().unwrap();
@@ -1300,11 +1336,17 @@ mod tests {
     fn test_parse_progress_line_real_frames() {
         assert_eq!(
             parse_progress_line("Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"),
-            Some((50.0, None, Some(0.0)))
+            Some((50.0, None, Some(0.0), None, None))
         );
         assert_eq!(
             parse_progress_line("Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"),
-            Some((10.0, Some(120.0 * 1024.0 * 1024.0), Some(108.0)))
+            Some((
+                10.0,
+                Some(120.0 * 1024.0 * 1024.0),
+                Some(108.0),
+                Some((500.0 * 1024.0 * 1024.0) as u64),
+                Some((5.3 * 1024.0 * 1024.0 * 1024.0) as u64)
+            ))
         );
         assert_eq!(parse_progress_line("Resolving dependencies..."), None);
     }

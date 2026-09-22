@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, events, fmtNum, fmtTransferRate } from "../api";
+import { api, events, fmtNum } from "../api";
 import { DownloadProgress } from "./Search";
 import { Badge, Button, Card, CardTitle, Spinner, inputCls } from "../ui";
 import type { LibraryEntry, PullStatus } from "../types";
@@ -102,7 +102,7 @@ export default function Library() {
     setIsDeleting(true);
     setErrorMsg(null);
     try {
-      await api.libraryRemove(deleteTarget.model_id);
+      await api.libraryRemove(deleteTarget.model_id, deleteTarget.model_path);
       setDeleteTarget(null);
       refresh();
     } catch (err) {
@@ -182,21 +182,8 @@ export default function Library() {
                     <span className="text-indigo-200 font-medium">{m}</span>
                     {p.file ? <span className="ml-2 text-slate-400">({p.file})</span> : null}
                   </div>
-                  <span className="shrink-0 text-slate-300">{fmtTransferRate(p.speed_bps)}</span>
                 </div>
                 <DownloadProgress pullState={p} onCancel={() => handleCancelPull(m)} />
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-slate-500">
-                    {p.percent == null ? "Downloading…" : `${p.percent.toFixed(1)}%`}
-                  </span>
-                  <Button
-                    variant="danger"
-                    className="text-xs px-2.5 py-1 shrink-0"
-                    onClick={() => handleCancelPull(m)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
               </div>
             ))}
         </div>
@@ -324,7 +311,7 @@ export default function Library() {
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-edge/60 flex items-center justify-between gap-2">
-                  {e.is_local ? (
+                  {e.is_local && !e.model_path ? (
                     <span
                       className="text-[11px] text-slate-500"
                       title="Managed on disk outside the HF cache — not removed by Delete"
@@ -464,7 +451,9 @@ export default function Library() {
               </div>
               <div>
                 <h3 className="text-base font-semibold text-slate-100">Delete Model from Disk?</h3>
-                <p className="text-xs text-slate-400">Permanent deletion from local WSL cache</p>
+                <p className="text-xs text-slate-400">
+                  {deleteTarget.model_path ? "Permanent deletion from Windows GGUF library" : "Permanent deletion from local WSL cache"}
+                </p>
               </div>
             </div>
 
@@ -485,7 +474,9 @@ export default function Library() {
                 </div>
               </div>
               <p className="text-xs text-slate-500">
-                This frees disk space in your WSL virtual hard disk. If needed later, vLLM will automatically re-download it.
+                {deleteTarget.model_path
+                  ? "This frees space on your Windows disk. If needed later, re-download the GGUF from Search."
+                  : "This frees disk space in your WSL virtual hard disk. If needed later, vLLM will automatically re-download it."}
               </p>
             </div>
 
@@ -511,7 +502,7 @@ export default function Library() {
                 onClick={handleDelete}
                 disabled={isDeleting}
               >
-                {isDeleting ? <Spinner label="Deleting from WSL…" /> : "Yes, Delete from Disk"}
+                {isDeleting ? <Spinner label="Deleting…" /> : "Yes, Delete from Disk"}
               </Button>
             </div>
           </div>

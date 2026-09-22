@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   api,
   events,
+  fmtBytes,
   fmtContext,
   fmtNum,
   fmtTransferRate,
@@ -171,10 +172,11 @@ function HfLink({
 interface PullStateButtonProps {
   pullState: PullStatus | null | undefined;
   targetId: string;
-  isInstalled: boolean;
-  onPull: (id: string) => void;
+  isInstalled?: boolean;
+  onPull: (id: string, quant?: string) => void;
   onCancelPull?: (id: string) => void;
   showDownloadProgress?: boolean;
+  quant?: string;
   pullButtonClassName?: string;
   cancelButtonClassName?: string;
   retryButtonClassName?: string;
@@ -188,6 +190,7 @@ function PullStateButton({
   onPull,
   onCancelPull,
   showDownloadProgress = false,
+  quant,
   pullButtonClassName = "text-xs px-2.5 py-1",
   cancelButtonClassName = "text-xs px-2 py-0.5",
   retryButtonClassName = "text-xs px-2 py-0.5",
@@ -221,7 +224,7 @@ function PullStateButton({
           <Button
             variant="ghost"
             className={retryButtonClassName}
-            onClick={() => onPull(targetId)}
+            onClick={() => onPull(targetId, quant)}
             title="Retry download"
           >
             Retry
@@ -241,7 +244,7 @@ function PullStateButton({
     <Button
       variant="ghost"
       className={pullButtonClassName}
-      onClick={() => onPull(targetId)}
+      onClick={() => onPull(targetId, quant)}
       title="Download to local cache"
     >
       Pull
@@ -396,6 +399,8 @@ export function DownloadProgress({ pullState, onCancel }: DownloadProgressProps)
   const percent = pullState.percent ?? 0;
   const speed = pullState.speed_bps;
   const eta = pullState.eta_seconds;
+  const downloaded = pullState.bytes_downloaded;
+  const total = pullState.bytes_total;
 
   return (
     <div className="flex flex-col gap-1 w-full min-w-0">
@@ -409,6 +414,17 @@ export function DownloadProgress({ pullState, onCancel }: DownloadProgressProps)
         <span className="font-mono text-xs text-slate-300 w-10 text-right">{percent.toFixed(0)}%</span>
       </div>
       <div className="flex items-center gap-3 text-[10px] text-slate-400">
+        {downloaded != null && total != null && total > 0 && (
+          <span className="flex items-center gap-1 font-mono" title="Downloaded / total">
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-6l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            <span>{fmtBytes(downloaded)} / {fmtBytes(total)}</span>
+            <span className="text-slate-500">
+              ({fmtBytes(total - downloaded)} left)
+            </span>
+          </span>
+        )}
         <span className="flex items-center gap-1">
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -594,15 +610,21 @@ export default function Search() {
     return ids;
   }, [recommended, results, selectedModel]);
 
-  const pull = (repoId: string) => {
+  const pull = (repoId: string, quant?: string) => {
     if (isModelInstalled(repoId)) return;
     if (ggufRepoIds.has(repoId.toLowerCase())) {
       api
         .ggufFiles(repoId)
         .then((files) => {
-          const targets = files.filter((f) => !f.is_mmproj);
+          const targets = files.filter(
+            (f) => !f.is_mmproj && (!quant || f.quant === quant)
+          );
           if (!targets.length) {
-            throw new Error(`No GGUF files found in ${repoId}`);
+            throw new Error(
+              quant
+                ? `No GGUF files found for ${quant} in ${repoId}`
+                : `No GGUF files found in ${repoId}`
+            );
           }
           return api.downloadGguf(repoId, targets.map((f) => f.path));
         })
@@ -1019,6 +1041,7 @@ export default function Search() {
                             <PullStateButton
                               pullState={pullState}
                               targetId={variant?.repo_id || m.id}
+                              quant={variant?.format === "GGUF" ? variant.label : undefined}
                               isInstalled={isModelInstalled(variant?.repo_id || m.id) || isModelInstalled(m.id)}
                               onPull={pull}
                               onCancelPull={cancelPull}
@@ -1040,7 +1063,7 @@ export default function Search() {
 
       {/* Live Pulls Indicator Banner */}
       {Object.entries(pulls).filter(([, p]) => p.state === "downloading").length > 0 && (
-        <div className="space-y-1 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
+        <div className="space-y-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
           {Object.entries(pulls)
             .filter(([, p]) => p.state === "downloading")
             .map(([m, p]) => (
@@ -1049,27 +1072,8 @@ export default function Search() {
                   <div className="truncate">
                     <span className="text-indigo-300 font-medium">{m}</span>: {p.file || "Downloading..."}
                   </div>
-                  <span className="shrink-0 text-slate-300">{fmtTransferRate(p.speed_bps)}</span>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
-                  <div
-                    className={`h-full rounded-full bg-indigo-400 transition-all ${p.percent == null ? "w-1/3 animate-pulse" : ""}`}
-                    style={p.percent == null ? undefined : { width: `${Math.max(0, Math.min(100, p.percent))}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-slate-500">
-                    {p.percent == null ? "Downloading…" : `${p.percent.toFixed(1)}%`}
-                  </span>
-                  <Button
-                    variant="danger"
-                    className="text-xs px-2.5 py-1 shrink-0"
-                    onClick={() => cancelPull(m)}
-                    title="Cancel download"
-                  >
-                    Cancel
-                  </Button>
-                </div>
+                <DownloadProgress pullState={p} onCancel={() => cancelPull(m)} />
               </div>
             ))}
         </div>
@@ -1146,7 +1150,7 @@ function ModelCard({
   model: ModelWithFit;
   onSelect: () => void;
   onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
-  onPull: (repoId: string) => void;
+  onPull: (repoId: string, quant?: string) => void;
   onCancelPull?: (repoId: string) => void;
   pullState?: PullStatus;
   isInstalled?: boolean;
@@ -1402,6 +1406,7 @@ function ModelCard({
           <PullStateButton
             pullState={pullState}
             targetId={variant?.repo_id || model.id}
+            quant={variant?.format === "GGUF" ? variant.label : undefined}
             isInstalled={isInstalled ?? false}
             onPull={onPull}
             onCancelPull={onCancelPull}
@@ -1432,7 +1437,7 @@ function ModelDetailModal({
   model: ModelWithFit;
   onClose: () => void;
   pulls: Record<string, PullStatus>;
-  onPull: (repoId: string) => void;
+  onPull: (repoId: string, quant?: string) => void;
   onCancelPull?: (repoId: string) => void;
   onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
   totalVramMb: number | null;
@@ -1751,12 +1756,13 @@ function ModelDetailModal({
           <PullStateButton
             pullState={pullState}
             targetId={variant.repo_id}
+            quant={variant.format === "GGUF" ? variant.label : undefined}
             isInstalled={isModelInstalled ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id) : false}
             onPull={onPull}
             onCancelPull={onCancelPull}
             pullButtonClassName="text-xs px-2.5 py-1"
-            cancelButtonClassName="text-xs px-2.5 py-1"
-            retryButtonClassName="text-xs px-2.5 py-1"
+            cancelButtonClassName="text-xs px-2 py-1"
+            retryButtonClassName="text-xs px-2 py-1"
           />
                           <Button
                             variant="primary"

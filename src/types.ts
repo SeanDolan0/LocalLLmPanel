@@ -230,6 +230,7 @@ export interface GgufRepoFile {
   path: string;
   size_bytes: number;
   is_mmproj: boolean;
+  quant?: string | null;
 }
 
 export interface PullStatus {
@@ -239,6 +240,8 @@ export interface PullStatus {
   percent?: number | null;
   speed_bps?: number | null;
   eta_seconds?: number | null;
+  bytes_downloaded?: number | null;
+  bytes_total?: number | null;
 }
 
 export interface WslLogEvent {

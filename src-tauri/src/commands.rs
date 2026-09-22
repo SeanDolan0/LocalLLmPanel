@@ -2094,9 +2094,18 @@ pub async fn download_gguf(
     if files.is_empty() {
         return Err("select at least one GGUF file".into());
     }
-    let cfg = state.config();
-    let token = state.hf_token();
+    let st = (*state).clone();
+    let cfg = st.config();
+    let token = st.hf_token();
     let model = repo_id.clone();
+    let pulling_arc = Arc::clone(&st.pulling);
+    {
+        let mut pulling = pulling_arc.lock().unwrap();
+        if *pulling.get(&model).unwrap_or(&false) {
+            return Err(format!("already downloading {model}"));
+        }
+        pulling.insert(model.clone(), true);
+    }
     let destination = PathBuf::from(cfg.gguf_dir).join(
         repo_id
             .rsplit('/')
@@ -2108,12 +2117,15 @@ pub async fn download_gguf(
         let started = std::time::Instant::now();
         std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
         let client = reqwest::blocking::Client::new();
-        for file_name in files {
+        'outer: for file_name in files {
             let target = destination.join(
                 PathBuf::from(&file_name)
                     .file_name()
                     .ok_or_else(|| "invalid GGUF file name".to_string())?,
             );
+            if !pulling_arc.lock().unwrap().contains_key(&model) {
+                return Ok::<(), String>(());
+            }
             let offset = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
             let url = format!("https://huggingface.co/{model}/resolve/main/{file_name}");
             let mut request = client.get(url);
@@ -2136,6 +2148,9 @@ pub async fn download_gguf(
                 .map_err(|e| e.to_string())?;
             let mut done = offset;
             loop {
+                if !pulling_arc.lock().unwrap().contains_key(&model) {
+                    break 'outer;
+                }
                 let mut buf = [0u8; 1024 * 1024];
                 let n = std::io::Read::read(&mut response, &mut buf).map_err(|e| e.to_string())?;
                 if n == 0 {
@@ -2144,6 +2159,11 @@ pub async fn download_gguf(
                 std::io::Write::write_all(&mut output, &buf[..n]).map_err(|e| e.to_string())?;
                 done += n as u64;
                 let percent = total.map(|t| (done as f64 / t as f64 * 100.0) as f32);
+                let speed = done.saturating_sub(offset) as f64 / started.elapsed().as_secs_f64().max(0.001);
+                let eta_seconds = match (total, speed) {
+                    (Some(t), s) if s > 0.0 => Some(((t.saturating_sub(done)) as f64 / s) as f32),
+                    _ => None,
+                };
                 let _ = app.emit(
                     "pull-progress",
                     serde_json::json!({
@@ -2151,10 +2171,17 @@ pub async fn download_gguf(
                         "state": "downloading",
                         "file": file_name,
                         "percent": percent,
-                        "speed_bps": done.saturating_sub(offset) as f64 / started.elapsed().as_secs_f64().max(0.001)
+                        "speed_bps": done.saturating_sub(offset) as f64 / started.elapsed().as_secs_f64().max(0.001),
+                        "eta_seconds": eta_seconds,
+                        "bytes_downloaded": done,
+                        "bytes_total": total,
                     }),
                 );
             }
+        }
+        if !pulling_arc.lock().unwrap().contains_key(&model) {
+            // cancelled (frontend already removed the progress entry)
+            return Ok::<(), String>(());
         }
         let _ = app.emit(
             "pull-progress",
@@ -2163,7 +2190,9 @@ pub async fn download_gguf(
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    st.pulling.lock().unwrap().remove(&repo_id);
+    Ok(())
 }
 
 /// Scan the persisted imported local model folders inside WSL and build
@@ -2376,9 +2405,51 @@ echo ok
 pub async fn library_remove(
     state: State<'_, Arc<AppState>>,
     model_id: String,
+    model_path: Option<String>,
 ) -> Result<(), String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // Native Windows GGUF: the entry's model_path points at the .gguf
+        // inside gguf_dir; delete its containing repo folder.
+        if let Some(ref path) = model_path {
+            let file = PathBuf::from(path);
+            if let (Some(parent), true) = (file.parent(), file.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false)) {
+                let gguf_dir = st.config().gguf_dir.trim().to_string();
+                let gguf_root = PathBuf::from(&gguf_dir);
+                let parent_s = parent.display().to_string();
+                let under_root = parent.canonicalize().ok().map(|p| p.starts_with(&gguf_root)).unwrap_or(false)
+                    || parent_s.starts_with(&gguf_dir);
+                if !under_root || PathBuf::from(&parent_s) == gguf_root {
+                    return Err("Refusing to delete: path is outside the GGUF directory".into());
+                }
+                let pending_parent = parent_s.clone();
+                let srvs = st.servers.lock().unwrap();
+                for ls in srvs.values() {
+                    let running = ls.status == crate::state::ServerStatus::Running
+                        || ls.status == crate::state::ServerStatus::Starting;
+                    let model_matches = ls.def.model_id == model_id
+                        || ls.def.model_id.contains(&model_id)
+                        || model_id.contains(&ls.def.model_id);
+                    let path_matches = ls
+                        .def
+                        .model_path
+                        .as_deref()
+                        .map(|mp| mp.starts_with(&pending_parent))
+                        .unwrap_or(false);
+                    if running && (model_matches || path_matches) {
+                        return Err(format!(
+                            "Model \"{}\" is currently in use by active server \"{}\" — stop server first",
+                            model_id, ls.def.name
+                        ));
+                    }
+                }
+                drop(srvs);
+                std::fs::remove_dir_all(&parent).map_err(|e| {
+                    format!("Failed to delete {}: {e}", parent.display())
+                })?;
+                return Ok(());
+            }
+        }
         // Check if model is in use
         {
             let srvs = st.servers.lock().unwrap();

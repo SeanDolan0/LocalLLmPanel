@@ -115,7 +115,8 @@ export const api = {
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
   libraryImportLocal: (path: string) =>
     invoke<import("./types").LibraryEntry>("library_import_local", { path }),
-  libraryRemove: (modelId: string) => invoke<void>("library_remove", { modelId }),
+  libraryRemove: (modelId: string, modelPath?: string | null) =>
+    invoke<void>("library_remove", { modelId, modelPath: modelPath ?? null }),
   libraryDiskUsage: () => invoke<number>("library_disk_usage"),
   settingsGet: () => invoke<Settings>("settings_get"),
   gatewayStatus: () => invoke<import("./types").GatewayStatus>("gateway_status"),
@@ -211,6 +212,18 @@ export function fmtTransferRate(bytesPerSecond: number | null | undefined): stri
   }
   const units = ["B/s", "KB/s", "MB/s", "GB/s"];
   let value = bytesPerSecond;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+export function fmtBytes(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n) || n < 0) return "—";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = n;
   let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
     value /= 1024;
