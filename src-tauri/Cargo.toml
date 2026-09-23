@@ -1,6 +1,6 @@
 [package]
 name = "llm-panel"
-version = "1.7.5"
+version = "1.7.6"
 description = "Local vLLM Panel — manage vLLM servers inside WSL2"
 authors = ["Local LLM Panel"]
 edition = "2021"
