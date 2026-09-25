@@ -24,15 +24,37 @@ pub fn provision_all(
     venv_dir: &str,
     mut on_log: impl FnMut(&str, &str),
 ) -> Result<ProvisionReport> {
+    crate::server::validate_venv_dir(venv_dir).map_err(|e| anyhow::anyhow!(e))?;
     let mut phases = Vec::new();
 
-    phases.push(phase_distro(distro, &mut on_log)?);
-    phases.push(phase_sudo(distro, &mut on_log)?);
-    phases.push(phase_apt(distro, &mut on_log)?);
-    phases.push(phase_uv(distro, &mut on_log)?);
-    phases.push(phase_venv(distro, venv_dir, &mut on_log)?);
-    phases.push(phase_vllm(distro, venv_dir, &mut on_log)?);
-    let report = phase_verify(distro, venv_dir, &mut on_log)?;
+    // Determine which distro to actually use (auto-install dedicated if needed)
+    let distros = wsl::installed_distros();
+    let mut effective_distro = if distros.contains(&distro.to_string()) {
+        distro.to_string()
+    } else {
+        on_log("distro", &format!("distro '{}' not found, installing dedicated distro…", distro));
+        let installed = wsl::ensure_app_distro(|msg| on_log("distro", msg))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        on_log("distro", &format!("using dedicated distro '{}'", installed));
+        installed
+    };
+
+    // If the effective distro isn't apt-based (e.g., docker-desktop), install dedicated
+    if !wsl::is_apt_distro(&effective_distro) {
+        on_log("distro", &format!("distro '{}' is not apt-based, installing dedicated distro…", effective_distro));
+        let installed = wsl::ensure_app_distro(|msg| on_log("distro", msg))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        on_log("distro", &format!("using dedicated distro '{}'", installed));
+        effective_distro = installed;
+    }
+
+    phases.push(phase_distro(&effective_distro, &mut on_log)?);
+    phases.push(phase_sudo(&effective_distro, &mut on_log)?);
+    phases.push(phase_apt(&effective_distro, &mut on_log)?);
+    phases.push(phase_uv(&effective_distro, &mut on_log)?);
+    phases.push(phase_venv(&effective_distro, venv_dir, &mut on_log)?);
+    phases.push(phase_vllm(&effective_distro, venv_dir, &mut on_log)?);
+    let report = phase_verify(&effective_distro, venv_dir, &mut on_log)?;
 
     // Marker file so later skips are quick.
     let full_report = ProvisionReport {
@@ -44,10 +66,18 @@ pub fn provision_all(
             "mkdir -p ~/llm-lp && cat << 'EOF' > ~/llm-lp/.provisioned\n{}\nEOF",
             json
         );
-        let _ = wsl::run_script(distro, &marker);
+        let _ = wsl::run_script(&effective_distro, &marker);
     }
 
     Ok(full_report)
+}
+
+fn venv_assignment(venv_dir: &str) -> String {
+    format!(
+        "{}venv_dir=$(__llm_panel_expand_tilde {})",
+        wsl::WSL_TILDE_EXPANSION_SNIPPET,
+        wsl::shell_quote_wsl(venv_dir),
+    )
 }
 
 fn phase_distro(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
@@ -97,8 +127,13 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
         "sudo",
         &format!("configuring passwordless sudo for user '{user}' (via wsl --user root)…"),
     );
+    let rule = format!("{safe_user} ALL=(ALL) NOPASSWD:ALL");
+    let rule_path = format!("/etc/sudoers.d/llm-panel-{safe_user}");
     let script = format!(
-        "echo '{user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/llm-panel-{safe_user} && chmod 440 /etc/sudoers.d/llm-panel-{safe_user} && echo ok"
+        "printf '%s\\n' {} > {} && chmod 440 {} && echo ok",
+        wsl::shell_quote_wsl(&rule),
+        wsl::shell_quote_wsl(&rule_path),
+        wsl::shell_quote_wsl(&rule_path),
     );
     let out = wsl::run_script_root(distro, &script);
     if !out.ok || !out.stdout.trim().ends_with("ok") {
@@ -183,34 +218,32 @@ fn phase_venv(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str))
     }
     on_log("venv", "creating venv…");
     let script = format!(
-        r#"
+        r#"{venv_assignment}
 set -e
 mkdir -p ~/llm-lp/run ~/llm-lp/logs
 if command -v uv >/dev/null 2>&1 || [ -x "$HOME/.local/bin/uv" ]; then
   export PATH="$HOME/.local/bin:$PATH"
   echo "using uv: $(uv --version)"
-  uv venv --python 3.12 {venv} 2>/dev/null || uv venv {venv}
+  uv venv --python 3.12 "$venv_dir" 2>/dev/null || uv venv "$venv_dir"
 else
   echo "uv not found; falling back to python3 -m venv"
-  python3 -m venv {venv} || {{ rm -rf {venv}; exit 1; }}
+  python3 -m venv "$venv_dir" || {{ echo "could not create venv at $venv_dir" >&2; exit 1; }}
 fi
 # Ubuntu 22.04's python3-venv meta sometimes misses the version-specific
 # package, leaving a pip-less venv. Repair with ensurepip, or apt-install the
 # right python3.*-venv and recreate.
-if ! {venv}/bin/python -m pip --version >/dev/null 2>&1; then
+if ! "$venv_dir/bin/python" -m pip --version >/dev/null 2>&1; then
   echo "venv has no pip; running ensurepip…"
-  if ! {venv}/bin/python -m ensurepip --upgrade >/dev/null 2>&1; then
-    PYM=\$({venv}/bin/python --version | sed 's/Python \\([0-9]*\\.[0-9]*\\).*/python\\1-venv/')
-    echo "ensurepip failed; apt-get installing $PYM…"
-    DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq "$PYM" >/dev/null 2>&1
-    rm -rf {venv}
-    python3 -m venv {venv}
+  if ! "$venv_dir/bin/python" -m ensurepip --upgrade >/dev/null 2>&1; then
+    echo "ensurepip failed; apt-get installing python3.12-venv…"
+    DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq python3.12-venv >/dev/null 2>&1
+    python3 -m venv "$venv_dir"
   fi
 fi
-{venv}/bin/python --version
-{venv}/bin/python -m pip install --upgrade pip -q
+"$venv_dir/bin/python" --version
+"$venv_dir/bin/python" -m pip install --upgrade pip -q
 "#,
-        venv = venv_dir
+        venv_assignment = venv_assignment(venv_dir),
     );
     let out = wsl::run_script_stream(distro, &script, |l| on_log("venv", l));
     if !out.ok {
@@ -220,10 +253,11 @@ fi
 }
 
 fn venv_ok(distro: &str, venv_dir: &str) -> bool {
-    let out = wsl::run_script(
-        distro,
-        &format!("{venv}/bin/python -c 'import sys; print(sys.version.split()[0])' 2>/dev/null && {venv}/bin/python -m pip --version >/dev/null 2>&1 && echo ok || echo bad", venv = venv_dir),
+    let script = format!(
+        "{}\"$venv_dir/bin/python\" -c 'import sys; print(sys.version.split()[0])' 2>/dev/null && \"$venv_dir/bin/python\" -m pip --version >/dev/null 2>&1 && echo ok || echo bad",
+        venv_assignment(venv_dir),
     );
+    let out = wsl::run_script(distro, &script);
     out.stdout.contains("3.") && out.stdout.ends_with("ok")
 }
 
@@ -234,8 +268,8 @@ fn phase_vllm(distro: &str, venv_dir: &str, on_log: &mut impl FnMut(&str, &str))
     }
     on_log("vllm", "installing vllm + huggingface_hub (CUDA wheels)…");
     let script = format!(
-        "export PATH=\"$HOME/.local/bin:$PATH\"; cd ~/llm-lp && uv pip install --python {venv}/bin/python vllm 'huggingface_hub[cli]' 2>&1",
-        venv = venv_dir
+        "{}export PATH=\"$HOME/.local/bin:$PATH\"; cd ~/llm-lp && uv pip install --python \"$venv_dir/bin/python\" vllm 'huggingface_hub[cli]' 2>&1",
+        venv_assignment(venv_dir),
     );
     let out = wsl::run_script_stream(distro, &script, |l| on_log("vllm", l));
     if !out.ok || !vllm_installed(distro, venv_dir) {
@@ -248,8 +282,8 @@ fn vllm_installed(distro: &str, venv_dir: &str) -> bool {
     let out = wsl::run_script(
         distro,
         &format!(
-            "{venv}/bin/python -c 'import vllm; print(vllm.__version__)' 2>/dev/null || true",
-            venv = venv_dir
+            "{}\"$venv_dir/bin/python\" -c 'import vllm; print(vllm.__version__)' 2>/dev/null || true",
+            venv_assignment(venv_dir),
         ),
     );
     out.ok && !out.stdout.trim().is_empty()
@@ -264,8 +298,8 @@ fn phase_verify(
     let vllm_out = wsl::run_script(
         distro,
         &format!(
-            "{venv}/bin/python -c 'import vllm; print(vllm.__version__)'",
-            venv = venv_dir
+            "{}\"$venv_dir/bin/python\" -c 'import vllm; print(vllm.__version__)'",
+            venv_assignment(venv_dir),
         ),
     );
     let vllm_version = vllm_out.ok.then(|| vllm_out.stdout.trim().to_string());
@@ -273,8 +307,8 @@ fn phase_verify(
     let torch_out = wsl::run_script(
         distro,
         &format!(
-            "{venv}/bin/python -c \"import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'n/a'); print(torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0); print(torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)\"",
-            venv = venv_dir
+            "{}\"$venv_dir/bin/python\" -c \"import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'n/a'); print(torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0); print(torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)\"",
+            venv_assignment(venv_dir),
         ),
     );
     let lines: Vec<&str> = torch_out.stdout.lines().collect();

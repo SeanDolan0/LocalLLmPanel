@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  ContextFitReport,
+  ContextFitRequest,
   CreateServerInput,
   EnvStatus,
   FitResultBackend,
@@ -31,6 +33,7 @@ import type {
   BenchmarkCancelPayload,
   BenchmarkErrorPayload,
   LlamacppInstallStatus,
+  LlamaCppChannel,
   GgufRepoFile,
 } from "./types";
 
@@ -52,11 +55,15 @@ export const api = {
   envStatus: () => invoke<EnvStatus>("env_status"),
   provision: () => invoke<ProvisionReport>("provision"),
   installLlamacpp: () => invoke<LlamacppInstallStatus>("install_llamacpp"),
+  installLlamacppChannel: (channel: LlamaCppChannel) =>
+    invoke<LlamacppInstallStatus>("install_llamacpp_channel", { channel }),
   llamacppStatus: () => invoke<LlamacppInstallStatus>("llamacpp_status"),
   searchModelsWithFit: (query: string) =>
     invoke<ModelWithFit[]>("search_models_with_fit", { query }),
   recommendedModels: () =>
     invoke<ModelWithFit[]>("recommended_models"),
+  analyzeContextFit: (input: ContextFitRequest) =>
+    invoke<ContextFitReport>("analyze_context_fit", { input }),
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),
   pullStatus: () => invoke<{ pulling: string[] }>("pull_status"),
   pullCancel: (modelId: string) => invoke<void>("pull_cancel", { modelId }),
@@ -130,6 +137,7 @@ export const api = {
         | "llamacpp_dir"
         | "gguf_dir"
         | "llamacpp_executable"
+        | "llamacpp_channels"
         | "hf_token"
         | "github_token"
         | "default_quant"
@@ -138,7 +146,12 @@ export const api = {
         | "auto_restart_crashed"
         | "launch_at_login"
       >
-    >
+    > & {
+      clear_hf_token?: boolean;
+      clear_github_token?: boolean;
+      clear_advanced_api_key?: boolean;
+      clear_custom_env_vars?: boolean;
+    }
   ) => invoke<Settings>("settings_set", { patch }),
   githubAccess: () => invoke<import("./types").GithubAccess>("github_access"),
   clearGithubToken: () => invoke<Settings>("clear_github_token"),

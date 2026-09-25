@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,9 +9,31 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 const tauriDir = path.join(rootDir, "src-tauri");
-const distReleaseDir = path.join(rootDir, "dist-release");
+const distReleaseDir = path.resolve(
+  process.env.LLM_PANEL_DIST_DIR || path.join(rootDir, "dist-release"),
+);
 
 // 1. Parse arguments
+function copyArtifact(source, destination) {
+  // A previous release may still be open in Explorer/antivirus.  Remove the
+  // old staged file before copying so the build does not fail with EBUSY on a
+  // stale artifact from an earlier run.
+  try {
+    if (fs.existsSync(destination)) {
+      fs.rmSync(destination, { force: true });
+    }
+    fs.copyFileSync(source, destination);
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EBUSY") {
+      throw new Error(
+        `Cannot replace ${destination}; close any running Local LLM Panel instance and retry`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 const args = process.argv.slice(2);
 const isFast = args.includes("--fast");
 const isAll = args.includes("--all");
@@ -34,12 +57,22 @@ const cargoToml = fs.readFileSync(cargoTomlPath, "utf8");
 const cargoVersionMatch = cargoToml.match(/name\s*=\s*"llm-panel"\s*\nversion\s*=\s*"([^"]+)"/);
 const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, "utf8"));
 
-if (cargoVersionMatch && cargoVersionMatch[1] !== version) {
-  console.warn(`[WARN] Version mismatch in Cargo.toml: ${cargoVersionMatch[1]} vs package.json: ${version}`);
+if (!cargoVersionMatch || cargoVersionMatch[1] !== version) {
+  throw new Error(
+    `[release] Cargo.toml version ${cargoVersionMatch?.[1] ?? "missing"} does not match package.json ${version}`,
+  );
 }
 if (tauriConf.version !== version) {
-  console.warn(`[WARN] Version mismatch in tauri.conf.json: ${tauriConf.version} vs package.json: ${version}`);
+  throw new Error(
+    `[release] tauri.conf.json version ${tauriConf.version} does not match package.json ${version}`,
+  );
 }
+
+const validateArgs = [path.join(rootDir, "scripts", "validate-release.mjs")];
+if (isAll) validateArgs.push("--all");
+else if (isFast) validateArgs.push("--fast");
+else if (isSetup) validateArgs.push("--setup");
+execFileSync(process.execPath, validateArgs, { cwd: rootDir, stdio: "inherit" });
 
 // 3. Environment & Linker Resolution
 function configureEnvironment() {
@@ -93,8 +126,10 @@ const startTime = Date.now();
 if (isCheckOnly) {
   console.log("\n[Preflight] Running TypeScript check...");
   execSync("npm run build", { cwd: rootDir, env: buildEnv, stdio: "inherit" });
-  console.log("\n[Preflight] Running Cargo check...");
-  execSync("cargo check", { cwd: tauriDir, env: buildEnv, stdio: "inherit" });
+  console.log("\n[Preflight] Running Cargo workspace check...");
+  execSync("cargo check --workspace --locked", { cwd: tauriDir, env: buildEnv, stdio: "inherit" });
+  console.log("\n[Preflight] Running frontend contract smoke tests...");
+  execSync("npm run test:contract", { cwd: rootDir, env: buildEnv, stdio: "inherit" });
   console.log(`\n[OK] Preflight checks passed in ${((Date.now() - startTime) / 1000).toFixed(2)}s.`);
   process.exit(0);
 }
@@ -143,7 +178,7 @@ const stagedExeName = `LocalLLMPanel-v${version}.exe`;
 const stagedExePath = path.join(distReleaseDir, stagedExeName);
 
 if (fs.existsSync(rawExePath)) {
-  fs.copyFileSync(rawExePath, stagedExePath);
+  copyArtifact(rawExePath, stagedExePath);
   const sizeMb = (fs.statSync(stagedExePath).size / (1024 * 1024)).toFixed(2);
   stagedFiles.push({ name: stagedExeName, type: "Standalone Executable", size: `${sizeMb} MB`, path: stagedExePath });
 }
@@ -157,7 +192,7 @@ if (!isFast) {
       const src = path.join(nsisDir, matchingNsis);
       const destName = `Local.LLM.Panel_${version}_x64-setup.exe`;
       const dest = path.join(distReleaseDir, destName);
-      fs.copyFileSync(src, dest);
+      copyArtifact(src, dest);
       const sizeMb = (fs.statSync(dest).size / (1024 * 1024)).toFixed(2);
       stagedFiles.push({ name: destName, type: "NSIS Installer", size: `${sizeMb} MB`, path: dest });
     }
@@ -172,13 +207,27 @@ if (!isFast) {
         const src = path.join(msiDir, matchingMsi);
         const destName = `Local.LLM.Panel_${version}_x64_en-US.msi`;
         const dest = path.join(distReleaseDir, destName);
-        fs.copyFileSync(src, dest);
+        copyArtifact(src, dest);
         const sizeMb = (fs.statSync(dest).size / (1024 * 1024)).toFixed(2);
         stagedFiles.push({ name: destName, type: "WiX MSI Package", size: `${sizeMb} MB`, path: dest });
       }
     }
   }
 }
+
+// Write deterministic checksums next to every staged artifact.  The release
+// validator requires these files so a successful build cannot be mistaken for
+// a complete, publishable release.
+for (const item of stagedFiles) {
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(item.path)).digest("hex");
+  fs.writeFileSync(`${item.path}.sha256`, `${digest}  ${item.name}\n`);
+}
+
+execFileSync(
+  process.execPath,
+  [path.join(rootDir, "scripts", "validate-release.mjs"), isAll ? "--all" : isFast ? "--fast" : "--setup", "--artifacts"],
+  { cwd: rootDir, stdio: "inherit" },
+);
 
 const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
 

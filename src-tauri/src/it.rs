@@ -11,6 +11,7 @@
 //!   LLM_TEST_WSL=1 cargo test --lib -- --ignored --nocapture wsl_it
 //!
 //! The test is `#[ignore]`d by default and is a no-op unless LLM_TEST_WSL is set.
+//! When enabled, it writes server state only to a temporary test config directory.
 
 use crate::provision;
 use crate::server;
@@ -43,6 +44,7 @@ fn llamacpp_it() {
         max_model_len: None,
         quant: "GGUF".into(),
         served_model_name: None,
+        kv_cache_dtype: None,
         llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
         enforce_eager: false,
         params_b: None,
@@ -101,6 +103,38 @@ fn llamacpp_it() {
 const DISTRO: &str = "Ubuntu-22.04";
 const VENV_DIR: &str = "~/llm-lp/.venv";
 
+/// Keep the opt-in integration test away from the user's real config file.
+/// `PersistedConfig::path` honors this variable only in test builds.
+struct TestConfigDir {
+    path: std::path::PathBuf,
+    previous: Option<String>,
+}
+
+impl TestConfigDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "local-llm-panel-it-config-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create isolated test config directory");
+        let previous = std::env::var("LLM_TEST_CONFIG_DIR").ok();
+        std::env::set_var("LLM_TEST_CONFIG_DIR", &path);
+        Self { path, previous }
+    }
+}
+
+impl Drop for TestConfigDir {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("LLM_TEST_CONFIG_DIR", previous);
+        } else {
+            std::env::remove_var("LLM_TEST_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 fn http() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -156,6 +190,9 @@ fn wsl_it() {
     println!("provision #2 ok in {:?} (idempotent path)", t1.elapsed());
 
     // --- 2. Two servers: instruct (0.5B) + embed (bge-small) ---
+    // All config writes from server start/stop go to this isolated directory;
+    // the user's real panel configuration is never overwritten.
+    let _config_guard = TestConfigDir::new();
     let state = Arc::new(AppState::new());
     {
         let mut cfg = state.config.lock().unwrap();
@@ -173,6 +210,7 @@ fn wsl_it() {
             max_model_len: Some(2048),
             quant: "fp16".into(),
             served_model_name: Some("qwen-0.5b".into()),
+            kv_cache_dtype: None,
             llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: Some(0.494),
@@ -213,6 +251,7 @@ fn wsl_it() {
             max_model_len: Some(512),
             quant: "fp16".into(),
             served_model_name: Some("embedder".into()),
+            kv_cache_dtype: None,
             llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: Some(0.033),

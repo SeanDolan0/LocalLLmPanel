@@ -49,6 +49,58 @@ pub fn wsl_command() -> Command {
     cmd
 }
 
+/// Our dedicated distro name — isolated from user's distros.
+pub const APP_DISTRO_NAME: &str = "local-llm-panel-ubuntu";
+
+/// Expand a leading `~` inside a quoted WSL path value.
+pub const WSL_TILDE_EXPANSION_SNIPPET: &str = r#"
+__llm_panel_expand_tilde() {
+  case "$1" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s' "$HOME/${1#\~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+"#;
+
+/// Ensure the app's dedicated Ubuntu distro exists. Installs it if missing.
+/// Returns the distro name (always APP_DISTRO_NAME on success).
+pub fn ensure_app_distro(mut on_log: impl FnMut(&str)) -> Result<String, String> {
+    let distros = installed_distros();
+    if distros.contains(&APP_DISTRO_NAME.to_string()) {
+        on_log(&format!("distro '{}' already installed", APP_DISTRO_NAME));
+        return Ok(APP_DISTRO_NAME.to_string());
+    }
+
+    on_log(&format!("installing dedicated distro '{}'…", APP_DISTRO_NAME));
+    let mut cmd = wsl_command();
+    cmd.env("WSL_UTF8", "1")
+        .args([
+            "--install",
+            "-d", "Ubuntu-22.04",
+            "--name", APP_DISTRO_NAME,
+            "--web-download",
+            "--no-launch",
+        ]);
+    let out = cmd.output().map_err(|e| format!("spawn wsl --install: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("wsl --install failed: {}", err));
+    }
+
+    // Wait for first-boot setup to complete (creates default user, etc.)
+    on_log("waiting for distro initialization…");
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let probe = run_script(APP_DISTRO_NAME, "echo ok");
+        if probe.ok {
+            on_log("distro ready");
+            return Ok(APP_DISTRO_NAME.to_string());
+        }
+    }
+    Err("distro installed but not responding after 60s".into())
+}
+
 /// List all installed WSL distros cleanly.
 pub fn installed_distros() -> Vec<String> {
     let out = match wsl_command()
@@ -105,7 +157,12 @@ pub fn detect_default_distro() -> Option<String> {
 
     let distros = installed_distros();
 
-    // 2. Scan installed distros for an apt-based one that responds to echo ok
+    // 2. Prefer our dedicated distro if present
+    if distros.contains(&APP_DISTRO_NAME.to_string()) && run_script(APP_DISTRO_NAME, "echo ok").ok {
+        return Some(APP_DISTRO_NAME.to_string());
+    }
+
+    // 3. Scan installed distros for an apt-based one that responds to echo ok
     for d in &distros {
         if is_apt_distro(d) && run_script(d, "echo ok").ok {
             return Some(d.clone());
@@ -121,6 +178,49 @@ pub fn detect_default_distro() -> Option<String> {
 
     // 4. Return the first installed distro if any
     distros.into_iter().next()
+}
+
+/// Whether the given distro is currently running. Uses `wsl -l -v`, which
+/// reports state without booting a stopped distro.
+// ponytail: relies on the English "Running" state word; patch the matcher if
+// localized Windows builds misreport (safe failure mode = "not running", so worst
+// case is a cosmetic dashboard state, never a spurious boot).
+pub fn is_running(distro: &str) -> bool {
+    let distro = distro.trim();
+    if distro.is_empty() || distro.starts_with("__test_") {
+        return false;
+    }
+    let Ok(out) = wsl_command()
+        .env("WSL_UTF8", "1")
+        .args(["-l", "-v"])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let cleaned: String = text.chars().filter(|c| *c != '\u{0}').collect();
+    verbose_state_is_running(&cleaned, distro)
+}
+
+/// Parse `wsl -l -v` output for whether `distro` is running. Pure so it can
+/// be unit-tested without shelling out.
+fn verbose_state_is_running(text: &str, distro: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.contains("NAME") || !line.contains("Running") {
+            return false;
+        }
+        let name = line
+            .trim_start_matches('*')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(':');
+        name == distro
+    })
 }
 
 /// Check if a distro looks Ubuntu-ish (apt-based).
@@ -151,9 +251,10 @@ pub fn parse_meminfo(content: &str) -> (u64, u64) {
     (total_kb / 1024, avail_kb / 1024)
 }
 
-/// Detect total and available memory in WSL2 (in MB).
-/// Falls back to 16GB total / 12GB available on failure. Never panics.
-pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
+/// Detect total and available memory in WSL2 (in MB), returning `None` when
+/// the distro cannot be queried. Fit verification must not treat fallback
+/// values as measured hardware.
+pub fn try_detect_wsl_memory(distro: &str) -> Option<(u64, u64)> {
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
@@ -161,16 +262,19 @@ pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
     } else {
         cmd.args(["-d", distro, "--exec", "cat", "/proc/meminfo"]);
     }
-    if let Ok(o) = cmd.output() {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let (total, avail) = parse_meminfo(&s);
-            if total > 0 {
-                return (total, avail);
-            }
-        }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
     }
-    (16384, 12288) // Safe fallback: 16GB total / 12GB avail
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (total, available) = parse_meminfo(&text);
+    (total > 0).then_some((total, available))
+}
+
+/// Detect total and available memory in WSL2 (in MB).
+/// Falls back to 16GB total / 12GB available on failure. Never panics.
+pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
+    try_detect_wsl_memory(distro).unwrap_or((16_384, 12_288))
 }
 
 /// Result of a synchronous WSL script run.
@@ -369,6 +473,9 @@ pub struct WslChild {
     handles: Vec<std::thread::JoinHandle<()>>,
     /// Path to the generated script file in WSL (for cleanup on drop)
     script_path: Option<String>,
+    /// Distro used to launch the script, retained for best-effort cleanup when
+    /// the process is force-killed before its EXIT trap runs.
+    distro: Option<String>,
 }
 
 /// Native Windows child used by llama-server. Output is streamed using the
@@ -461,7 +568,28 @@ impl Drop for NativeChild {
 
 /// Generate a unique script filename for a server launch.
 fn gen_script_name(server_id: &str) -> String {
-    format!("~/.local/share/local-llm-panel/launch-{}.sh", server_id)
+    let mut safe = String::new();
+    for ch in server_id.chars() {
+        if safe.len() >= 48 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            safe.push(ch);
+        } else {
+            safe.push('_');
+        }
+    }
+    if safe.is_empty() {
+        safe.push_str("server");
+    }
+    // Keep distinct IDs distinct even when sanitization collapses characters,
+    // while ensuring the generated path is always a simple /tmp file name.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in server_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("/tmp/local-llm-panel-launch-{safe}-{hash:016x}.sh")
 }
 
 /// Minimal shell_quote for WSL path generation (used internally for script paths).
@@ -470,24 +598,29 @@ pub fn shell_quote_wsl(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Write a script to a file in WSL via stdin, then execute it.
-/// Returns the command args for wsl.exe (without the script content on the command line).
-fn write_and_exec_script(
+/// Spawn a script in WSL by piping script content to stdin of `cat > file`.
+/// This avoids heredoc delimiter issues and command line length limits.
+pub fn spawn_script_via_stdin(
     distro: &str,
-    _script: &str,
+    script: &str,
     server_id: &str,
-) -> Result<Vec<String>, String> {
-    let script_path = gen_script_name(server_id);
-    // Use a heredoc to write the script content, then execute it.
-    // The stdin will be piped to the heredoc for `cat`.
-    let mkdir_cmd = format!("mkdir -p ~/.local/share/local-llm-panel");
-    // Use cat with heredoc - the script content comes from stdin
-    let write_cmd = format!("cat << 'SCRIPT_EOF' > {}", shell_quote_wsl(&script_path));
-    let chmod_cmd = format!("chmod +x {}", shell_quote_wsl(&script_path));
-    let exec_cmd = format!("bash -l {}", shell_quote_wsl(&script_path));
+    on_line: impl FnMut(String) + Send + 'static,
+) -> Result<WslChild, String> {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
-    // Build the combined command: mkdir, then write script via heredoc from stdin, then chmod, then execute
+    let script_path = gen_script_name(server_id);
+
+    // Build command: mkdir, then read stdin (until EOF) and write to file, chmod, execute
+    let mkdir_cmd = "mkdir -p /tmp/local-llm-panel";
+    let write_cmd = format!("cat > {}", shell_quote_wsl(&script_path));
+    let chmod_cmd = format!("chmod 700 {}", shell_quote_wsl(&script_path));
+    let exec_cmd = format!("bash -l {}", shell_quote_wsl(&script_path));
     let full_cmd = format!("{} && {} && {} && {}", mkdir_cmd, write_cmd, chmod_cmd, exec_cmd);
+
+    let mut cmd = wsl_command();
+    cmd.env("WSL_UTF8", "1");
+    cmd.stdin(Stdio::piped());
 
     let mut args = Vec::new();
     if distro.trim().is_empty() {
@@ -500,78 +633,88 @@ fn write_and_exec_script(
     args.push("bash".to_string());
     args.push("-lc".to_string());
     args.push(full_cmd);
-    Ok(args)
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn wsl.exe: {e}"))?;
+
+    // Write script content to stdin, then close stdin (EOF signals end to cat)
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.as_bytes());
+        let _ = stdin.flush();
+        // stdin dropped here, closing the pipe - cat sees EOF and finishes
+    }
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let mut handles = Vec::new();
+    let on_line = Arc::new(Mutex::new(on_line));
+    for stream in [
+        stdout.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        stderr.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let cb = on_line.clone();
+        handles.push(std::thread::spawn(move || {
+            let reader = BufReader::new(stream);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    let clean: String = l.chars().filter(|c| *c != '\u{0}').collect();
+                    if let Ok(mut cb) = cb.lock() {
+                        cb(clean);
+                    }
+                }
+            }
+        }));
+    }
+    Ok(WslChild {
+        child,
+        handles,
+        script_path: Some(script_path),
+        distro: Some(distro.to_string()),
+    })
 }
 
 impl WslChild {
-    /// Spawn a script in WSL by writing it to a file first, then executing it.
-    /// This avoids nested quoting issues with `bash -lc "<script>"`.
-    /// `script` typically ends with `exec python ...` so the child lives for the
-    /// lifetime of the server.
+    /// Spawn a script in WSL by writing it to a temp file via stdin (unique delimiter),
+    /// then executing it. This avoids command line length limits and heredoc delimiter conflicts.
+    /// The generated script supervises the long-running Python process and
+    /// removes its own temporary file when the process exits.
     pub fn spawn(
         distro: &str,
         script: &str,
         server_id: &str,
         on_line: impl FnMut(String) + Send + 'static,
     ) -> Result<WslChild, String> {
-        let mut cmd = wsl_command();
-        cmd.env("WSL_UTF8", "1");
-        cmd.stdin(Stdio::piped());
-
-        let args = write_and_exec_script(distro, script, server_id)?;
-        for arg in args {
-            cmd.arg(arg);
-        }
-
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to spawn wsl.exe: {e}"))?;
-
-        // Write the script content to stdin, followed by the heredoc terminator
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(script.as_bytes());
-            let _ = stdin.write_all(b"\nSCRIPT_EOF\n");
-            let _ = stdin.flush();
-            // stdin is dropped here, closing the pipe
-        }
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let mut handles = Vec::new();
-        let on_line = std::sync::Arc::new(std::sync::Mutex::new(on_line));
-        for stream in [
-            stdout.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-            stderr.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let cb = on_line.clone();
-            handles.push(std::thread::spawn(move || {
-                let reader = BufReader::new(stream);
-                for line in reader.lines() {
-                    if let Ok(l) = line {
-                        let clean: String = l.chars().filter(|c| *c != '\u{0}').collect();
-                        if let Ok(mut cb) = cb.lock() {
-                            cb(clean);
-                        }
-                    }
-                }
-            }));
-        }
-        Ok(WslChild { child, handles, script_path: Some(gen_script_name(server_id)) })
+        spawn_script_via_stdin(distro, script, server_id, on_line)
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.child.try_wait()
     }
 
-    /// Terminate the wsl.exe process (Windows side). The WSL-side shell gets
-    /// SIGKILL via console teardown — safest fallback when pidfile kill fails.
+    /// Terminate the wsl.exe process tree (Windows side). Killing only the
+    /// launcher can leave the Linux child orphaned, so use taskkill on Windows
+    /// before falling back to the platform child handle.
     pub fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            let pid = self.child.id().to_string();
+            let status = Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid])
+                .status()?;
+            if status.success() {
+                return Ok(());
+            }
+        }
         self.child.kill()
     }
 
@@ -583,10 +726,27 @@ impl WslChild {
         self.child.wait()
     }
 
+    pub fn script_path(&self) -> Option<&str> {
+        self.script_path.as_deref()
+    }
+
     /// Join reader threads (used on drop paths so logs finish flushing).
     pub fn join(&mut self) {
         for h in self.handles.drain(..) {
             let _ = h.join();
+        }
+    }
+}
+
+impl Drop for WslChild {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.kill();
+        }
+        self.join();
+        if let (Some(distro), Some(script_path)) = (self.distro.as_deref(), self.script_path.as_deref()) {
+            let cleanup = format!("rm -f -- {}", shell_quote_wsl(script_path));
+            let _ = run_script(distro, &cleanup);
         }
     }
 }
@@ -644,6 +804,17 @@ mod tests {
     }
 
     #[test]
+    fn test_generated_script_names_are_confined_and_unique() {
+        let hostile = gen_script_name("srv/../../outside; rm -rf /");
+        assert!(hostile.starts_with("/tmp/local-llm-panel-launch-"));
+        assert!(!hostile.contains(".."));
+        assert!(!hostile.contains(';'));
+        assert_eq!(hostile.matches('/').count(), 2);
+        assert_ne!(hostile, gen_script_name("srv/../different"));
+        assert_ne!(hostile, gen_script_name("srv_other"));
+    }
+
+    #[test]
     fn test_parse_proc_meminfo() {
         let sample = "MemTotal:       24576000 kB\nMemFree:         4000000 kB\nMemAvailable:   18432000 kB\n";
         let (total_mb, avail_mb) = parse_meminfo(sample);
@@ -685,6 +856,27 @@ mod tests {
             assert!(!d.contains('\u{0}'));
             assert!(!d.is_empty());
         }
+    }
+
+    #[test]
+    fn test_verbose_state_is_running() {
+        let modern = "  NAME                   STATE           VERSION\n* Ubuntu-24.04           Running         2\n  docker-desktop         Stopped         2\n";
+        assert!(verbose_state_is_running(modern, "Ubuntu-24.04"));
+        assert!(!verbose_state_is_running(modern, "docker-desktop"));
+        assert!(!verbose_state_is_running(modern, "Nonexistent"));
+
+        let legacy = "  NAME      STATE           VERSION\n* Ubuntu:  Running         2\n";
+        assert!(verbose_state_is_running(legacy, "Ubuntu"));
+        assert!(!verbose_state_is_running(legacy, "Ubuntu-24.04"));
+
+        assert!(!verbose_state_is_running("", "Ubuntu"));
+        assert!(!verbose_state_is_running("  NAME   STATE   VERSION\n", "Ubuntu"));
+    }
+
+    #[test]
+    fn test_is_running_empty_or_test_distro() {
+        assert!(!is_running(""));
+        assert!(!is_running("__test_distro_xyz__"));
     }
 
     #[test]

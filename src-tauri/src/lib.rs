@@ -1,7 +1,9 @@
 //! Local LLM Panel — Tauri 2 app managing vLLM inside WSL2.
 
 pub mod commands;
-pub mod estimate;
+pub mod context_fit;
+mod estimate;
+mod gguf;
 pub mod fit;
 pub mod gateway;
 pub mod hf;
@@ -109,6 +111,7 @@ pub fn run() {
             commands::env_status,
             commands::provision,
             commands::install_llamacpp,
+            commands::install_llamacpp_channel,
             commands::llamacpp_status,
             commands::github_access,
             commands::clear_github_token,
@@ -116,6 +119,7 @@ pub fn run() {
             commands::search_models_with_fit,
             commands::recommended_models,
             commands::model_stats,
+            commands::analyze_context_fit,
             commands::pull_model,
             commands::pull_status,
             commands::pull_cancel,
@@ -162,6 +166,8 @@ pub fn run() {
             commands::config_import,
             commands::server_recipe_export,
             commands::server_recipe_parse,
+            commands::check_flashinfer_ready,
+            commands::install_cuda_build_tools,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

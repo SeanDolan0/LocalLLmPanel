@@ -1,6 +1,10 @@
+[workspace]
+members = ["crates/llmfit-core"]
+resolver = "2"
+
 [package]
 name = "llm-panel"
-version = "1.8.0"
+version = "1.8.1"
 description = "Local vLLM Panel — manage vLLM servers inside WSL2"
 authors = ["Local LLM Panel"]
 edition = "2021"

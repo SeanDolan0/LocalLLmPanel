@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -56,13 +55,22 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let distro_detected = st.resolve_distro();
-        let wsl_ok = crate::wsl::run_script(&distro_detected, "echo ok").ok;
-        let prov_out = crate::wsl::run_script(
-            &distro_detected,
-            "cat ~/llm-lp/.provisioned 2>/dev/null || true",
-        );
+        let wsl_running = crate::wsl::is_running(&distro_detected);
         let native_gpu = crate::llamacpp_install::windows_gpu_snapshot();
-        let gpu = gpu_snapshot(&distro_detected).or(native_gpu);
+        let gpu = if wsl_running {
+            gpu_snapshot(&distro_detected).or(native_gpu)
+        } else {
+            native_gpu
+        };
+        let wsl_ok = wsl_running;
+        let prov_out = if wsl_running {
+            crate::wsl::run_script(
+                &distro_detected,
+                "cat ~/llm-lp/.provisioned 2>/dev/null || true",
+            )
+        } else {
+            crate::wsl::RunOutput { ok: false, code: 1, stdout: String::new(), stderr: String::new() }
+        };
         if let Some(g) = &gpu {
             *st.gpu.lock().unwrap() = Some(g.clone());
             st.record_system_metric(g);
@@ -152,6 +160,10 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             .iter()
             .any(|device| device.backend.eq_ignore_ascii_case("cuda"));
 
+        let upstream = cfg
+            .llamacpp_channels
+            .get(&crate::state::LlamaCppChannel::Upstream);
+
         EnvStatus {
             wsl_ok,
             distro: distro_detected,
@@ -170,11 +182,16 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             ram_bandwidth_gbps,
             providers_detected,
             llamacpp_installed: native_llamacpp.is_some(),
-            llamacpp_tag: cfg.llamacpp_installed_tag,
-            llamacpp_version: cfg.llamacpp_version,
-            llamacpp_executable: cfg
-                .llamacpp_executable
-                .or_else(|| native_llamacpp.map(|p| p.to_string_lossy().into_owned())),
+            llamacpp_tag: upstream
+                .and_then(|channel| channel.installed_tag.clone())
+                .or(cfg.llamacpp_installed_tag),
+            llamacpp_version: upstream
+                .and_then(|channel| channel.version.clone())
+                .or(cfg.llamacpp_version),
+            llamacpp_executable: native_llamacpp
+                .map(|path| path.to_string_lossy().into_owned())
+                .or_else(|| upstream.and_then(|channel| channel.executable.clone()))
+                .or(cfg.llamacpp_executable),
             llamacpp_cuda_available,
             llamacpp_devices,
         }
@@ -272,6 +289,11 @@ pub async fn llamacpp_status(
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let cfg = st.config();
+        let channel = cfg
+            .llamacpp_channels
+            .get(&crate::state::LlamaCppChannel::Upstream)
+            .cloned()
+            .unwrap_or_default();
         let executable = crate::llamacpp_install::executable_from_config(&cfg);
         let devices = executable
             .as_deref()
@@ -279,8 +301,8 @@ pub async fn llamacpp_status(
             .unwrap_or_default();
         Ok(crate::llamacpp_install::InstallStatus {
             installed: executable.is_some(),
-            tag: cfg.llamacpp_installed_tag,
-            version: cfg.llamacpp_version,
+            tag: channel.installed_tag.or(cfg.llamacpp_installed_tag),
+            version: channel.version.or(cfg.llamacpp_version),
             executable: executable.map(|path| path.to_string_lossy().into_owned()),
             gpu: crate::llamacpp_install::windows_gpu_snapshot(),
             cuda_available: devices
@@ -306,12 +328,12 @@ pub async fn github_access(
 }
 
 #[tauri::command]
-pub fn clear_github_token(state: State<'_, Arc<AppState>>) -> Result<PersistedConfig, String> {
+pub fn clear_github_token(state: State<'_, Arc<AppState>>) -> Result<PublicSettings, String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
     cfg.github_token.clear();
     cfg.save().map_err(|e| e.to_string())?;
-    Ok(cfg.clone())
+    Ok(public_settings(&cfg))
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +937,277 @@ pub async fn model_stats(
     })
 }
 
+#[derive(Clone, Deserialize)]
+pub struct ContextFitRequest {
+    pub backend: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default)]
+    pub context_tokens: Option<usize>,
+    #[serde(default)]
+    pub quant: Option<String>,
+    #[serde(default)]
+    pub kv_cache_dtype: Option<String>,
+    #[serde(default)]
+    pub gpu_mem_util: Option<f64>,
+    #[serde(default)]
+    pub cpu_offload_gb: Option<usize>,
+    #[serde(default)]
+    pub kv_offload_gb: Option<usize>,
+    #[serde(default)]
+    pub cache_type_k: Option<String>,
+    #[serde(default)]
+    pub cache_type_v: Option<String>,
+    #[serde(default)]
+    pub flash_attn: Option<bool>,
+    #[serde(default)]
+    pub n_gpu_layers: Option<usize>,
+    #[serde(default)]
+    pub n_cpu_moe: Option<usize>,
+    #[serde(default)]
+    pub fit: Option<bool>,
+    #[serde(default)]
+    pub fit_target: Option<usize>,
+    #[serde(default)]
+    pub no_kv_offload: Option<bool>,
+}
+
+fn inferred_vllm_quant(model_id: &str, requested: Option<&str>) -> String {
+    let requested = requested.unwrap_or("auto").trim().to_ascii_lowercase();
+    if requested != "auto" && !requested.is_empty() {
+        return requested;
+    }
+    let id = model_id.to_ascii_lowercase();
+    if id.contains("gptq") {
+        "gptq".into()
+    } else if id.contains("awq") {
+        "awq".into()
+    } else if id.contains("fp8") {
+        "fp8".into()
+    } else {
+        "fp16".into()
+    }
+}
+
+fn cached_vllm_weight_gib(st: &AppState, model_id: &str) -> Option<f64> {
+    let cfg = st.config();
+    let distro = st.resolve_distro();
+    let python = format!("{}/bin/python", cfg.venv_dir.trim_end_matches('/'));
+    let hub = cfg
+        .advanced_settings
+        .hf_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{}/hub", value.trim_end_matches('/')))
+        .unwrap_or_else(|| "~/.cache/huggingface/hub".into());
+    let script = format!(
+        r#"{WSL_TILDE_EXPANSION_SNIPPET}
+venv_python=$(__llm_panel_expand_tilde {python})
+hub_dir=$(__llm_panel_expand_tilde {hub})
+export LLMP_CTX_MODEL={model}
+export HF_HUB_DIR="$hub_dir"
+"$venv_python" - <<'PY'
+import os
+from huggingface_hub import scan_cache_dir
+model = os.environ["LLMP_CTX_MODEL"]
+for repo in scan_cache_dir(os.environ["HF_HUB_DIR"]).repos:
+    if repo.repo_id.lower() == model.lower():
+        print(int(repo.size_on_disk))
+        break
+PY"#,
+        WSL_TILDE_EXPANSION_SNIPPET = WSL_TILDE_EXPANSION_SNIPPET,
+        model = server::shell_quote(model_id),
+        hub = crate::wsl::shell_quote_wsl(&hub),
+        python = crate::wsl::shell_quote_wsl(&python),
+    );
+    let output = crate::wsl::run_script(&distro, &script);
+    if !output.ok {
+        return None;
+    }
+    output
+        .stdout
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .map(|bytes| bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+}
+
+#[tauri::command]
+pub async fn analyze_context_fit(
+    state: State<'_, Arc<AppState>>,
+    input: ContextFitRequest,
+) -> Result<crate::context_fit::ContextFitReport, String> {
+    let st = (*state).clone();
+    analyze_context_fit_inner(&st, input).await
+}
+
+async fn analyze_context_fit_inner(
+    st: &AppState,
+    input: ContextFitRequest,
+) -> Result<crate::context_fit::ContextFitReport, String> {
+    use crate::context_fit::{
+        analyze_llama_context, analyze_vllm_context, LlamaFitInput, VllmFitInput,
+    };
+    use crate::state::ServerBackend;
+
+    let cfg = st.config();
+    let backend = input.backend.parse::<ServerBackend>()?;
+    match backend {
+        ServerBackend::Vllm => {
+            let model_id = input.model_id.trim();
+            if model_id.is_empty() {
+                return Err("A vLLM model ID is required.".into());
+            }
+            let token = st.hf_token();
+            let stats = hf::enrich(
+                &st.http,
+                model_id,
+                Some(&st.enrichment_cache),
+                token.as_deref(),
+            )
+            .await
+            .ok_or_else(|| format!("Could not read model metadata for {model_id}"))?;
+            let requested = input
+                .context_tokens
+                .filter(|value| *value > 0)
+                .unwrap_or(stats.context);
+            let quant = inferred_vllm_quant(model_id, input.quant.as_deref());
+            let (weight_gib, weight_source) = match cached_vllm_weight_gib(st, model_id) {
+                Some(value) => (Some(value), "local_hf_cache".to_string()),
+                None => (
+                    stats
+                        .params_b
+                        .map(|params| estimate::weight_gb(params, &quant)),
+                    "parameter_estimate".to_string(),
+                ),
+            };
+            let gpu = crate::wsl::gpu_snapshot(&st.resolve_distro())
+                .or_else(|| st.gpu.lock().unwrap().clone());
+            let (ram_total_mb, ram_available_mb) =
+                crate::wsl::try_detect_wsl_memory(&st.resolve_distro())
+                    .map(|(total, available)| (Some(total), Some(available)))
+                    .unwrap_or((None, None));
+            let kv_cache_dtype = input
+                .kv_cache_dtype
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(cfg.advanced_settings.kv_cache_dtype.as_str())
+                .to_ascii_lowercase();
+            let memory = &cfg.memory_settings;
+            Ok(analyze_vllm_context(&VllmFitInput {
+                model_id: model_id.to_string(),
+                requested_context: requested,
+                native_context: Some(stats.context),
+                context_estimated: stats.context_estimated,
+                weight_gib,
+                weight_source,
+                n_layers: stats.n_layers,
+                n_kv_heads: stats.n_kv_heads,
+                head_dim: stats.head_dim,
+                kv_cache_dtype,
+                vram_total_mb: gpu
+                    .as_ref()
+                    .map(|value| value.vram_total_mb)
+                    .filter(|value| *value > 0),
+                vram_free_mb: gpu
+                    .as_ref()
+                    .map(|value| value.vram_free_mb)
+                    .filter(|value| *value > 0),
+                ram_total_mb,
+                ram_available_mb,
+                gpu_mem_util: input
+                    .gpu_mem_util
+                    .unwrap_or(memory.default_gpu_mem_util)
+                    .clamp(0.10, 0.95),
+                vram_overhead_mb: memory.vram_overhead_mb,
+                max_context_cap: memory.max_context_cap,
+                ram_overflow_enabled: memory.enable_ram_overflow,
+                manual_ram_limit_mb: memory.manual_ram_limit_mb,
+                safety_reserve_mb: memory.safety_reserve_mb as f64,
+                cpu_offload_gb: input.cpu_offload_gb.unwrap_or(0),
+                kv_offload_gb: input.kv_offload_gb.unwrap_or(0),
+            }))
+        }
+        ServerBackend::Llamacpp => {
+            let raw_path = input
+                .model_path
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(input.model_id.as_str());
+            let path =
+                server::resolve_gguf_model_path(raw_path, &cfg.gguf_dir, &st.resolve_distro())
+                    .ok_or_else(|| format!("GGUF file not found: {raw_path}"))?;
+            if !path.is_file() {
+                return Err(format!(
+                    "GGUF file is not accessible from Windows: {}",
+                    path.display()
+                ));
+            }
+            let metadata = crate::gguf::metadata_from_path(&path)
+                .map_err(|error| format!("Could not read GGUF metadata: {error}"))?;
+            let weight_gib = std::fs::metadata(&path)
+                .ok()
+                .map(|meta| meta.len() as f64 / 1024.0 / 1024.0 / 1024.0);
+            let gpu = crate::llamacpp_install::windows_gpu_snapshot()
+                .or_else(|| st.gpu.lock().unwrap().clone());
+            let specs = crate::llmfit_adapter::get_system_specs();
+            let requested = input
+                .context_tokens
+                .filter(|value| *value > 0)
+                .or(metadata.context_length)
+                .ok_or_else(|| {
+                    "A context length is required because the GGUF has no native context metadata."
+                        .to_string()
+                })?;
+            Ok(analyze_llama_context(&LlamaFitInput {
+                model_id: path.to_string_lossy().into_owned(),
+                requested_context: requested,
+                native_context: metadata.context_length,
+                weight_gib,
+                n_layers: metadata.block_count,
+                n_kv_heads: metadata.head_count_kv.or(metadata.head_count),
+                key_head_dim: metadata.key_head_dim,
+                value_head_dim: metadata.value_head_dim,
+                cache_type_k: input.cache_type_k.unwrap_or_else(|| "q8_0".into()),
+                cache_type_v: input.cache_type_v.unwrap_or_else(|| "q8_0".into()),
+                flash_attn: input.flash_attn.unwrap_or(true),
+                n_gpu_layers: input.n_gpu_layers,
+                n_cpu_moe: input.n_cpu_moe,
+                fit: input.fit.unwrap_or(true),
+                fit_target_mb: input.fit_target.unwrap_or(1_024) as f64,
+                no_kv_offload: input.no_kv_offload.unwrap_or(false),
+                vram_total_mb: gpu
+                    .as_ref()
+                    .map(|value| value.vram_total_mb)
+                    .filter(|value| *value > 0),
+                vram_free_mb: gpu
+                    .as_ref()
+                    .map(|value| value.vram_free_mb)
+                    .filter(|value| *value > 0),
+                ram_total_mb: Some((specs.total_ram_gb * 1024.0).round() as u64),
+                ram_available_mb: Some((specs.available_ram_gb * 1024.0).round() as u64),
+                vram_overhead_mb: 1_024.0,
+            }))
+        }
+    }
+}
+
+fn compose_hf_cache_model_exists_script(hub_dir: &str, dir_name: &str) -> String {
+    format!(
+        r#"{WSL_TILDE_EXPANSION_SNIPPET}
+hub_dir=$(__llm_panel_expand_tilde {hub_dir})
+dir_name=$(__llm_panel_expand_tilde {dir_name})
+[ -d "$hub_dir/$dir_name" ] && echo exists
+"#,
+        hub_dir = crate::wsl::shell_quote_wsl(hub_dir),
+        dir_name = crate::wsl::shell_quote_wsl(dir_name),
+    )
+}
+
 #[tauri::command]
 pub fn pull_model(
     state: State<'_, Arc<AppState>>,
@@ -922,6 +1215,7 @@ pub fn pull_model(
     model_id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
+    crate::hf::validate_model_id(&model_id).map_err(|e| e.to_string())?;
 
     // Check if the model is already in imported local models
     if st
@@ -949,10 +1243,8 @@ pub fn pull_model(
         "~/.cache/huggingface/hub".to_string()
     };
     let dir_name = format!("models--{}", model_id.replace('/', "--"));
-    let check = crate::wsl::run_script(
-        &distro,
-        &format!("[ -d \"{hub_dir}/{dir_name}\" ] && echo exists"),
-    );
+    let check_script = compose_hf_cache_model_exists_script(&hub_dir, &dir_name);
+    let check = crate::wsl::run_script(&distro, &check_script);
     if check.stdout.contains("exists") {
         return Err(format!(
             "Model \"{}\" is already downloaded in your library",
@@ -980,9 +1272,15 @@ pub fn pull_status(state: State<'_, Arc<AppState>>) -> PullState {
 #[tauri::command]
 pub async fn pull_cancel(state: State<'_, Arc<AppState>>, model_id: String) -> Result<(), String> {
     let st = (*state).clone();
+    crate::hf::validate_model_id(&model_id).map_err(|e| e.to_string())?;
     let distro = st.resolve_distro();
-    // Kill any hf download processes matching this model id
-    let script = format!("pkill -f 'hf download.*[ /]{}(\\s|$)' || true", model_id);
+    // Keep the validated id inside a shell-quoted pattern; no user text is
+    // interpolated into the command structure itself.
+    let pattern = format!("hf download.*{model_id}([[:space:]]|$)");
+    let script = format!(
+        "pkill -f -- {} || true",
+        crate::wsl::shell_quote_wsl(&pattern)
+    );
     let _ = crate::wsl::run_script(&distro, &script);
     st.pulling.lock().unwrap().remove(&model_id);
     Ok(())
@@ -1014,7 +1312,23 @@ pub fn servers_list(state: State<'_, Arc<AppState>>) -> Vec<ServerListRow> {
         .collect()
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
+#[serde(transparent)]
+pub struct OptionalField<T>(Option<T>);
+
+impl<T> Default for OptionalField<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> OptionalField<T> {
+    fn into_inner(self) -> Option<T> {
+        self.0
+    }
+}
+
+#[derive(Clone, serde::Deserialize)]
 pub struct ServerInput {
     pub id: Option<String>,
     pub backend: Option<String>,
@@ -1023,34 +1337,56 @@ pub struct ServerInput {
     pub task: Option<String>,
     pub port: Option<u16>,
     pub gpu_mem_util: Option<f64>,
-    pub max_model_len: Option<usize>,
+    #[serde(default)]
+    pub max_model_len: OptionalField<usize>,
     pub quant: Option<String>,
-    pub served_model_name: Option<String>,
+    #[serde(default)]
+    pub served_model_name: OptionalField<String>,
+    #[serde(default)]
+    pub kv_cache_dtype: OptionalField<String>,
     pub enforce_eager: Option<bool>,
-    pub swap_space_gb: Option<usize>,
-    pub cpu_offload_gb: Option<usize>,
-    pub model_path: Option<String>,
-    pub mmproj_path: Option<String>,
-    pub ctx_size: Option<usize>,
-    pub n_gpu_layers: Option<usize>,
-    pub n_cpu_moe: Option<usize>,
+    #[serde(default)]
+    pub swap_space_gb: OptionalField<usize>,
+    #[serde(default)]
+    pub cpu_offload_gb: OptionalField<usize>,
+    #[serde(default)]
+    pub model_path: OptionalField<String>,
+    #[serde(default)]
+    pub mmproj_path: OptionalField<String>,
+    #[serde(default)]
+    pub ctx_size: OptionalField<usize>,
+    #[serde(default)]
+    pub n_gpu_layers: OptionalField<usize>,
+    #[serde(default)]
+    pub n_cpu_moe: OptionalField<usize>,
     pub fit: Option<bool>,
-    pub fit_target: Option<usize>,
-    pub device: Option<String>,
-    pub api_key: Option<String>,
-    pub log_verbosity: Option<u8>,
+    #[serde(default)]
+    pub fit_target: OptionalField<usize>,
+    #[serde(default)]
+    pub device: OptionalField<String>,
+    #[serde(default)]
+    pub api_key: OptionalField<String>,
+    #[serde(default)]
+    pub clear_api_key: Option<bool>,
+    #[serde(default)]
+    pub log_verbosity: OptionalField<u8>,
     pub flash_attn: Option<bool>,
     pub cache_type_k: Option<String>,
     pub cache_type_v: Option<String>,
-    pub threads: Option<usize>,
-    pub batch_size: Option<usize>,
-    pub ubatch_size: Option<usize>,
+    #[serde(default)]
+    pub threads: OptionalField<usize>,
+    #[serde(default)]
+    pub batch_size: OptionalField<usize>,
+    #[serde(default)]
+    pub ubatch_size: OptionalField<usize>,
     pub parallel: Option<usize>,
     pub jinja: Option<bool>,
     pub no_kv_offload: Option<bool>,
     pub metrics: Option<bool>,
-    pub extra_args: Option<Vec<String>>,
-    pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub extra_args: OptionalField<Vec<String>>,
+    #[serde(default)]
+    pub env: OptionalField<std::collections::BTreeMap<String, String>>,
     pub restart: Option<bool>,
     pub llamacpp_channel: Option<crate::state::LlamaCppChannel>,
 }
@@ -1061,16 +1397,26 @@ pub async fn servers_create(
     input: ServerInput,
 ) -> Result<ServerDef, String> {
     let st = (*state).clone();
-    let name = input.name.ok_or_else(|| "name is required".to_string())?;
-    let model_id = input.model_id.ok_or_else(|| "model_id is required".to_string())?;
-    // Pick a free port if not given.
-    let existing: Vec<u16> = st.config().servers.iter().map(|s| s.port).collect();
+    let cfg = st.config();
+    let name = input
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| "name is required".to_string())?;
+    let model_id = input
+        .model_id
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .ok_or_else(|| "model_id is required".to_string())?;
+    let backend = input.backend.clone().unwrap_or_else(|| "vllm".into());
+    let backend_kind = backend.parse::<crate::state::ServerBackend>()?;
+
+    let existing: Vec<u16> = cfg.servers.iter().map(|s| s.port).collect();
     let port = match input.port {
         Some(p) => {
             if existing.contains(&p) {
                 return Err(format!("port {p} already used by another server"));
             }
-            // verify it's actually free
             if std::net::TcpListener::bind(("127.0.0.1", p)).is_err() {
                 return Err(format!("port {p} is in use outside the app"));
             }
@@ -1078,59 +1424,42 @@ pub async fn servers_create(
         }
         None => server::alloc_port(&existing).map_err(|e| e.to_string())?,
     };
-    let quant = input
-        .quant
-        .unwrap_or_else(|| st.config().default_quant.clone());
-    let task = input.task.unwrap_or_else(|| "instruct".into());
-    let token = st.hf_token();
-    // Local model folders (imported WSL paths) have no HF metadata to enrich.
-    let is_local_path = model_id.starts_with('/');
-    // Default max_model_len := min(declared context, VRAM context-fit) at quant.
-    let max_model_len = match input.max_model_len {
-        Some(l) if l > 0 => Some(l),
-        _ if is_local_path => None,
-        _ => {
-            let stats = hf::enrich(
-                &st.http,
-                &model_id,
-                Some(&st.enrichment_cache),
-                token.as_deref(),
-            )
-            .await;
-            let gpu = st.gpu.lock().unwrap().clone();
-            let fit = match (&stats, gpu.as_ref()) {
-                (Some(s), Some(g))
-                    if s.n_layers.is_some()
-                        && s.n_kv_heads.is_some()
-                        && s.head_dim.is_some()
-                        && s.params_b.is_some()
-                        && g.vram_total_mb > 0 =>
-                {
-                    let kvb = estimate::kv_bytes_per_token(
-                        s.n_layers.unwrap(),
-                        s.n_kv_heads.unwrap(),
-                        s.head_dim.unwrap(),
-                    );
-                    Some(estimate::context_fit(
-                        g.vram_total_mb as f64,
-                        input
-                            .gpu_mem_util
-                            .unwrap_or(st.config().memory_settings.default_gpu_mem_util),
-                        s.params_b.unwrap(),
-                        &quant,
-                        kvb,
-                        2500.0,
-                    ))
-                }
-                _ => None,
-            };
-            let max_ctx = stats.as_ref().map(|s| s.context).unwrap_or(4096);
-            Some(fit.map(|f| f.min(max_ctx)).unwrap_or(max_ctx))
+
+    let gpu_mem_util = input
+        .gpu_mem_util
+        .unwrap_or(cfg.memory_settings.default_gpu_mem_util);
+    if backend_kind == crate::state::ServerBackend::Vllm
+        && !(0.10..=0.95).contains(&gpu_mem_util)
+    {
+        return Err("vLLM GPU memory utilization must be between 0.10 and 0.95".into());
+    }
+
+    let quant = match backend_kind {
+        crate::state::ServerBackend::Vllm => input
+            .quant
+            .clone()
+            .unwrap_or_else(|| cfg.default_quant.clone())
+            .to_ascii_lowercase(),
+        crate::state::ServerBackend::Llamacpp => {
+            input.quant.clone().unwrap_or_else(|| "GGUF".into())
         }
     };
-    let params_b = if is_local_path {
-        None
-    } else {
+    let task = match backend_kind {
+        crate::state::ServerBackend::Vllm => {
+            let task = input.task.clone().unwrap_or_else(|| "instruct".into());
+            if task == "embed" { "embed" } else { "instruct" }.to_string()
+        }
+        crate::state::ServerBackend::Llamacpp => "instruct".into(),
+    };
+
+    let model_lower = model_id.to_ascii_lowercase();
+    let is_local_path = model_id.starts_with('/')
+        || model_id.starts_with('\\')
+        || model_lower.ends_with(".gguf")
+        || PathBuf::from(&model_id).is_absolute();
+    let should_enrich = backend_kind == crate::state::ServerBackend::Vllm && !is_local_path;
+    let stats = if should_enrich {
+        let token = st.hf_token();
         hf::enrich(
             &st.http,
             &model_id,
@@ -1138,58 +1467,147 @@ pub async fn servers_create(
             token.as_deref(),
         )
         .await
-        .and_then(|s| s.params_b)
+    } else {
+        None
     };
+
+    let requested_max_len = input.max_model_len.clone().into_inner().filter(|len| *len > 0);
+    let max_model_len = if backend_kind == crate::state::ServerBackend::Llamacpp {
+        None
+    } else if let Some(len) = requested_max_len {
+        Some(len)
+    } else if !should_enrich {
+        None
+    } else {
+        let gpu = st.gpu.lock().unwrap().clone();
+        let fit = match (stats.as_ref(), gpu.as_ref()) {
+            (Some(s), Some(g))
+                if s.n_layers.is_some()
+                    && s.n_kv_heads.is_some()
+                    && s.head_dim.is_some()
+                    && s.params_b.is_some()
+                    && g.vram_total_mb > 0 =>
+            {
+                let kvb = estimate::kv_bytes_per_token(
+                    s.n_layers.unwrap(),
+                    s.n_kv_heads.unwrap(),
+                    s.head_dim.unwrap(),
+                );
+                Some(estimate::context_fit(
+                    g.vram_total_mb as f64,
+                    gpu_mem_util,
+                    s.params_b.unwrap(),
+                    &quant,
+                    kvb,
+                    cfg.memory_settings.vram_overhead_mb,
+                ))
+            }
+            _ => None,
+        };
+        let declared_limit = stats.as_ref().map(|s| s.context).unwrap_or(4096);
+        let configured_limit = cfg
+            .memory_settings
+            .max_context_cap
+            .map(|cap| cap.min(declared_limit))
+            .unwrap_or(declared_limit);
+        Some(fit.map(|len| len.min(configured_limit)).unwrap_or(configured_limit))
+    };
+    let params_b = stats.as_ref().and_then(|stats| stats.params_b);
+
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let def = ServerDef {
-        backend: input.backend.unwrap_or_else(|| "vllm".into()),
+    let mut def = ServerDef {
+        backend,
         id: format!("srv-{ts:x}"),
         name: name.trim().to_string(),
         model_id,
         task,
         port,
-        gpu_mem_util: input
-            .gpu_mem_util
-            .unwrap_or(st.config().memory_settings.default_gpu_mem_util),
+        gpu_mem_util,
         max_model_len,
         quant,
-        served_model_name: input.served_model_name.filter(|s| !s.trim().is_empty()),
+        served_model_name: input
+            .served_model_name
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        kv_cache_dtype: input
+            .kv_cache_dtype
+            .clone()
+            .into_inner()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty() && value != "auto"),
         enforce_eager: input.enforce_eager.unwrap_or(true),
         params_b,
-        swap_space_gb: input.swap_space_gb,
-        cpu_offload_gb: input.cpu_offload_gb,
+        swap_space_gb: input.swap_space_gb.clone().into_inner().filter(|value| *value > 0),
+        cpu_offload_gb: input.cpu_offload_gb.clone().into_inner().filter(|value| *value > 0),
         was_running: false,
-        model_path: input.model_path,
-        mmproj_path: input.mmproj_path,
-        ctx_size: input.ctx_size,
-        n_gpu_layers: input.n_gpu_layers,
-        n_cpu_moe: input.n_cpu_moe,
+        model_path: input
+            .model_path
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        mmproj_path: input
+            .mmproj_path
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        ctx_size: input.ctx_size.clone().into_inner().filter(|value| *value > 0),
+        n_gpu_layers: input.n_gpu_layers.clone().into_inner(),
+        n_cpu_moe: input.n_cpu_moe.clone().into_inner().filter(|value| *value > 0),
         fit: input.fit.unwrap_or(true),
-        fit_target: input.fit_target,
-        device: input.device.filter(|v| !v.trim().is_empty()),
-        api_key: input.api_key.filter(|v| !v.trim().is_empty()),
-        log_verbosity: input.log_verbosity,
+        fit_target: input.fit_target.clone().into_inner().filter(|value| *value > 0),
+        device: input
+            .device
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        api_key: input
+            .api_key
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        log_verbosity: input.log_verbosity.clone().into_inner(),
         flash_attn: input.flash_attn.unwrap_or(true),
-        cache_type_k: input.cache_type_k.unwrap_or_else(|| "q8_0".into()),
-        cache_type_v: input.cache_type_v.unwrap_or_else(|| "q8_0".into()),
-        threads: input.threads,
-        batch_size: input.batch_size,
-        ubatch_size: input.ubatch_size,
-        parallel: input.parallel.unwrap_or(1),
+        cache_type_k: input
+            .cache_type_k
+            .clone()
+            .unwrap_or_else(|| "q8_0".into()),
+        cache_type_v: input
+            .cache_type_v
+            .clone()
+            .unwrap_or_else(|| "q8_0".into()),
+        threads: input.threads.clone().into_inner().filter(|value| *value > 0),
+        batch_size: input.batch_size.clone().into_inner().filter(|value| *value > 0),
+        ubatch_size: input.ubatch_size.clone().into_inner().filter(|value| *value > 0),
+        parallel: input.parallel.unwrap_or(0),
         jinja: input.jinja.unwrap_or(true),
         no_kv_offload: input.no_kv_offload.unwrap_or(false),
         metrics: input.metrics.unwrap_or(true),
-        extra_args: input.extra_args.unwrap_or_default(),
-        env: BTreeMap::new(),
-        llamacpp_channel: input.llamacpp_channel.unwrap_or(crate::state::LlamaCppChannel::Upstream),
+        extra_args: input.extra_args.clone().into_inner().unwrap_or_default(),
+        env: input.env.clone().into_inner().unwrap_or_default(),
+        llamacpp_channel: input
+            .llamacpp_channel
+            .unwrap_or(crate::state::LlamaCppChannel::Upstream),
     };
+    for (name, value) in &def.env {
+        server::validate_env_name(name)?;
+        if value == crate::state::SECRET_PLACEHOLDER {
+            return Err("secret placeholders are only valid when updating an existing server".into());
+        }
+    }
+    if def.api_key.as_deref() == Some(crate::state::SECRET_PLACEHOLDER) {
+        def.api_key = None;
+    }
+    def.normalize_for_backend()?;
     let mut cfg = st.config.lock().unwrap();
-    cfg.servers.push(def.clone());
-    cfg.save().map_err(|e| e.to_string())?;
-    Ok(def)
+    let mut next = cfg.clone();
+    next.servers.push(def.clone());
+    next.save().map_err(|e| e.to_string())?;
+    *cfg = next;
+    Ok(crate::state::redact_server_def(&def))
 }
 
 #[tauri::command]
@@ -1202,14 +1620,16 @@ pub async fn servers_delete(
     let st2 = st.clone();
     let id2 = id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        server::stop_server(&st2, Some(&app), &id2).ok();
+        server::stop_server(&st2, Some(&app), &id2).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
     st.server_metrics.lock().unwrap().remove(&id);
     let mut cfg = st.config.lock().unwrap();
-    cfg.servers.retain(|s| s.id != id);
-    cfg.save().map_err(|e| e.to_string())?;
+    let mut next = cfg.clone();
+    next.servers.retain(|s| s.id != id);
+    next.save().map_err(|e| e.to_string())?;
+    *cfg = next;
     Ok(())
 }
 
@@ -1265,12 +1685,25 @@ pub fn servers_update_env(
 ) -> Result<(), String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
-    if let Some(server) = cfg.servers.iter_mut().find(|s| s.id == input.id) {
-        server.env = input.env;
-        cfg.save().map_err(|e| e.to_string())?;
-    } else {
-        return Err("Server not found".into());
+    let index = cfg
+        .servers
+        .iter()
+        .position(|server| server.id == input.id)
+        .ok_or_else(|| "Server not found".to_string())?;
+    let original = cfg.servers[index].clone();
+    let mut updated = original.clone();
+    updated.env = input.env;
+    crate::state::merge_server_secret_placeholders(&mut updated, Some(&original));
+    for (name, value) in &updated.env {
+        server::validate_env_name(name)?;
+        if value == crate::state::SECRET_PLACEHOLDER {
+            return Err("secret placeholders could not be restored for this server".into());
+        }
     }
+    let mut next = cfg.clone();
+    next.servers[index] = updated;
+    next.save().map_err(|e| e.to_string())?;
+    *cfg = next;
     if input.restart.unwrap_or(false) {
         drop(cfg);
         server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())?;
@@ -1286,65 +1719,201 @@ pub fn servers_update(
 ) -> Result<ServerDef, String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
-    let id = input.id.ok_or_else(|| "id is required".to_string())?;
+    let id = input
+        .id
+        .clone()
+        .ok_or_else(|| "id is required".to_string())?;
+    validate_server_id(&id)?;
     let idx = cfg.servers.iter().position(|s| s.id == id).ok_or("Server not found")?;
-    // Collect existing ports before mutating the server
     let existing_ports: Vec<u16> = cfg.servers.iter().filter(|s| s.id != id).map(|s| s.port).collect();
-    let server = &mut cfg.servers[idx];
+    let original = cfg.servers[idx].clone();
+    let mut updated = original.clone();
+    let previous_model = updated.model_id.clone();
 
-    if let Some(v) = input.backend { server.backend = v; }
-    if let Some(v) = input.llamacpp_channel { server.llamacpp_channel = v; }
-    if let Some(v) = input.name { server.name = v; }
-    if let Some(v) = input.model_id { server.model_id = v; }
-    if let Some(v) = input.task { server.task = v; }
-    if let Some(v) = input.port {
-        // verify port is free and not used by other servers, unless unchanged (a running server owns it)
-        if existing_ports.contains(&v) { return Err(format!("port {v} already used by another server")); }
-        if v != server.port && std::net::TcpListener::bind(("127.0.0.1", v)).is_err() {
-            return Err(format!("port {v} is in use"));
-        }
-        server.port = v;
+    if let Some(value) = input.backend.clone() {
+        updated.backend = value;
     }
-    if let Some(v) = input.gpu_mem_util { server.gpu_mem_util = v; }
-    if let Some(v) = input.max_model_len { server.max_model_len = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.quant { server.quant = v; }
-    if let Some(v) = input.served_model_name { server.served_model_name = if v.trim().is_empty() { None } else { Some(v) }; }
-    if let Some(v) = input.enforce_eager { server.enforce_eager = v; }
-    if let Some(v) = input.swap_space_gb { server.swap_space_gb = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.cpu_offload_gb { server.cpu_offload_gb = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.model_path { server.model_path = if v.trim().is_empty() { None } else { Some(v) }; }
-    if let Some(v) = input.mmproj_path { server.mmproj_path = if v.trim().is_empty() { None } else { Some(v) }; }
-    if let Some(v) = input.ctx_size { server.ctx_size = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.n_gpu_layers { server.n_gpu_layers = Some(v); }
-    if let Some(v) = input.n_cpu_moe { server.n_cpu_moe = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.fit { server.fit = v; }
-    if let Some(v) = input.fit_target { server.fit_target = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.device { server.device = if v.trim().is_empty() { None } else { Some(v) }; }
-    if let Some(v) = input.api_key { server.api_key = if v.trim().is_empty() { None } else { Some(v) }; }
-    if let Some(v) = input.log_verbosity { server.log_verbosity = Some(v); }
-    if let Some(v) = input.flash_attn { server.flash_attn = v; }
-    if let Some(v) = input.cache_type_k { server.cache_type_k = v; }
-    if let Some(v) = input.cache_type_v { server.cache_type_v = v; }
-    if let Some(v) = input.threads { server.threads = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.batch_size { server.batch_size = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.ubatch_size { server.ubatch_size = if v > 0 { Some(v) } else { None }; }
-    if let Some(v) = input.parallel { server.parallel = v; }
-    if let Some(v) = input.jinja { server.jinja = v; }
-    if let Some(v) = input.no_kv_offload { server.no_kv_offload = v; }
-    if let Some(v) = input.metrics { server.metrics = v; }
-    if let Some(v) = input.extra_args { server.extra_args = v; }
-    if let Some(v) = input.env { server.env = v; }
+    let backend_kind = updated.backend_kind()?;
+    if let Some(value) = input.llamacpp_channel {
+        updated.llamacpp_channel = value;
+    }
+    if let Some(value) = input.name.clone() {
+        updated.name = value;
+    }
+    if let Some(value) = input.model_id.clone() {
+        updated.model_id = value;
+    }
+    if let Some(value) = input.task.clone() {
+        updated.task = value;
+    }
+    if let Some(value) = input.port {
+        if existing_ports.contains(&value) {
+            return Err(format!("port {value} already used by another server"));
+        }
+        if value != updated.port
+            && std::net::TcpListener::bind(("127.0.0.1", value)).is_err()
+        {
+            return Err(format!("port {value} is in use"));
+        }
+        updated.port = value;
+    }
+    if let Some(value) = input.gpu_mem_util {
+        updated.gpu_mem_util = value;
+    }
+    if backend_kind == crate::state::ServerBackend::Vllm
+        && !(0.10..=0.95).contains(&updated.gpu_mem_util)
+    {
+        return Err("vLLM GPU memory utilization must be between 0.10 and 0.95".into());
+    }
+    updated.max_model_len = input
+        .max_model_len
+        .clone()
+        .into_inner()
+        .filter(|len| *len > 0);
+    if let Some(value) = input.quant.clone() {
+        updated.quant = if backend_kind == crate::state::ServerBackend::Vllm {
+            value.to_ascii_lowercase()
+        } else {
+            value
+        };
+    }
+    updated.served_model_name = input
+        .served_model_name
+        .clone()
+        .into_inner()
+        .filter(|value| !value.trim().is_empty());
+    updated.kv_cache_dtype = input
+        .kv_cache_dtype
+        .clone()
+        .into_inner()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty() && value != "auto");
+    if let Some(value) = input.enforce_eager {
+        updated.enforce_eager = value;
+    }
+    updated.swap_space_gb = input
+        .swap_space_gb
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.cpu_offload_gb = input
+        .cpu_offload_gb
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.model_path = input
+        .model_path
+        .clone()
+        .into_inner()
+        .filter(|value| !value.trim().is_empty());
+    updated.mmproj_path = input
+        .mmproj_path
+        .clone()
+        .into_inner()
+        .filter(|value| !value.trim().is_empty());
+    updated.ctx_size = input
+        .ctx_size
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.n_gpu_layers = input.n_gpu_layers.clone().into_inner();
+    updated.n_cpu_moe = input
+        .n_cpu_moe
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    if let Some(value) = input.fit {
+        updated.fit = value;
+    }
+    updated.fit_target = input
+        .fit_target
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.device = input
+        .device
+        .clone()
+        .into_inner()
+        .filter(|value| !value.trim().is_empty());
+    if input.clear_api_key.unwrap_or(false) {
+        updated.api_key = None;
+    } else if let Some(value) = input.api_key.clone().into_inner() {
+        if value != crate::state::SECRET_PLACEHOLDER {
+            updated.api_key = (!value.trim().is_empty()).then(|| value.trim().to_string());
+        }
+    }
+    updated.log_verbosity = input.log_verbosity.clone().into_inner();
+    if let Some(value) = input.flash_attn {
+        updated.flash_attn = value;
+    }
+    updated.cache_type_k = input
+        .cache_type_k
+        .clone()
+        .unwrap_or_else(|| "q8_0".into());
+    updated.cache_type_v = input
+        .cache_type_v
+        .clone()
+        .unwrap_or_else(|| "q8_0".into());
+    updated.threads = input
+        .threads
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.batch_size = input
+        .batch_size
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.ubatch_size = input
+        .ubatch_size
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
+    updated.parallel = input.parallel.unwrap_or(0);
+    if let Some(value) = input.jinja {
+        updated.jinja = value;
+    }
+    if let Some(value) = input.no_kv_offload {
+        updated.no_kv_offload = value;
+    }
+    updated.metrics = input.metrics.unwrap_or(true);
+    updated.extra_args = input.extra_args.clone().into_inner().unwrap_or_default();
+    if let Some(env) = input.env.clone().into_inner() {
+        updated.env = env;
+        crate::state::merge_server_secret_placeholders(&mut updated, Some(&original));
+    }
+    for (name, value) in &updated.env {
+        server::validate_env_name(name)?;
+        if value == crate::state::SECRET_PLACEHOLDER {
+            return Err("secret placeholders could not be restored for this server".into());
+        }
+    }
+    if updated.model_id != previous_model {
+        updated.params_b = None;
+        updated.max_model_len = None;
+    }
+    updated.normalize_for_backend()?;
 
-    let updated = server.clone();
-    // Drop the mutable reference to server before saving
-    let _ = server;
-    cfg.save().map_err(|e| e.to_string())?;
+    let mut next = cfg.clone();
+    next.servers[idx] = updated.clone();
+    next.save().map_err(|e| e.to_string())?;
+    *cfg = next;
     drop(cfg);
 
-    if input.restart.unwrap_or(false) {
+    let live_active = st
+        .servers
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|live| {
+            live.status == crate::state::ServerStatus::Running
+                || live.status == crate::state::ServerStatus::Starting
+        })
+        .unwrap_or(false);
+    if input.restart.unwrap_or(false) || (live_active && updated != original) {
         server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())?;
     }
-    Ok(updated)
+    Ok(crate::state::redact_server_def(&updated))
 }
 
 #[tauri::command]
@@ -1564,10 +2133,33 @@ pub fn benchmarks_history(
 // Settings
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize)]
+pub struct PublicSettings {
+    #[serde(flatten)]
+    pub config: PersistedConfig,
+    pub hf_token_configured: bool,
+    pub github_token_configured: bool,
+    pub api_key_configured: bool,
+}
+
+fn public_settings(cfg: &PersistedConfig) -> PublicSettings {
+    PublicSettings {
+        config: crate::state::redact_config_for_display(cfg),
+        hf_token_configured: !cfg.hf_token.trim().is_empty(),
+        github_token_configured: !cfg.github_token.trim().is_empty(),
+        api_key_configured: cfg
+            .advanced_settings
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|key| !key.is_empty()),
+    }
+}
+
 #[tauri::command]
-pub fn settings_get(state: State<'_, Arc<AppState>>) -> PersistedConfig {
+pub fn settings_get(state: State<'_, Arc<AppState>>) -> PublicSettings {
     let st = (*state).clone();
-    st.config()
+    public_settings(&st.config())
 }
 
 #[derive(serde::Serialize)]
@@ -1575,6 +2167,7 @@ pub struct GatewayStatus {
     pub enabled: bool,
     pub port: u16,
     pub running: bool,
+    pub auth_configured: bool,
 }
 
 #[tauri::command]
@@ -1583,7 +2176,13 @@ pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
     let cfg = st.config();
     let enabled = cfg.advanced_settings.gateway_enabled;
     let port = cfg.advanced_settings.gateway_port;
-    let running = if enabled {
+    let auth_configured = cfg
+        .advanced_settings
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty());
+    let running = if enabled && auth_configured {
         std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             std::time::Duration::from_millis(300),
@@ -1596,6 +2195,7 @@ pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
         enabled,
         port,
         running,
+        auth_configured,
     }
 }
 
@@ -1607,74 +2207,216 @@ pub struct SettingsPatch {
     pub llamacpp_dir: Option<String>,
     pub gguf_dir: Option<String>,
     pub llamacpp_executable: Option<String>,
+    pub llamacpp_channels: Option<
+        std::collections::BTreeMap<
+            crate::state::LlamaCppChannel,
+            crate::state::LlamaCppChannelConfig,
+        >,
+    >,
     pub hf_token: Option<String>,
     pub github_token: Option<String>,
+    pub clear_hf_token: Option<bool>,
+    pub clear_github_token: Option<bool>,
     pub default_quant: Option<String>,
     pub advanced_settings: Option<crate::state::AdvancedSettings>,
+    pub clear_advanced_api_key: Option<bool>,
+    pub clear_custom_env_vars: Option<bool>,
     pub minimize_to_tray: Option<bool>,
     pub auto_restart_crashed: Option<bool>,
     pub launch_at_login: Option<bool>,
+}
+
+fn validate_imported_wsl_path(path: &str) -> Result<(), String> {
+    let path = path.trim().trim_end_matches('/');
+    let components: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if path.is_empty()
+        || !path.starts_with('/')
+        || components.len() < 3
+        || components.iter().any(|part| *part == "..")
+        || path.contains('\0')
+        || path.contains('\r')
+        || path.contains('\n')
+    {
+        return Err("imported model path must be a non-root WSL directory".into());
+    }
+    Ok(())
+}
+
+fn validate_server_id(id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty()
+        || id.len() > 128
+        || id.chars().any(|ch| ch.is_control() || ch == '\0')
+    {
+        return Err("server id must be 1-128 printable characters".into());
+    }
+    Ok(())
+}
+
+fn validate_advanced_settings(adv: &crate::state::AdvancedSettings) -> Result<(), String> {
+    let host = adv.host.trim();
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':' | '-'))
+    {
+        return Err("host must be a plain IP address or hostname".into());
+    }
+    if adv.gateway_port < 1024 {
+        return Err("gateway_port must be at least 1024".into());
+    }
+    let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+    if !loopback
+        && adv
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .is_none()
+    {
+        return Err("an API key is required before binding vLLM to a non-loopback host".into());
+    }
+    if !matches!(adv.log_level.as_str(), "INFO" | "DEBUG" | "WARNING" | "ERROR") {
+        return Err("log_level must be INFO, DEBUG, WARNING, or ERROR".into());
+    }
+    if !adv
+        .kv_cache_dtype
+        .trim()
+        .is_empty()
+        && !adv
+            .kv_cache_dtype
+            .trim()
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return Err("kv_cache_dtype contains unsupported characters".into());
+    }
+    if let Some(extra) = &adv.extra_vllm_args {
+        shlex::split(extra).ok_or_else(|| "extra_vllm_args has invalid shell quoting".to_string())?;
+    }
+    if let Some(custom) = &adv.custom_env_vars {
+        for line in custom.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (name, _) = line
+                .split_once('=')
+                .ok_or_else(|| "custom_env_vars must use KEY=VALUE lines".to_string())?;
+            server::validate_env_name(name.trim())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub fn settings_set(
     state: State<'_, Arc<AppState>>,
     patch: SettingsPatch,
-) -> Result<PersistedConfig, String> {
+) -> Result<PublicSettings, String> {
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
+    // Apply to a clone so validation failures (for example, clearing a key
+    // while binding to LAN) cannot leave the live state half-mutated.
+    let mut next = cfg.clone();
     if let Some(d) = patch.distro {
         if !d.trim().is_empty() {
-            cfg.distro = d.trim().to_string();
+            next.distro = d.trim().to_string();
         }
     }
     if let Some(d) = patch.llm_dir {
         if !d.trim().is_empty() {
-            cfg.llm_dir = d.trim().to_string();
+            next.llm_dir = d.trim().to_string();
         }
     }
     if let Some(v) = patch.venv_dir {
         if !v.trim().is_empty() {
-            cfg.venv_dir = v.trim().to_string();
+            server::validate_venv_dir(&v)?;
+            next.venv_dir = v.trim().to_string();
         }
-        if let Some(d) = patch.llamacpp_dir {
-            if !d.trim().is_empty() {
-                cfg.llamacpp_dir = d.trim().to_string();
+    }
+    if let Some(d) = patch.llamacpp_dir {
+        if !d.trim().is_empty() {
+            next.llamacpp_dir = d.trim().to_string();
+        }
+    }
+    if let Some(d) = patch.gguf_dir {
+        if !d.trim().is_empty() {
+            next.gguf_dir = d.trim().to_string();
+        }
+    }
+    if let Some(exe) = patch.llamacpp_executable {
+        next.llamacpp_executable = (!exe.trim().is_empty()).then(|| exe.trim().to_string());
+    }
+    if let Some(channels) = patch.llamacpp_channels {
+        next.llamacpp_channels = channels;
+        let upstream = next
+            .llamacpp_channels
+            .get(&crate::state::LlamaCppChannel::Upstream)
+            .cloned();
+        if let Some(upstream) = upstream {
+            if !upstream.dir.trim().is_empty() {
+                next.llamacpp_dir = upstream.dir.clone();
             }
-        }
-        if let Some(d) = patch.gguf_dir {
-            if !d.trim().is_empty() {
-                cfg.gguf_dir = d.trim().to_string();
-            }
-        }
-        if let Some(exe) = patch.llamacpp_executable {
-            cfg.llamacpp_executable = (!exe.trim().is_empty()).then(|| exe.trim().to_string());
+            next.llamacpp_executable = upstream.executable.clone();
+            next.llamacpp_version = upstream.version.clone();
+            next.llamacpp_help = upstream.help.clone();
+            next.llamacpp_installed_tag = upstream.installed_tag.clone();
         }
     }
     if let Some(t) = patch.hf_token {
-        cfg.hf_token = t.trim().to_string();
+        if t != crate::state::SECRET_PLACEHOLDER {
+            next.hf_token = t.trim().to_string();
+        }
+    }
+    if patch.clear_hf_token.unwrap_or(false) {
+        next.hf_token.clear();
     }
     if let Some(t) = patch.github_token {
-        cfg.github_token = t.trim().to_string();
+        if t != crate::state::SECRET_PLACEHOLDER {
+            next.github_token = t.trim().to_string();
+        }
+    }
+    if patch.clear_github_token.unwrap_or(false) {
+        next.github_token.clear();
     }
     if let Some(q) = patch.default_quant {
-        cfg.default_quant = q;
+        next.default_quant = q;
     }
     if let Some(adv) = patch.advanced_settings {
-        cfg.advanced_settings = adv;
+        let mut next_adv = adv;
+        if next_adv.api_key.as_deref() == Some(crate::state::SECRET_PLACEHOLDER)
+            || next_adv.api_key.is_none()
+        {
+            // The webview receives a redacted key, so an omitted/null value is
+            // a preservation request unless the explicit clear flag is set.
+            next_adv.api_key = next.advanced_settings.api_key.clone();
+        }
+        if next_adv.custom_env_vars.is_none() {
+            next_adv.custom_env_vars = next.advanced_settings.custom_env_vars.clone();
+        }
+        next.advanced_settings = next_adv;
     }
+    if patch.clear_advanced_api_key.unwrap_or(false) {
+        next.advanced_settings.api_key = None;
+    }
+    if patch.clear_custom_env_vars.unwrap_or(false) {
+        next.advanced_settings.custom_env_vars = None;
+    }
+    validate_advanced_settings(&next.advanced_settings)?;
     if let Some(m) = patch.minimize_to_tray {
-        cfg.minimize_to_tray = m;
+        next.minimize_to_tray = m;
     }
     if let Some(a) = patch.auto_restart_crashed {
-        cfg.auto_restart_crashed = a;
+        next.auto_restart_crashed = a;
     }
     if let Some(l) = patch.launch_at_login {
-        cfg.launch_at_login = l;
-        let _ = autostart_set(l);
+        next.launch_at_login = l;
+        autostart_set(l).map_err(|e| e.to_string())?;
     }
-    cfg.save().map_err(|e| e.to_string())?;
-    Ok(cfg.clone())
+    next.save().map_err(|e| e.to_string())?;
+    *cfg = next;
+    Ok(public_settings(&cfg))
 }
 
 #[tauri::command]
@@ -1763,34 +2505,72 @@ pub fn config_export(state: State<'_, Arc<AppState>>) -> Result<String, String> 
 pub fn config_import(
     state: State<'_, Arc<AppState>>,
     json: String,
-) -> Result<PersistedConfig, String> {
+) -> Result<PublicSettings, String> {
     let pkg: crate::state::ConfigExportPackage = serde_json::from_str(&json)
         .map_err(|e| format!("Invalid configuration JSON format: {e}"))?;
+    if !pkg
+        .schema
+        .starts_with("local-llm-panel/config-export/")
+    {
+        return Err(format!("Unsupported configuration schema: {}", pkg.schema));
+    }
 
     let st = (*state).clone();
     let mut cfg = st.config.lock().unwrap();
-    cfg.distro = pkg.distro;
-    cfg.llm_dir = pkg.llm_dir;
-    cfg.venv_dir = pkg.venv_dir;
-    cfg.default_quant = pkg.default_quant;
-    cfg.memory_settings = pkg.memory_settings;
-    cfg.advanced_settings = pkg.advanced_settings;
-    cfg.minimize_to_tray = pkg.minimize_to_tray;
-    cfg.auto_restart_crashed = pkg.auto_restart_crashed;
-    cfg.launch_at_login = pkg.launch_at_login;
+    let secrets_omitted = pkg.secrets_omitted;
+    let previous_servers = cfg.servers.clone();
+    let mut next = cfg.clone();
+    next.distro = pkg.distro;
+    next.llm_dir = pkg.llm_dir;
+    next.venv_dir = pkg.venv_dir;
+    server::validate_venv_dir(&next.venv_dir)?;
+    next.default_quant = pkg.default_quant;
+    next.memory_settings = pkg.memory_settings;
+    next.minimize_to_tray = pkg.minimize_to_tray;
+    next.auto_restart_crashed = pkg.auto_restart_crashed;
+    next.launch_at_login = pkg.launch_at_login;
 
-    // For imported servers, ensure they start with was_running = false
-    cfg.servers = pkg
-        .servers
-        .into_iter()
-        .map(|mut s| {
-            s.was_running = false;
-            s
-        })
-        .collect();
+    // Portable exports intentionally omit secrets.  Preserve the local
+    // credentials instead of importing an empty value or an old raw secret.
+    let mut imported_advanced = pkg.advanced_settings;
+    imported_advanced.api_key = next.advanced_settings.api_key.clone();
+    imported_advanced.custom_env_vars = next.advanced_settings.custom_env_vars.clone();
+    next.advanced_settings = imported_advanced;
+    validate_advanced_settings(&next.advanced_settings)?;
 
-    cfg.save().map_err(|e| e.to_string())?;
-    Ok(cfg.clone())
+    // Imported servers are mutation boundaries: validate the backend, restore
+    // placeholders from the matching local definition, and never import raw
+    // environment values from a legacy export.
+    let mut imported_servers = Vec::with_capacity(pkg.servers.len());
+    for mut server in pkg.servers {
+        validate_server_id(&server.id)?;
+        server.was_running = false;
+        let previous = previous_servers.iter().find(|candidate| candidate.id == server.id);
+        crate::state::merge_server_secret_placeholders(&mut server, previous);
+        if !secrets_omitted {
+            server.api_key = previous.and_then(|candidate| candidate.api_key.clone());
+            server.env = previous.map(|candidate| candidate.env.clone()).unwrap_or_default();
+        }
+        server.normalize_for_backend()?;
+        if imported_servers
+            .iter()
+            .any(|candidate: &crate::state::ServerDef| candidate.id == server.id)
+        {
+            return Err(format!("configuration contains duplicate server id {}", server.id));
+        }
+        if imported_servers
+            .iter()
+            .any(|candidate: &crate::state::ServerDef| candidate.port == server.port)
+        {
+            return Err(format!("configuration contains duplicate server port {}", server.port));
+        }
+        imported_servers.push(server);
+    }
+    next.servers = imported_servers;
+
+    next.save().map_err(|e| e.to_string())?;
+    *cfg = next;
+    Ok(public_settings(&cfg))
 }
 
 #[tauri::command]
@@ -1811,6 +2591,12 @@ pub fn server_recipe_export(
 pub fn server_recipe_parse(json: String) -> Result<crate::state::ServerRecipe, String> {
     let recipe: crate::state::ServerRecipe =
         serde_json::from_str(&json).map_err(|e| format!("Invalid server recipe JSON: {e}"))?;
+    if !recipe.schema.starts_with("local-llm-panel/server-recipe/") {
+        return Err(format!("Unsupported server recipe schema: {}", recipe.schema));
+    }
+    if recipe.model_id.trim().is_empty() || recipe.port == 0 {
+        return Err("Recipe must include a model_id and a non-zero port".into());
+    }
     Ok(recipe)
 }
 
@@ -1920,6 +2706,38 @@ pub struct LibraryEntry {
     pub model_path: Option<String>,
 }
 
+const WSL_TILDE_EXPANSION_SNIPPET: &str = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET;
+
+fn compose_hf_cache_scan_script(venv_python: &str, hub_dir: &str) -> String {
+    format!(
+        r#"{WSL_TILDE_EXPANSION_SNIPPET}
+venv_python=$(__llm_panel_expand_tilde {venv_python})
+hub_dir=$(__llm_panel_expand_tilde {hub_dir})
+export LOCAL_LLM_PANEL_HUB_DIR="$hub_dir"
+"$venv_python" - <<'PY'
+import json
+import os
+from huggingface_hub import scan_cache_dir
+cache = scan_cache_dir(os.environ['LOCAL_LLM_PANEL_HUB_DIR'])
+result = []
+for repo in cache.repos:
+    result.append({{
+        'repo_id': repo.repo_id,
+        'size_bytes': repo.size_on_disk,
+        'file_count': repo.nb_files,
+    }})
+print(json.dumps(result))
+PY
+"#,
+        venv_python = crate::wsl::shell_quote_wsl(venv_python),
+        hub_dir = crate::wsl::shell_quote_wsl(hub_dir),
+    )
+}
+
+fn should_scan_hf_cache_fs(python_scan_ok: bool, entries: &[LibraryEntry]) -> bool {
+    !python_scan_ok || entries.is_empty() || entries.iter().any(|entry| entry.size_mb == 0)
+}
+
 /// List models present in the WSL HF cache (~/.cache/huggingface/hub).
 #[tauri::command]
 pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<LibraryEntry>, String> {
@@ -1948,70 +2766,94 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
             "~/.cache/huggingface/hub".to_string()
         };
 
-        // Hub cache dirs are `models--owner--name` or `models--name`; replace the first `--` with `/`.
-        let script = format!(
-            "for d in {hub_dir}/models--*; do [ -d \"$d\" ] || continue; raw=${{d##*/models--}}; if [[ \"$raw\" == *--* ]]; then name=\"${{raw/--//}}\"; else name=\"$raw\"; fi; size=$(du -sm \"$d\" 2>/dev/null | cut -f1); files=$(find \"$d\" -type f 2>/dev/null | wc -l); echo \"$name|$size|$files\"; done"
-        );
-        let out = crate::wsl::run_script(&distro, &script);
+        // Use the app's provisioned venv directly. The system Python does not
+        // necessarily contain huggingface_hub, and inserting a literal "~/..."
+        // into sys.path does not perform shell home expansion.
+        let venv_python = format!("{}/bin/python", st.config().venv_dir.trim_end_matches('/'));
+        let scan_script = compose_hf_cache_scan_script(&venv_python, &hub_dir);
+        let out = crate::wsl::run_script(&distro, &scan_script);
         let mut out_v = Vec::new();
-        for line in out.stdout.lines() {
-            let mut it = line.split('|');
-            let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
-                continue;
-            };
-            let model_id_str = model_id.to_string();
-            let size_mb: u64 = size.parse().unwrap_or(0);
-            let files_cnt: usize = files.parse().unwrap_or(0);
+        let mut python_scan_ok = false;
+        if out.ok {
+            if let Ok(repos) = serde_json::from_str::<Vec<serde_json::Value>>(&out.stdout) {
+                for repo in repos {
+                    let model_id_str = repo["repo_id"].as_str().unwrap_or("").to_string();
+                    let size_bytes = repo["size_bytes"].as_u64().unwrap_or(0);
+                    let files_cnt = repo["file_count"].as_u64().unwrap_or(0) as usize;
+                    let size_mb = size_bytes / (1024 * 1024);
 
-            let mut in_use = false;
-            let mut in_use_server = None;
-            for (srv_name, srv_model) in &running_servers {
-                if srv_model == &model_id_str
-                    || model_id_str.contains(srv_model)
-                    || srv_model.contains(&model_id_str)
-                {
-                    in_use = true;
-                    in_use_server = Some(srv_name.clone());
-                    break;
+                    let mut in_use = false;
+                    let mut in_use_server = None;
+                    for (srv_name, srv_model) in &running_servers {
+                        if srv_model == &model_id_str
+                            || model_id_str.contains(srv_model)
+                            || srv_model.contains(&model_id_str)
+                        {
+                            in_use = true;
+                            in_use_server = Some(srv_name.clone());
+                            break;
+                        }
+                    }
+
+                    let params_b = crate::estimate::parse_params_from_name(&model_id_str);
+                    let quant = if model_id_str.to_uppercase().contains("AWQ") {
+                        Some("AWQ".to_string())
+                    } else if model_id_str.to_uppercase().contains("GPTQ") {
+                        Some("GPTQ".to_string())
+                    } else if model_id_str.to_uppercase().contains("GGUF") {
+                        Some("GGUF".to_string())
+                    } else if model_id_str.to_uppercase().contains("FP8") {
+                        Some("FP8".to_string())
+                    } else {
+                        Some("FP16".to_string())
+                    };
+
+                    let task = if model_id_str.to_lowercase().contains("embed")
+                        || model_id_str.to_lowercase().contains("bge")
+                        || model_id_str.to_lowercase().contains("gte")
+                    {
+                        Some("embed".to_string())
+                    } else {
+                        Some("instruct".to_string())
+                    };
+
+                    out_v.push(LibraryEntry {
+                        model_id: model_id_str,
+                        size_mb,
+                        files: files_cnt,
+                        quant,
+                        params_b,
+                        installed: true,
+                        in_use,
+                        in_use_server,
+                        task,
+                        is_local: false,
+                        model_path: None,
+                    });
+                }
+                python_scan_ok = true;
+            }
+        }
+
+        // Fall back to the filesystem scan when the Python API fails, returns no
+        // repositories, or reports a zero-sized entry. An empty JSON result is
+        // still a successful command, but it must not suppress the fallback:
+        // newer/partial HF cache layouts can be invisible to scan_cache_dir.
+        let needs_fallback = should_scan_hf_cache_fs(python_scan_ok, &out_v);
+        if needs_fallback {
+            let fs_entries = scan_hf_cache_fs(&distro, &hub_dir, &running_servers);
+            // Merge: use filesystem entries for models not found by Python, or with 0 size
+            for fs_entry in fs_entries {
+                if let Some(idx) = out_v.iter().position(|e| e.model_id == fs_entry.model_id) {
+                    if out_v[idx].size_mb == 0 && out_v[idx].files == 0 {
+                        out_v[idx] = fs_entry;
+                    }
+                } else {
+                    out_v.push(fs_entry);
                 }
             }
-
-            let params_b = crate::estimate::parse_params_from_name(&model_id_str);
-            let quant = if model_id_str.to_uppercase().contains("AWQ") {
-                Some("AWQ".to_string())
-            } else if model_id_str.to_uppercase().contains("GPTQ") {
-                Some("GPTQ".to_string())
-            } else if model_id_str.to_uppercase().contains("GGUF") {
-                Some("GGUF".to_string())
-            } else if model_id_str.to_uppercase().contains("FP8") {
-                Some("FP8".to_string())
-            } else {
-                Some("FP16".to_string())
-            };
-
-            let task = if model_id_str.to_lowercase().contains("embed")
-                || model_id_str.to_lowercase().contains("bge")
-                || model_id_str.to_lowercase().contains("gte")
-            {
-                Some("embed".to_string())
-            } else {
-                Some("instruct".to_string())
-            };
-
-            out_v.push(LibraryEntry {
-                model_id: model_id_str,
-                size_mb,
-                files: files_cnt,
-                quant,
-                params_b,
-                installed: true,
-                in_use,
-                in_use_server,
-                task,
-                is_local: false,
-                model_path: None,
-            });
         }
+
         let mut local =
             scan_imported_local_folders(&distro, &st.config().imported_local_models, &running_servers);
         local.extend(scan_native_gguf_library(
@@ -2094,11 +2936,38 @@ pub async fn download_gguf(
     if files.is_empty() {
         return Err("select at least one GGUF file".into());
     }
+    crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
+    if files.iter().any(|file| {
+        let file = file.trim();
+        file.is_empty() || file.starts_with('/') || file.contains("..")
+    }) {
+        return Err("GGUF file paths must be relative and cannot contain '..'".into());
+    }
     let st = (*state).clone();
     let cfg = st.config();
     let token = st.hf_token();
     let model = repo_id.clone();
     let pulling_arc = Arc::clone(&st.pulling);
+    let gguf_root = PathBuf::from(&cfg.gguf_dir);
+    std::fs::create_dir_all(&gguf_root).map_err(|e| e.to_string())?;
+    let gguf_root = gguf_root
+        .canonicalize()
+        .map_err(|e| format!("GGUF directory is not accessible: {e}"))?;
+    let destination = gguf_root.join(
+        repo_id
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("model"),
+    );
+    if destination.exists() {
+        let canonical_destination = destination
+            .canonicalize()
+            .map_err(|e| format!("GGUF destination is not accessible: {e}"))?;
+        if !canonical_destination.starts_with(&gguf_root) {
+            return Err("Refusing to download into a path outside the GGUF directory".into());
+        }
+    }
     {
         let mut pulling = pulling_arc.lock().unwrap();
         if *pulling.get(&model).unwrap_or(&false) {
@@ -2106,14 +2975,7 @@ pub async fn download_gguf(
         }
         pulling.insert(model.clone(), true);
     }
-    let destination = PathBuf::from(cfg.gguf_dir).join(
-        repo_id
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("model"),
-    );
-    tokio::task::spawn_blocking(move || {
+    let download_result = tokio::task::spawn_blocking(move || {
         let started = std::time::Instant::now();
         std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
         let client = reqwest::blocking::Client::new();
@@ -2188,11 +3050,103 @@ pub async fn download_gguf(
             serde_json::json!({"model": model, "state": "complete", "file": null, "percent": 100.0}),
         );
         Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    });
+    let download_result = match download_result.await {
+        Ok(result) => result,
+        Err(error) => {
+            st.pulling.lock().unwrap().remove(&repo_id);
+            return Err(format!("download worker failed: {error}"));
+        }
+    };
     st.pulling.lock().unwrap().remove(&repo_id);
+    download_result?;
     Ok(())
+}
+
+fn compose_hf_cache_fs_scan_script(hub_dir: &str) -> String {
+    format!(
+        r#"{WSL_TILDE_EXPANSION_SNIPPET}
+hub_dir=$(__llm_panel_expand_tilde {hub_dir})
+for p in "$hub_dir"/models--*; do
+  [ -d "$p" ] || continue
+  size=$(du -sm "$p" 2>/dev/null | cut -f1)
+  files=$(find "$p" -type f 2>/dev/null | wc -l)
+  repo_id=$(basename "$p" | sed 's/^models--//' | sed 's/--/\//')
+  echo "$repo_id|$size|$files"
+done
+"#,
+        hub_dir = crate::wsl::shell_quote_wsl(hub_dir),
+    )
+}
+
+/// Scan the HF cache directory directly using filesystem commands (du/find)
+/// as a fallback when huggingface_hub.scan_cache_dir returns incomplete data.
+fn scan_hf_cache_fs(
+    distro: &str,
+    hub_dir: &str,
+    running_servers: &[(String, String)],
+) -> Vec<LibraryEntry> {
+    let script = compose_hf_cache_fs_scan_script(hub_dir);
+    let out = crate::wsl::run_script(distro, &script);
+    let mut entries = Vec::new();
+    for line in out.stdout.lines() {
+        let mut it = line.split('|');
+        let (Some(model_id), Some(size), Some(files)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let model_id_str = model_id.to_string();
+        let size_mb: u64 = size.parse().unwrap_or(0);
+        let files_cnt: usize = files.parse().unwrap_or(0);
+        if size_mb == 0 && files_cnt == 0 {
+            continue;
+        }
+        let mut in_use = false;
+        let mut in_use_server = None;
+        for (srv_name, srv_model) in running_servers {
+            if srv_model == &model_id_str
+                || model_id_str.contains(srv_model)
+                || srv_model.contains(&model_id_str)
+            {
+                in_use = true;
+                in_use_server = Some(srv_name.clone());
+                break;
+            }
+        }
+        let params_b = crate::estimate::parse_params_from_name(&model_id_str);
+        let quant = if model_id_str.to_uppercase().contains("AWQ") {
+            Some("AWQ".to_string())
+        } else if model_id_str.to_uppercase().contains("GPTQ") {
+            Some("GPTQ".to_string())
+        } else if model_id_str.to_uppercase().contains("GGUF") {
+            Some("GGUF".to_string())
+        } else if model_id_str.to_uppercase().contains("FP8") {
+            Some("FP8".to_string())
+        } else {
+            Some("FP16".to_string())
+        };
+        let task = if model_id_str.to_lowercase().contains("embed")
+            || model_id_str.to_lowercase().contains("bge")
+            || model_id_str.to_lowercase().contains("gte")
+        {
+            Some("embed".to_string())
+        } else {
+            Some("instruct".to_string())
+        };
+        entries.push(LibraryEntry {
+            model_id: model_id_str,
+            size_mb,
+            files: files_cnt,
+            quant,
+            params_b,
+            installed: true,
+            in_use,
+            in_use_server,
+            task,
+            is_local: false,
+            model_path: None,
+        });
+    }
+    entries
 }
 
 /// Scan the persisted imported local model folders inside WSL and build
@@ -2273,9 +3227,28 @@ pub async fn library_import_local(
             let file_name = source
                 .file_name()
                 .ok_or_else(|| "GGUF path has no file name".to_string())?;
-            let repo_dir = PathBuf::from(st.config().gguf_dir).join("imported");
+            let gguf_root = PathBuf::from(st.config().gguf_dir);
+            std::fs::create_dir_all(&gguf_root).map_err(|e| e.to_string())?;
+            let gguf_root = gguf_root
+                .canonicalize()
+                .map_err(|e| format!("GGUF directory is not accessible: {e}"))?;
+            let repo_dir = gguf_root.join("imported");
             std::fs::create_dir_all(&repo_dir).map_err(|e| e.to_string())?;
+            let repo_dir = repo_dir
+                .canonicalize()
+                .map_err(|e| format!("Imported model directory is not accessible: {e}"))?;
+            if !repo_dir.starts_with(&gguf_root) {
+                return Err("Refusing to import into a path outside the GGUF directory".into());
+            }
             let target = repo_dir.join(file_name);
+            if target.exists() {
+                let target_canonical = target
+                    .canonicalize()
+                    .map_err(|e| format!("Imported model target is not accessible: {e}"))?;
+                if !target_canonical.starts_with(&repo_dir) {
+                    return Err("Refusing to overwrite a path outside the imported model directory".into());
+                }
+            }
             std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
             let size_mb = target.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
             return Ok(LibraryEntry {
@@ -2296,15 +3269,14 @@ pub async fn library_import_local(
         if wsl_path.is_empty() || !wsl_path.starts_with('/') {
             return Err("Enter a local model directory path (e.g. D:\\AI\\qwen or /mnt/d/AI/qwen)".into());
         }
-        let esc = wsl_path.replace('\'', "'\\''");
+        validate_imported_wsl_path(&wsl_path)?;
         let distro = st.resolve_distro();
-        let check = crate::wsl::run_script(
-            &distro,
-            &format!(
-                "test -d '{}' && echo dir; test -f '{}/config.json' && echo ok",
-                esc, esc
-            ),
+        let path_literal = crate::wsl::shell_quote_wsl(&wsl_path);
+        let check_script = format!(
+            "{}\nmodel_dir=$(__llm_panel_expand_tilde {path_literal})\n[ -d \"$model_dir\" ] && echo dir\n[ -f \"$model_dir/config.json\" ] && echo ok",
+            crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
         );
+        let check = crate::wsl::run_script(&distro, &check_script);
         if !check.ok {
             return Err(format!("Failed to check directory inside WSL: {}", check.stderr));
         }
@@ -2320,17 +3292,15 @@ pub async fn library_import_local(
             let mut cfg = st.config.lock().unwrap();
             if !cfg.imported_local_models.contains(&wsl_path) {
                 cfg.imported_local_models.push(wsl_path.clone());
-                let _ = cfg.save();
+                cfg.save().map_err(|e| e.to_string())?;
             }
         }
 
-        let stats = crate::wsl::run_script(
-            &distro,
-            &format!(
-                "size=$(du -sm '{}' 2>/dev/null | cut -f1); files=$(find '{}' -maxdepth 2 -type f 2>/dev/null | wc -l); echo \"$size|$files\"",
-                esc, esc
-            ),
+        let stats_script = format!(
+            "{}\nmodel_dir=$(__llm_panel_expand_tilde {path_literal})\nsize=$(du -sm -- \"$model_dir\" 2>/dev/null | cut -f1); files=$(find \"$model_dir\" -maxdepth 2 -type f 2>/dev/null | wc -l); echo \"$size|$files\"",
+            crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
         );
+        let stats = crate::wsl::run_script(&distro, &stats_script);
         let mut size_mb = 0u64;
         let mut files = 0usize;
         if let Some((sz, fl)) = stats.stdout.split_once('|') {
@@ -2345,6 +3315,7 @@ pub async fn library_import_local(
             for ls in srvs.values() {
                 if (ls.status == crate::state::ServerStatus::Running
                     || ls.status == crate::state::ServerStatus::Starting)
+                    && ls.def.backend == "llamacpp"
                     && ls.def.model_id == wsl_path
                 {
                     in_use = true;
@@ -2374,30 +3345,34 @@ pub async fn library_import_local(
 
 pub fn compose_library_remove_script(model_id: &str, hub_dir: Option<&str>) -> String {
     let dir_name = format!("models--{}", model_id.replace('/', "--"));
-    let hub = hub_dir.unwrap_or("$HOME/.cache/huggingface/hub");
+    let hub = hub_dir.unwrap_or("~/.cache/huggingface/hub");
     format!(
-        r#"
-dir="{hub}/{dir_name}"
-rm -rf "$dir"
+        r#"{WSL_TILDE_EXPANSION_SNIPPET}
+hub_dir=$(__llm_panel_expand_tilde {hub})
+dir_name={dir_name}
+dir="$hub_dir/$dir_name"
+rm -rf -- "$dir"
 # Prune unreferenced blob files
-if [ -d "{hub}/blobs" ]; then
+if [ -d "$hub_dir/blobs" ]; then
     shopt -s nullglob
-    snaps=("{hub}/models--"*/snapshots)
+    snaps=("$hub_dir"/models--*/snapshots)
     if [ ${{#snaps[@]}} -eq 0 ]; then
-        rm -f "{hub}/blobs"/*
+        rm -f -- "$hub_dir/blobs"/*
     else
         ref=$(find "${{snaps[@]}}" -type l -exec readlink {{}} + 2>/dev/null | sed 's#.*/##' | sort -u)
-        for blob in "{hub}/blobs"/*; do
+        for blob in "$hub_dir/blobs"/*; do
             [ -f "$blob" ] || continue
             hash=$(basename "$blob")
             if ! echo "$ref" | grep -qx "$hash"; then
-                rm -f "$blob"
+                rm -f -- "$blob"
             fi
         done
     fi
 fi
 echo ok
-"#
+"#,
+        hub = crate::wsl::shell_quote_wsl(hub),
+        dir_name = crate::wsl::shell_quote_wsl(&dir_name),
     )
 }
 
@@ -2416,13 +3391,18 @@ pub async fn library_remove(
             if let (Some(parent), true) = (file.parent(), file.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false)) {
                 let gguf_dir = st.config().gguf_dir.trim().to_string();
                 let gguf_root = PathBuf::from(&gguf_dir);
-                let parent_s = parent.display().to_string();
-                let under_root = parent.canonicalize().ok().map(|p| p.starts_with(&gguf_root)).unwrap_or(false)
-                    || parent_s.starts_with(&gguf_dir);
-                if !under_root || PathBuf::from(&parent_s) == gguf_root {
+                let root_canonical = gguf_root
+                    .canonicalize()
+                    .map_err(|e| format!("GGUF directory is not accessible: {e}"))?;
+                let parent_canonical = parent
+                    .canonicalize()
+                    .map_err(|e| format!("Model path is not accessible: {e}"))?;
+                if !parent_canonical.starts_with(&root_canonical)
+                    || parent_canonical == root_canonical
+                {
                     return Err("Refusing to delete: path is outside the GGUF directory".into());
                 }
-                let pending_parent = parent_s.clone();
+                let pending_parent = parent_canonical.to_string_lossy().into_owned();
                 let srvs = st.servers.lock().unwrap();
                 for ls in srvs.values() {
                     let running = ls.status == crate::state::ServerStatus::Running
@@ -2468,17 +3448,34 @@ pub async fn library_remove(
             }
         }
 
-        // Sanitize model_id
-        if model_id.contains("..")
-            || model_id.starts_with('/')
-            || model_id.contains(';')
-            || model_id.contains('&')
-            || model_id.contains('|')
-            || model_id.contains('`')
-            || model_id.contains('$')
-        {
-            return Err("Invalid characters in model ID".to_string());
+        let imported_path = {
+            let cfg = st.config();
+            cfg.imported_local_models
+                .iter()
+                .find(|path| path.as_str() == model_id)
+                .cloned()
+        };
+        if let Some(imported_path) = imported_path {
+            validate_imported_wsl_path(&imported_path)?;
+            let distro = st.resolve_distro();
+            let script = format!(
+                "{}model_dir=$(__llm_panel_expand_tilde {})\n[ -d \"$model_dir\" ] && rm -rf -- \"$model_dir\"\necho ok",
+                crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+                crate::wsl::shell_quote_wsl(&imported_path),
+            );
+            let out = crate::wsl::run_script(&distro, &script);
+            if !out.ok {
+                return Err(format!("Failed to delete imported model directory: {}", out.stderr));
+            }
+            let mut cfg = st.config.lock().unwrap();
+            let mut next = cfg.clone();
+            next.imported_local_models.retain(|path| path != &imported_path);
+            next.save().map_err(|e| e.to_string())?;
+            *cfg = next;
+            return Ok(());
         }
+
+        crate::hf::validate_model_id(&model_id).map_err(|_| "Invalid Hugging Face model ID".to_string())?;
 
         let distro = st.resolve_distro();
         let hub_dir = if let Some(home) = &st.config().advanced_settings.hf_home {
@@ -2517,8 +3514,12 @@ pub async fn library_disk_usage(state: State<'_, Arc<AppState>>) -> Result<u64, 
         } else {
             "~/.cache/huggingface/hub".to_string()
         };
-        let out =
-            crate::wsl::run_script(&distro, &format!("du -sm {hub_dir} 2>/dev/null | cut -f1"));
+        let script = format!(
+            "{}hub_dir=$(__llm_panel_expand_tilde {}) && du -sm -- \"$hub_dir\" 2>/dev/null | cut -f1",
+            crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            crate::wsl::shell_quote_wsl(&hub_dir),
+        );
+        let out = crate::wsl::run_script(&distro, &script);
         let mb: u64 = out.stdout.trim().parse().unwrap_or(0);
         Ok(mb)
     })
@@ -2634,6 +3635,116 @@ pub fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn wsl_distros() -> Vec<String> {
     crate::wsl::installed_distros()
+}
+
+#[derive(Serialize)]
+pub struct FlashInferReady {
+    pub nvcc: bool,
+    pub gcc: bool,
+    pub ninja: bool,
+    pub python_dev: bool,
+    pub cuda_home: Option<String>,
+    pub torch_cuda_version: Option<String>,
+}
+
+#[tauri::command]
+pub async fn check_flashinfer_ready(
+    state: State<'_, Arc<AppState>>,
+) -> Result<FlashInferReady, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let distro = st.resolve_distro();
+        let venv = st.config().venv_dir;
+        server::validate_venv_dir(&venv)?;
+        let venv_literal = crate::wsl::shell_quote_wsl(&venv);
+        let script = format!(
+            r#"{tilde}
+set +e
+venv_dir=$(__llm_panel_expand_tilde {venv})
+nvcc_path=$(command -v nvcc 2>/dev/null || true)
+gcc_path=$(command -v gcc 2>/dev/null || true)
+ninja_path=$(command -v ninja 2>/dev/null || true)
+[ -n "$nvcc_path" ] && echo nvcc=yes || echo nvcc=no
+[ -n "$gcc_path" ] && echo gcc=yes || echo gcc=no
+[ -n "$ninja_path" ] && echo ninja=yes || echo ninja=no
+[ -f /usr/include/python3.12/Python.h ] && echo python_dev=yes || echo python_dev=no
+if [ -n "$nvcc_path" ]; then dirname "$nvcc_path"; else echo none; fi
+if [ -x "$venv_dir/bin/python" ]; then
+  "$venv_dir/bin/python" -c 'import torch; print(torch.version.cuda or "unknown")' 2>/dev/null || echo unknown
+else
+  echo unknown
+fi
+"#,
+            tilde = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            venv = venv_literal,
+        );
+        let output = crate::wsl::run_script(&distro, &script);
+        if !output.ok {
+            return Err(format!("FlashInfer readiness check failed: {}", output.combined()));
+        }
+        let mut result = FlashInferReady {
+            nvcc: false,
+            gcc: false,
+            ninja: false,
+            python_dev: false,
+            cuda_home: None,
+            torch_cuda_version: None,
+        };
+        let lines: Vec<&str> = output.stdout.lines().collect();
+        for line in lines.iter().take(4) {
+            match line.trim() {
+                "nvcc=yes" => result.nvcc = true,
+                "gcc=yes" => result.gcc = true,
+                "ninja=yes" => result.ninja = true,
+                "python_dev=yes" => result.python_dev = true,
+                _ => {}
+            }
+        }
+        if let Some(path) = lines.get(4).map(|line| line.trim()).filter(|value| !value.is_empty() && *value != "none") {
+            result.cuda_home = Some(path.to_string());
+        }
+        if let Some(version) = lines
+            .get(5)
+            .map(|line| line.trim())
+            .filter(|value| !value.is_empty() && *value != "unknown")
+        {
+            result.torch_cuda_version = Some(version.to_string());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("FlashInfer readiness task error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn install_cuda_build_tools(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProvisionReport, String> {
+    let st = (*state).clone();
+    let distro = st.resolve_distro();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut on_log = |phase: &str, line: &str| {
+            let _ = app.emit(
+                "wsl-log",
+                serde_json::json!({ "phase": phase, "line": line }),
+            );
+        };
+        provision::phase_cuda_build_tools(&distro, &mut on_log)
+            .map(|_| ProvisionReport {
+                phases_completed: vec!["cuda-tools".into()],
+                distro: distro.clone(),
+                vllm_version: None,
+                torch_version: None,
+                cuda_available: false,
+                gpu_name: None,
+                vram_mb: None,
+                bf16_supported: false,
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("CUDA build tools task error: {e}"))?
 }
 
 #[cfg(test)]
@@ -3158,6 +4269,199 @@ mod tests {
     }
 
     #[test]
+    fn test_hf_cache_scan_scripts_resolve_wsl_home() {
+        let python_script =
+            compose_hf_cache_scan_script("~/llm-lp/.venv/bin/python", "~/.cache/huggingface/hub");
+        assert!(python_script.contains("venv_python=$(__llm_panel_expand_tilde"));
+        assert!(python_script.contains("hub_dir=$(__llm_panel_expand_tilde"));
+        assert!(python_script.contains("\"$venv_python\" - <<'PY'"));
+        assert!(python_script.contains("os.environ['LOCAL_LLM_PANEL_HUB_DIR']"));
+        assert!(!python_script.contains("sys.path.insert"));
+
+        let quoted_paths = compose_hf_cache_scan_script(
+            "~/venvs/vllm env/bin/python",
+            "~/.cache/hugging face/hub",
+        );
+        assert!(quoted_paths.contains("'~/venvs/vllm env/bin/python'"));
+        assert!(quoted_paths.contains("'~/.cache/hugging face/hub'"));
+
+        let fallback_script = compose_hf_cache_fs_scan_script("~/.cache/huggingface/hub");
+        assert!(fallback_script.contains("hub_dir=$(__llm_panel_expand_tilde"));
+        assert!(fallback_script.contains("for p in \"$hub_dir\"/models--*"));
+        assert!(!fallback_script.contains("for p in \"~/.cache/huggingface/hub\""));
+
+        let exists_script = compose_hf_cache_model_exists_script(
+            "~/.cache/huggingface/hub",
+            "models--Qwen--Qwen2.5-Coder-7B-Instruct",
+        );
+        assert!(exists_script.contains("hub_dir=$(__llm_panel_expand_tilde"));
+        assert!(exists_script.contains("[ -d \"$hub_dir/$dir_name\" ] && echo exists"));
+        assert!(!exists_script.contains("[ -d \"~/.cache/huggingface/hub/"));
+    }
+
+    #[test]
+    #[ignore = "requires a usable WSL distro"]
+    fn test_hf_cache_fs_scan_discovers_model_with_wsl_home() {
+        let Some(distro) = crate::wsl::installed_distros()
+            .into_iter()
+            .find(|name| name == "local-llm-panel-ubuntu")
+            .or_else(crate::wsl::detect_default_distro)
+        else {
+            return;
+        };
+
+        let scan_script = compose_hf_cache_fs_scan_script("~/.cache/huggingface/hub");
+        let script = format!(
+            r#"
+set -e
+test_home=$(mktemp -d)
+trap 'rm -rf "$test_home"' EXIT
+export HOME="$test_home"
+cache="$HOME/.cache/huggingface/hub"
+mkdir -p "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc"
+printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/config.json"
+{}
+"#,
+            scan_script
+        );
+        let out = crate::wsl::run_script(&distro, &script);
+        assert!(out.ok, "WSL scan failed: {}", out.stderr);
+        assert!(
+            out.stdout
+                .lines()
+                .any(|line| line.starts_with("Qwen/Qwen2.5-0.5B-Instruct|")),
+            "downloaded model was not discovered: {}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn test_hf_cache_fallback_handles_empty_python_result() {
+        assert!(should_scan_hf_cache_fs(false, &[]));
+        assert!(should_scan_hf_cache_fs(true, &[]));
+
+        let entry = LibraryEntry {
+            model_id: "Qwen/Qwen2.5-0.5B-Instruct".to_string(),
+            size_mb: 512,
+            files: 2,
+            quant: Some("FP16".to_string()),
+            params_b: Some(0.5),
+            installed: true,
+            in_use: false,
+            in_use_server: None,
+            task: Some("instruct".to_string()),
+            is_local: false,
+            model_path: None,
+        };
+        assert!(!should_scan_hf_cache_fs(true, &[entry.clone()]));
+
+        let mut zero_sized = entry;
+        zero_sized.size_mb = 0;
+        assert!(should_scan_hf_cache_fs(true, &[zero_sized]));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_context_fit_command_probe() {
+        let state = super::AppState::new();
+        let vllm = super::analyze_context_fit_inner(
+            &state,
+            super::ContextFitRequest {
+                backend: "vllm".into(),
+                model_id: "Qwen/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4".into(),
+                model_path: None,
+                context_tokens: Some(32_768),
+                quant: Some("gptq".into()),
+                kv_cache_dtype: None,
+                gpu_mem_util: Some(0.85),
+                cpu_offload_gb: Some(0),
+                kv_offload_gb: Some(0),
+                cache_type_k: None,
+                cache_type_v: None,
+                flash_attn: None,
+                n_gpu_layers: None,
+                n_cpu_moe: None,
+                fit: None,
+                fit_target: None,
+                no_kv_offload: None,
+            },
+        )
+        .await
+        .unwrap();
+        eprintln!("vllm={}", serde_json::to_string_pretty(&vllm).unwrap());
+        assert!(vllm.fits);
+
+        let path = std::env::var("LLM_TEST_GGUF_PATH")
+            .expect("set LLM_TEST_GGUF_PATH to a local GGUF file");
+        let llama = super::analyze_context_fit_inner(
+            &state,
+            super::ContextFitRequest {
+                backend: "llamacpp".into(),
+                model_id: path.clone(),
+                model_path: Some(path),
+                context_tokens: Some(32_768),
+                quant: None,
+                kv_cache_dtype: None,
+                gpu_mem_util: None,
+                cpu_offload_gb: None,
+                kv_offload_gb: None,
+                cache_type_k: Some("q8_0".into()),
+                cache_type_v: Some("q8_0".into()),
+                flash_attn: Some(true),
+                n_gpu_layers: Some(99),
+                n_cpu_moe: Some(24),
+                fit: Some(true),
+                fit_target: Some(1_024),
+                no_kv_offload: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        eprintln!("llama={}", serde_json::to_string_pretty(&llama).unwrap());
+        assert!(llama.kv_bytes_per_token.unwrap_or_default() > 0.0);
+    }
+
+    #[test]
+    #[ignore]
+    fn live_cached_vllm_weight_probe() {
+        let state = super::AppState::new();
+        let size = cached_vllm_weight_gib(&state, "Qwen/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4")
+            .expect("cached Qwen model should be visible through the configured venv");
+        eprintln!("cached_weight_gib={size}");
+        assert!(size > 5.0 && size < 5.5);
+    }
+
+    #[test]
+    fn imported_paths_reject_root_and_traversal() {
+        assert!(validate_imported_wsl_path("/mnt/d/models/qwen").is_ok());
+        assert!(validate_imported_wsl_path("/").is_err());
+        assert!(validate_imported_wsl_path("/mnt/../etc").is_err());
+    }
+
+    #[test]
+    fn server_ids_reject_empty_or_control_values() {
+        assert!(validate_server_id("srv-abc_123").is_ok());
+        assert!(validate_server_id("").is_err());
+        assert!(validate_server_id("srv\nbad").is_err());
+    }
+
+    #[test]
+    fn optional_fields_distinguish_values_from_clears() {
+        #[derive(serde::Deserialize)]
+        struct Probe {
+            #[serde(default)]
+            value: OptionalField<usize>,
+        }
+
+        let missing: Probe = serde_json::from_str("{}").unwrap();
+        assert!(missing.value.into_inner().is_none());
+        let cleared: Probe = serde_json::from_str(r#"{"value":null}"#).unwrap();
+        assert!(cleared.value.into_inner().is_none());
+        let set: Probe = serde_json::from_str(r#"{"value":32768}"#).unwrap();
+        assert_eq!(set.value.into_inner(), Some(32768));
+    }
+
+    #[test]
     fn test_metric_series_commands() {
         use crate::state::{AppState, ServerMetricPoint, SystemMetricPoint};
         let app_state = Arc::new(AppState::new());
@@ -3222,44 +4526,12 @@ let err = server_recipe_parse(invalid_json.to_string());
         assert!(err.is_err());
     }
 
-    /// Optional phase: Install CUDA build tools for FlashInfer JIT compilation
-    #[tauri::command]
-    pub async fn install_cuda_build_tools(
-        app: AppHandle,
-        state: State<'_, Arc<AppState>>,
-    ) -> Result<ProvisionReport, String> {
-        let st = (*state).clone();
-        let app = app.clone();
-        let distro = st.resolve_distro();
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut on_log = |phase: &str, line: &str| {
-                let _ = app.emit(
-                    "wsl-log",
-                    serde_json::json!({ "phase": phase, "line": line }),
-                );
-            };
-            provision::phase_cuda_build_tools(&distro, &mut on_log)
-                .map(|_| ProvisionReport {
-                    phases_completed: vec!["cuda-tools".into()],
-                    distro: distro.clone(),
-                    vllm_version: None,
-                    torch_version: None,
-                    cuda_available: false,
-                    gpu_name: None,
-                    vram_mb: None,
-                    bf16_supported: false,
-                })
-                .map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| format!("CUDA build tools task error: {e}"))?
-    }
-
     #[test]
     fn test_cache_sweep_script_composition() {
         let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B", None);
         assert!(script.contains("models--Qwen--Qwen2.5-0.5B"));
-        assert!(script.contains("hub/blobs"));
+        assert!(script.contains("hub_dir"));
+        assert!(script.contains("blobs"));
         assert!(script.contains("readlink"));
         assert!(script.contains("snaps"));
     }
@@ -3267,8 +4539,19 @@ let err = server_recipe_parse(invalid_json.to_string());
     #[test]
     fn test_cache_sweep_script_custom_hub() {
         let script = compose_library_remove_script("Qwen/Qwen2.5-0.5B", Some("/mnt/data/hf/hub"));
-        assert!(script.contains("dir=\"/mnt/data/hf/hub/models--Qwen--Qwen2.5-0.5B\""));
-        assert!(script.contains("/mnt/data/hf/hub/blobs"));
+        assert!(script.contains("hub_dir=$(__llm_panel_expand_tilde '/mnt/data/hf/hub')"));
+        assert!(script.contains("dir_name='models--Qwen--Qwen2.5-0.5B'"));
+        assert!(script.contains("\"$hub_dir/blobs\""));
+    }
+
+    #[test]
+    fn test_cache_sweep_script_quotes_untrusted_hub_path() {
+        let script = compose_library_remove_script(
+            "Qwen/Qwen2.5-0.5B",
+            Some("/mnt/data/hf/hub; touch /tmp/should-not-exist"),
+        );
+        assert!(script.contains("hub; touch /tmp/should-not-exist'"));
+        assert!(!script.contains("hub; touch /tmp/should-not-exist\"\n"));
     }
 
     #[test]

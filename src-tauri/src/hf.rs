@@ -12,6 +12,24 @@ use tauri::Emitter;
 
 pub const HF_API: &str = "https://huggingface.co/api/models";
 
+/// Validate an identifier before it is interpolated into a WSL command or
+/// used as a process-matching token.  Hugging Face repository ids are a
+/// deliberately small alphabet; rejecting everything else prevents shell and
+/// regex metacharacters from crossing the command boundary.
+pub fn validate_model_id(model_id: &str) -> Result<()> {
+    let id = model_id.trim();
+    if id.is_empty()
+        || id.starts_with('/')
+        || id.contains("..")
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.'))
+    {
+        bail!("invalid Hugging Face model id");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufRepoFile {
     pub path: String,
@@ -26,13 +44,12 @@ pub async fn list_gguf_repo_files(
     repo_id: &str,
     token: Option<&str>,
 ) -> Result<Vec<GgufRepoFile>> {
-    let url = format!("{HF_API}/{repo_id}/tree/main");
+    let url = format!("{HF_API}/{repo_id}/tree/main?recursive=false");
     let mut request = client.get(url);
     if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
         request = request.bearer_auth(token);
     }
     let values: Vec<Value> = request
-        .query(&[("recursive", "false")])
         .send()
         .await?
         .error_for_status()?
@@ -949,6 +966,7 @@ fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>, Opt
 /// `app.state()` is NOT usable from the spawned thread, so we hand it a clone
 /// of the pulling map Arc + the AppHandle (for emitting events).
 pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &str) -> Result<()> {
+    validate_model_id(model_id)?;
     {
         let mut pulling = state.pulling.lock().unwrap();
         if *pulling.get(model_id).unwrap_or(&false) {
@@ -963,43 +981,44 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
     let distro = state.resolve_distro();
     let venv = state.config().venv_dir;
     let hf_token = state.config().hf_token;
-    let token_ok = !hf_token.is_empty()
-        && hf_token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || (c.is_ascii_punctuation() && c != '\''));
-    let token_env = if token_ok {
-        format!("HF_TOKEN='{hf_token}' ")
-    } else {
-        String::new()
-    };
     let adv = state.config().advanced_settings;
-    let home_env = if let Some(home) = &adv.hf_home {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            format!("mkdir -p {trimmed} && export HF_HOME={trimmed} && ")
-        } else {
-            String::new()
-        }
-    } else {
+    let mid = model_id.clone();
+    let venv_literal = crate::wsl::shell_quote_wsl(&venv);
+    let token_env = if hf_token.trim().is_empty() {
         String::new()
+    } else {
+        format!(
+            "export HF_TOKEN={} && ",
+            crate::wsl::shell_quote_wsl(&hf_token)
+        )
     };
+    let home_env = adv
+        .hf_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|home| !home.is_empty())
+        .map(|home| {
+            format!(
+                "hf_home_dir=$(__llm_panel_expand_tilde {}) && mkdir -p \"$hf_home_dir\" && export HF_HOME=\"$hf_home_dir\" && ",
+                crate::wsl::shell_quote_wsl(home)
+            )
+        })
+        .unwrap_or_default();
     let offline_env = if adv.hf_offline {
         "export HF_HUB_OFFLINE=1 && "
     } else {
         ""
     };
-    let mid = model_id.clone();
 
     std::thread::spawn(move || {
-        // Replace shell-quote hazards minimally; model ids are safe by construction.
-        let maybe_cd = if venv.contains("~") || venv.starts_with('/') {
-            format!("cd {}/.. && ", venv)
-        } else {
-            String::new()
-        };
         let script = format!(
-            "{}{}{} . {}/bin/activate && HF_HUB_DISABLE_TQDM=1 {}hf download {} 2>&1 || echo __HF_PULL_FAILED__",
-            home_env, offline_env, maybe_cd, venv, token_env, mid
+            "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\n{}cd \"$venv_dir/..\" && . \"$venv_dir/bin/activate\" && HF_HUB_DISABLE_TQDM=1 {}{}hf download {} 2>&1 || echo __HF_PULL_FAILED__",
+            crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            venv_literal,
+            home_env,
+            offline_env,
+            token_env,
+            crate::wsl::shell_quote_wsl(&mid),
         );
         let model_ev = model_id.clone();
         let app_ev = app.clone();
@@ -1082,6 +1101,15 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_validate_model_id_rejects_shell_metacharacters() {
+        assert!(validate_model_id("Qwen/Qwen2.5-0.5B-Instruct").is_ok());
+        assert!(validate_model_id("org/model_1.0").is_ok());
+        assert!(validate_model_id("org/model;rm -rf /").is_err());
+        assert!(validate_model_id("../model").is_err());
+        assert!(validate_model_id("").is_err());
+    }
 
     #[tokio::test]
     async fn test_enrich_cache_hit_returns_cached_without_network() {

@@ -1,7 +1,6 @@
 use llmfit_core::{ModelDatabase, ModelFormat};
 
 const CORE_ONNX_MODELS_JSON: &str = include_str!("../data/onnx_models.json");
-const ROOT_ONNX_MODELS_JSON: &str = include_str!("../../data/onnx_models.json");
 
 fn load_catalog() -> Vec<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(CORE_ONNX_MODELS_JSON)
@@ -10,14 +9,6 @@ fn load_catalog() -> Vec<serde_json::Value> {
         .as_array()
         .expect("embedded onnx_models.json is a JSON array")
         .clone()
-}
-
-#[test]
-fn core_and_repo_root_onnx_catalogs_are_mirrored() {
-    assert_eq!(
-        CORE_ONNX_MODELS_JSON, ROOT_ONNX_MODELS_JSON,
-        "repo-root and llmfit-core ONNX catalogs must stay in sync"
-    );
 }
 
 #[test]

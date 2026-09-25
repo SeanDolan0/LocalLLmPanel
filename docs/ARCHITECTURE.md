@@ -47,7 +47,9 @@ External Client (Cursor, Continue, etc.)
          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  gateway.rs — single port, routes by model name             │
-│    • GET  /v1/models          → lists running instruct servers│
+│    • GET  /v1/models          → lists running instruct servers │
+│                                  + effective context metadata   │
+│    • GET  /v1/models/{id}     → model detail + same metadata    │
 │    • POST /v1/chat/completions→ find_server_port_for(model)   │
 │    • Streams SSE frames back to client                       │
 └─────────────────────────────────────────────────────────────┘
@@ -64,7 +66,7 @@ changes `.wslconfig`; llama.cpp remains usable when WSL has not been provisioned
 ### `gateway.rs`
 - **Unified OpenAI-compatible reverse proxy** listening on port 11434 (default, Ollama-compatible).
 - `find_server_port_for(servers, model, task)` — routes by exact or fuzzy match on served model name or HF id against running `instruct` servers.
-- `model_rows(servers)` — emits OpenAI `/v1/models` format with `id`, `object`, `port` for each running instruct server.
+- `model_rows(servers)` — emits OpenAI `/v1/models` rows with the served id, backend metadata, and effective context fields (`max_model_len`, `context_length`, `max_context_length`, `context_window`, `n_ctx`). The configured launch value is preferred; implicit vLLM/llama.cpp limits are read from the running backend.
 - Hand-rolled HTTP/1.1 framing (Tokio `TcpListener` + `AsyncReadExt`/`AsyncWriteExt`) — no external HTTP deps.
 - Streams SSE `data:` frames bidirectionally; copies headers, handles `Content-Length` and chunked encoding.
 - `spawn_supervisor(app_handle)` — background task binds port, accepts connections, routes per-request.

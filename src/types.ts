@@ -116,6 +116,7 @@ export interface ServerDef {
   max_model_len: number | null;
   quant: string;
   served_model_name: string | null;
+  kv_cache_dtype?: string | null;
   enforce_eager?: boolean;
   params_b: number | null;
   swap_space_gb?: number | null;
@@ -148,6 +149,73 @@ export interface ServerDef {
 
 export function effectiveModelName(def: ServerDef): string {
   return def.served_model_name ?? def.model_id;
+}
+
+export type ContextFitStatus =
+  | "fits"
+  | "fits_with_cpu"
+  | "tight"
+  | "does_not_fit"
+  | "unknown";
+
+export interface ContextFitReport {
+  backend: "vllm" | "llamacpp";
+  status: ContextFitStatus;
+  fits: boolean;
+  model_id: string;
+  requested_context: number;
+  native_context: number | null;
+  context_estimated: boolean;
+  weight_gib: number | null;
+  weight_source: string;
+  kv_cache_label: string;
+  kv_bytes_per_token: number | null;
+  required_kv_mb: number | null;
+  vram_total_mb: number | null;
+  vram_free_mb: number | null;
+  vram_budget_mb: number | null;
+  projected_vram_mb: number | null;
+  vram_headroom_mb: number | null;
+  max_vram_context: number | null;
+  max_with_ram_context: number | null;
+  max_context_no_overflow: number | null;
+  max_context_with_overflow: number | null;
+  overflow_enabled: boolean;
+  overflow_required_gb: number | null;
+  overflow_label: string;
+  current_free_max_context: number | null;
+  fits_with_current_free: boolean | null;
+  ram_total_mb: number | null;
+  ram_available_mb: number | null;
+  ram_required_mb: number | null;
+  recommended_context: number | null;
+  recommended_kv_cache_dtype: string | null;
+  recommended_cache_type_k: string | null;
+  recommended_cache_type_v: string | null;
+  effective_gpu_mem_util: number | null;
+  required_cpu_offload_gb: number | null;
+  recommendation: string;
+  warnings: string[];
+}
+
+export interface ContextFitRequest {
+  backend: "vllm" | "llamacpp";
+  model_id: string;
+  model_path?: string | null;
+  context_tokens?: number | null;
+  quant?: string | null;
+  kv_cache_dtype?: string | null;
+  gpu_mem_util?: number | null;
+  cpu_offload_gb?: number | null;
+  kv_offload_gb?: number | null;
+  cache_type_k?: string | null;
+  cache_type_v?: string | null;
+  flash_attn?: boolean | null;
+  n_gpu_layers?: number | null;
+  n_cpu_moe?: number | null;
+  fit?: boolean | null;
+  fit_target?: number | null;
+  no_kv_offload?: boolean | null;
 }
 
 export interface MetricsSnapshot {
@@ -187,9 +255,13 @@ export interface GatewayStatus {
   enabled: boolean;
   port: number;
   running: boolean;
+  auth_configured: boolean;
 }
 
 export interface Settings {
+  hf_token_configured?: boolean;
+  github_token_configured?: boolean;
+  api_key_configured?: boolean;
   distro: string;
   llm_dir: string;
   venv_dir: string;
@@ -267,34 +339,36 @@ export interface CreateServerInput {
   task?: string;
   port?: number;
   gpu_mem_util?: number;
-  max_model_len?: number;
+  max_model_len?: number | null;
   quant?: string;
-  served_model_name?: string;
+  served_model_name?: string | null;
+  kv_cache_dtype?: string | null;
   enforce_eager?: boolean;
   swap_space_gb?: number | null;
   cpu_offload_gb?: number | null;
-  model_path?: string;
-  mmproj_path?: string;
-  ctx_size?: number;
+  model_path?: string | null;
+  mmproj_path?: string | null;
+  ctx_size?: number | null;
   n_gpu_layers?: number | null;
-  n_cpu_moe?: number;
+  n_cpu_moe?: number | null;
   fit?: boolean;
-  fit_target?: number;
-  device?: string;
-  api_key?: string;
-  log_verbosity?: number;
+  fit_target?: number | null;
+  device?: string | null;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+  log_verbosity?: number | null;
   flash_attn?: boolean;
-  cache_type_k?: string;
-  cache_type_v?: string;
-  threads?: number;
-  batch_size?: number;
-  ubatch_size?: number;
+  cache_type_k?: string | null;
+  cache_type_v?: string | null;
+  threads?: number | null;
+  batch_size?: number | null;
+  ubatch_size?: number | null;
   parallel?: number;
   jinja?: boolean;
   no_kv_offload?: boolean;
   metrics?: boolean;
-  extra_args?: string[];
-  env?: Record<string, string>;
+  extra_args?: string[] | null;
+  env?: Record<string, string> | null;
   llamacpp_channel?: LlamaCppChannel;
 }
 
@@ -523,6 +597,7 @@ export interface ServerRecipe {
   quant: string;
   max_model_len?: number | null;
   served_model_name?: string | null;
+  kv_cache_dtype?: string | null;
   enforce_eager: boolean;
   swap_space_gb?: number | null;
   cpu_offload_gb?: number | null;
@@ -530,6 +605,7 @@ export interface ServerRecipe {
 
 export interface ConfigExportPackage {
   schema: string;
+  secrets_omitted?: boolean;
   exported_at: string;
   distro: string;
   llm_dir: string;

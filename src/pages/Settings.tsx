@@ -103,6 +103,10 @@ export default function Settings() {
   const [gwEmbed, setGwEmbed] = useState<string | null>(null);
   const [llamacppStatus, setLlamacppStatus] = useState<import("../types").LlamacppInstallStatus | null>(null);
   const [githubMsg, setGithubMsg] = useState<string | null>(null);
+  const [hfTokenDirty, setHfTokenDirty] = useState(false);
+  const [githubTokenDirty, setGithubTokenDirty] = useState(false);
+  const [apiKeyDirty, setApiKeyDirty] = useState(false);
+  const [customEnvDirty, setCustomEnvDirty] = useState(false);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -138,6 +142,10 @@ export default function Settings() {
       const text = await file.text();
       const updated = await api.configImport(text);
       setS(updated);
+      setHfTokenDirty(false);
+      setGithubTokenDirty(false);
+      setApiKeyDirty(false);
+      setCustomEnvDirty(false);
       const refreshedMem = await api.getMemorySettings();
       setMem(refreshedMem);
       setImportExportMsg("Config imported successfully!");
@@ -217,22 +225,30 @@ export default function Settings() {
     setErr(null);
     setSaved(false);
     try {
-      const updated = await api.settingsSet({
+      const patch: Parameters<typeof api.settingsSet>[0] = {
         distro: s.distro,
         llm_dir: s.llm_dir,
         venv_dir: s.venv_dir,
         llamacpp_dir: s.llamacpp_dir,
         gguf_dir: s.gguf_dir,
         llamacpp_executable: s.llamacpp_executable,
-        hf_token: s.hf_token,
-        github_token: s.github_token,
+        llamacpp_channels: s.llamacpp_channels,
         default_quant: s.default_quant,
         advanced_settings: s.advanced_settings,
         minimize_to_tray: s.minimize_to_tray,
         auto_restart_crashed: s.auto_restart_crashed,
         launch_at_login: s.launch_at_login,
-      });
+      };
+      if (hfTokenDirty) patch.hf_token = s.hf_token;
+      if (githubTokenDirty) patch.github_token = s.github_token;
+      if (apiKeyDirty) patch.clear_advanced_api_key = !s.advanced_settings?.api_key;
+      if (customEnvDirty) patch.clear_custom_env_vars = !s.advanced_settings?.custom_env_vars;
+      const updated = await api.settingsSet(patch);
       setS(updated);
+      setHfTokenDirty(false);
+      setGithubTokenDirty(false);
+      setApiKeyDirty(false);
+      setCustomEnvDirty(false);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -360,7 +376,7 @@ export default function Settings() {
         Configuration Portability & Backup
       </CardTitle>
       <p className="text-xs text-slate-400 leading-relaxed">
-        Export your complete LocalLLM Panel configuration (WSL setup, memory presets, server definitions, and optimization settings) to a portable JSON file, or restore an existing configuration.
+        Export a portable LocalLLM Panel configuration (WSL setup, memory presets, server definitions, and optimization settings). API keys, tokens, and environment values are intentionally omitted; restore keeps the secrets already stored on this machine.
       </p>
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <Button variant="subtle" onClick={handleExportConfig}>
@@ -507,14 +523,14 @@ export default function Settings() {
               <div className="sm:col-span-2">
               <HfTokenField
                 value={s.hf_token}
-                onChange={(value) => setS({ ...s, hf_token: value })}
+                onChange={(value) => { setS({ ...s, hf_token: value }); setHfTokenDirty(true); }}
               />
               <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
                 <div className="space-y-1.5">
-                  <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => setS({ ...s, github_token: e.target.value })} />
+                  <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => { setS({ ...s, github_token: e.target.value }); setGithubTokenDirty(true); }} />
                   <div className="flex gap-2">
                     <Button variant="ghost" onClick={async () => { setGithubMsg("Testing…"); try { const r = await api.githubAccess(); setGithubMsg(`${r.message} Token used: ${r.token_used ? "yes" : "no"}.`); } catch (e) { setGithubMsg(String(e)); } }}>Test GitHub access</Button>
-                    <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
+                    <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubTokenDirty(false); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
                   </div>
                   {githubMsg && <div className="text-xs text-slate-400">{githubMsg}</div>}
                 </div>
@@ -780,7 +796,7 @@ export default function Settings() {
               <div className="sm:col-span-2">
 <HfTokenField
                 value={s.hf_token}
-                onChange={(value) => setS({ ...s, hf_token: value })}
+                onChange={(value) => { setS({ ...s, hf_token: value }); setHfTokenDirty(true); }}
               />
               </div>
             </div>
@@ -947,7 +963,11 @@ export default function Settings() {
 
               <Field
                 label="API Key Protection (--api-key)"
-                hint="Optional bearer token required to query the OpenAI-compatible vLLM endpoints."
+                hint={
+                  s.api_key_configured
+                    ? "A key is stored securely. Leave blank to keep it; enter a replacement to rotate it."
+                    : "Required for the local gateway. Leave blank to keep an existing key."
+                }
               >
                 <input
                   className={inputCls}
@@ -957,6 +977,7 @@ export default function Settings() {
                   onChange={(e) => {
                     const v = e.target.value.trim();
                     updateAdv({ api_key: v === "" ? null : v });
+                    setApiKeyDirty(true);
                   }}
                 />
               </Field>
@@ -1002,6 +1023,11 @@ export default function Settings() {
                 )}
               </div>
 
+              {adv.gateway_enabled && !s.api_key_configured && (
+                <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+                  The gateway is enabled but has no API key. Set one above before using client routes; unauthenticated /v1 access is denied.
+                </div>
+              )}
               {adv.gateway_enabled && (
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field
@@ -1349,6 +1375,7 @@ export default function Settings() {
                     onChange={(e) => {
                       const v = e.target.value;
                       updateAdv({ custom_env_vars: v.trim() === "" ? null : v });
+                      setCustomEnvDirty(true);
                     }}
                   />
                 </Field>
@@ -1440,25 +1467,25 @@ function ClientSnippets({
       key: "continue",
       label: "Continue config.yaml",
       hint: "Paste into ~/.continue/config.yaml",
-      text: `name: Local Assistant\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Local Instruct\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: not-needed\n  - name: Local Autocomplete\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: not-needed\n    capabilities: [autocomplete]\n  - name: Local Embed\n    provider: openai\n    model: ${embed}\n    apiBase: ${base}\n    apiKey: not-needed\n    capabilities: [embed]\n`,
+      text: `name: Local Assistant\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Local Instruct\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: "REPLACE_WITH_GATEWAY_API_KEY"\n  - name: Local Autocomplete\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: "REPLACE_WITH_GATEWAY_API_KEY"\n    capabilities: [autocomplete]\n  - name: Local Embed\n    provider: openai\n    model: ${embed}\n    apiBase: ${base}\n    apiKey: "REPLACE_WITH_GATEWAY_API_KEY"\n    capabilities: [embed]\n`,
     },
     {
       key: "cursor",
       label: "Cursor / Cline",
       hint: "Base URL + model override",
-      text: `Base URL: ${base}\nChat model: ${chat}\nAutocomplete model: ${chat}\nEmbeddings model: ${embed}\nAPI key: not-needed\n`,
+      text: `Base URL: ${base}\nChat model: ${chat}\nAutocomplete model: ${chat}\nEmbeddings model: ${embed}\nAPI key: REPLACE_WITH_GATEWAY_API_KEY\n`,
     },
     {
       key: "curl-chat",
       label: "curl chat",
       hint: "Chat + FIM completions smoke test",
-      text: `curl ${base}/chat/completions -H "Content-Type: application/json" -d '{"model":"${chat}","messages":[{"role":"user","content":"hi"}]}'\n`,
+      text: `GATEWAY_API_KEY='REPLACE_WITH_GATEWAY_API_KEY'; curl ${base}/chat/completions -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${chat}","messages":[{"role":"user","content":"hi"}]}'\n`,
     },
     {
       key: "curl-embed",
       label: "curl embeddings",
       hint: "Embeddings smoke test",
-      text: `curl ${base}/embeddings -H "Content-Type: application/json" -d '{"model":"${embed}","input":"hello world"}'\n`,
+      text: `GATEWAY_API_KEY='REPLACE_WITH_GATEWAY_API_KEY'; curl ${base}/embeddings -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${embed}","input":"hello world"}'\n`,
     },
   ];
 

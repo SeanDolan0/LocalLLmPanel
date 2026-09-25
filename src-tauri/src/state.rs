@@ -1,7 +1,7 @@
 //! Persisted configuration (JSON in %APPDATA%) and live server registry.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -180,9 +180,14 @@ pub struct ServerDef {
     pub port: u16,
     pub gpu_mem_util: f64,
     pub max_model_len: Option<usize>,
-    /// "fp16" | "fp8" | "awq" | "gptq"
+    /// "auto" | "fp16" | "fp8" | "awq" | "gptq" (native values are GGUF metadata)
     pub quant: String,
+    /// Public API model name. vLLM maps it to --served-model-name and
+    /// llama.cpp maps it to --alias.
     pub served_model_name: Option<String>,
+    /// Per-server vLLM KV-cache dtype. `None` inherits the global setting.
+    #[serde(default)]
+    pub kv_cache_dtype: Option<String>,
     /// llama.cpp binary channel: "upstream" (ggml-org) or "prism" (PrismML-Eng/llama.cpp@prism)
     #[serde(default)]
     pub llamacpp_channel: LlamaCppChannel,
@@ -221,7 +226,8 @@ pub struct ServerDef {
     /// Comma-separated native llama.cpp device identifiers.
     #[serde(default)]
     pub device: Option<String>,
-    /// Per-server OpenAI-compatible API key for native llama.cpp.
+    /// Per-server OpenAI-compatible API key. It overrides the global vLLM key
+    /// and is also passed directly to llama-server.
     #[serde(default)]
     pub api_key: Option<String>,
     /// Native llama.cpp log verbosity (0..5).
@@ -254,6 +260,24 @@ pub struct ServerDef {
     pub env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerBackend {
+    Vllm,
+    Llamacpp,
+}
+
+impl std::str::FromStr for ServerBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "vllm" => Ok(Self::Vllm),
+            "llamacpp" => Ok(Self::Llamacpp),
+            other => Err(format!("unsupported server backend '{other}'")),
+        }
+    }
+}
+
 fn default_backend() -> String {
     "vllm".to_string()
 }
@@ -263,7 +287,7 @@ fn default_cache_type() -> String {
 }
 
 fn default_parallel() -> usize {
-    1
+    0
 }
 
 fn default_true() -> bool {
@@ -271,10 +295,107 @@ fn default_true() -> bool {
 }
 
 impl ServerDef {
+    pub fn backend_kind(&self) -> Result<ServerBackend, String> {
+        self.backend.parse()
+    }
+
+    /// Clear state that belongs only to the other backend before persisting a
+    /// newly-created or explicitly-edited server. Legacy config loading remains
+    /// non-destructive; normalization runs only at mutation boundaries.
+    pub fn normalize_for_backend(&mut self) -> Result<(), String> {
+        match self.backend_kind()? {
+            ServerBackend::Vllm => {
+                self.llamacpp_channel = LlamaCppChannel::Upstream;
+                self.model_path = None;
+                self.mmproj_path = None;
+                self.ctx_size = None;
+                self.n_gpu_layers = None;
+                self.n_cpu_moe = None;
+                self.fit = false;
+                self.fit_target = None;
+                self.device = None;
+                self.log_verbosity = None;
+                self.flash_attn = false;
+                self.cache_type_k.clear();
+                self.cache_type_v.clear();
+                self.threads = None;
+                self.batch_size = None;
+                self.ubatch_size = None;
+                self.parallel = 0;
+                self.jinja = false;
+                self.no_kv_offload = false;
+                self.extra_args.clear();
+            }
+            ServerBackend::Llamacpp => {
+                self.gpu_mem_util = 0.0;
+                self.max_model_len = None;
+                self.enforce_eager = false;
+                self.swap_space_gb = None;
+                self.cpu_offload_gb = None;
+                self.kv_cache_dtype = None;
+                self.task = "instruct".into();
+                self.env.clear();
+            }
+        }
+        Ok(())
+    }
+
     pub fn effective_model_name(&self) -> String {
         self.served_model_name
             .clone()
             .unwrap_or_else(|| self.model_id.clone())
+    }
+}
+
+/// Marker used in public/portable views when a secret exists but must not be
+/// sent to the webview or written to an export file.  It is deliberately not
+/// a valid credential and is stripped again at mutation boundaries.
+pub const SECRET_PLACEHOLDER: &str = "__LLM_PANEL_SECRET_REDACTED__";
+
+pub fn is_secret_placeholder(value: &str) -> bool {
+    value == SECRET_PLACEHOLDER
+}
+
+/// Return a server definition safe to expose through the webview.  Keep the
+/// keys so the settings UI can explain what is configured, but never return
+/// their values.  Environment values are all redacted because a custom name
+/// such as `FOO` can still carry a secret.
+pub fn redact_server_def(def: &ServerDef) -> ServerDef {
+    let mut redacted = def.clone();
+    if redacted.api_key.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+        redacted.api_key = Some(SECRET_PLACEHOLDER.to_string());
+    }
+    redacted.env = redacted
+        .env
+        .keys()
+        .map(|name| (name.clone(), SECRET_PLACEHOLDER.to_string()))
+        .collect();
+    redacted
+}
+
+/// Preserve secrets represented by [`SECRET_PLACEHOLDER`] when applying a
+/// redacted view back to an existing server.  A new server never receives the
+/// marker as a real environment value.
+pub fn merge_server_secret_placeholders(incoming: &mut ServerDef, existing: Option<&ServerDef>) {
+    if incoming.api_key.as_deref() == Some(SECRET_PLACEHOLDER) {
+        incoming.api_key = existing.and_then(|server| server.api_key.clone());
+    }
+    let old_env = existing.map(|server| &server.env);
+    let placeholder_keys: Vec<String> = incoming
+        .env
+        .iter()
+        .filter(|(_, value)| is_secret_placeholder(value))
+        .map(|(name, _)| name.clone())
+        .collect();
+    incoming
+        .env
+        .retain(|_, value| !is_secret_placeholder(value));
+    if let Some(old_env) = old_env {
+        for name in placeholder_keys {
+            if let Some(previous) = old_env.get(&name) {
+                incoming.env.insert(name, previous.clone());
+            }
+        }
     }
 }
 
@@ -423,6 +544,34 @@ impl Default for AdvancedSettings {
     }
 }
 
+pub fn redact_advanced_settings(settings: &AdvancedSettings) -> AdvancedSettings {
+    let mut redacted = settings.clone();
+    if redacted.api_key.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+        redacted.api_key = Some(SECRET_PLACEHOLDER.to_string());
+    }
+    // Custom environment text is intentionally omitted: parsing it here would
+    // risk returning values whose names do not look secret-like.
+    redacted.custom_env_vars = None;
+    redacted
+}
+
+pub fn redact_config_for_display(config: &PersistedConfig) -> PersistedConfig {
+    let mut redacted = config.clone();
+    redacted.hf_token.clear();
+    redacted.github_token.clear();
+    redacted.advanced_settings = redact_advanced_settings(&config.advanced_settings);
+    // The API-key field is represented by `api_key_configured`; do not put a
+    // marker in a password input or send a marker back to the webview.
+    redacted.advanced_settings.api_key = None;
+    redacted.default_env = config
+        .default_env
+        .keys()
+        .map(|name| (name.clone(), SECRET_PLACEHOLDER.to_string()))
+        .collect();
+    redacted.servers = config.servers.iter().map(redact_server_def).collect();
+    redacted
+}
+
 // ---------------------------------------------------------------------------
 // Persisted config
 // ---------------------------------------------------------------------------
@@ -506,7 +655,8 @@ impl Default for LlamaCppChannelConfig {
 
 impl Default for PersistedConfig {
     fn default() -> Self {
-        let distro = crate::wsl::detect_default_distro().unwrap_or_else(|| "Ubuntu".to_string());
+        let distro = crate::wsl::detect_default_distro()
+            .unwrap_or_else(|| crate::wsl::APP_DISTRO_NAME.to_string());
         let mut default_env = BTreeMap::new();
         default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         let mut llamacpp_channels = BTreeMap::new();
@@ -549,8 +699,43 @@ impl Default for PersistedConfig {
     }
 }
 
+fn replace_file_atomic(tmp: &PathBuf, destination: &PathBuf) -> Result<(), String> {
+    match std::fs::rename(tmp, destination) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            // Windows does not replace an existing destination with rename.
+            // Keep a rollback copy while performing the replacement so a
+            // failed write cannot destroy the last known-good config.
+            let backup = destination.with_extension("json.previous");
+            let _ = std::fs::remove_file(&backup);
+            if destination.exists() {
+                std::fs::rename(destination, &backup)
+                    .map_err(|e| format!("backup existing config: {e}"))?;
+            }
+            match std::fs::rename(tmp, destination) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(second_error) => {
+                    let _ = std::fs::rename(&backup, destination);
+                    Err(format!(
+                        "replace config failed ({first_error}); rollback failed: {second_error}"
+                    ))
+                }
+            }
+        }
+    }
+}
+
 impl PersistedConfig {
     pub fn path() -> PathBuf {
+        #[cfg(test)]
+        if let Ok(test_root) = std::env::var("LLM_TEST_CONFIG_DIR") {
+            if !test_root.trim().is_empty() {
+                return PathBuf::from(test_root).join(CONFIG_FILE_NAME);
+            }
+        }
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(CONFIG_DIR_NAME)
@@ -570,15 +755,26 @@ impl PersistedConfig {
             },
             Err(_) => Self::default(),
         };
-        if cfg.hf_token.starts_with("dpapi:") {
-            if let Ok(plain) = crate::security::decrypt_token(&cfg.hf_token) {
-                cfg.hf_token = plain;
-            }
-            if cfg.github_token.starts_with("dpapi:") {
-                if let Ok(plain) = crate::security::decrypt_token(&cfg.github_token) {
-                    cfg.github_token = plain;
+        for secret in [&mut cfg.hf_token, &mut cfg.github_token] {
+            if secret.starts_with("dpapi:") {
+                match crate::security::decrypt_token(secret) {
+                    Ok(plain) => *secret = plain,
+                    Err(error) => {
+                        // Never use a still-encrypted value as a bearer token.  A
+                        // failed DPAPI unlock is surfaced in the log and the
+                        // unusable secret is cleared rather than leaked to a
+                        // subprocess or API request.
+                        eprintln!("[config] could not decrypt a stored token: {error}");
+                        secret.clear();
+                    }
                 }
             }
+        }
+        // A persisted `was_running` flag is only a hint from a previous
+        // process.  Process handles do not survive an app crash, so never
+        // present stale state as live; explicit start/recovery is required.
+        for server in &mut cfg.servers {
+            server.was_running = false;
         }
         // Ensure default_env has the FlashInfer sampler disabled by default for existing configs.
         if cfg.default_env.is_empty() {
@@ -606,20 +802,27 @@ impl PersistedConfig {
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
         }
         let mut on_disk = self.clone();
+        if on_disk.hf_token == SECRET_PLACEHOLDER {
+            on_disk.hf_token.clear();
+        }
+        if on_disk.github_token == SECRET_PLACEHOLDER {
+            on_disk.github_token.clear();
+        }
+        if on_disk.advanced_settings.api_key.as_deref() == Some(SECRET_PLACEHOLDER) {
+            on_disk.advanced_settings.api_key = None;
+        }
         if !on_disk.hf_token.is_empty() && !on_disk.hf_token.starts_with("dpapi:") {
-            if let Ok(enc) = crate::security::encrypt_token(&on_disk.hf_token) {
-                on_disk.hf_token = enc;
-            }
-            if !on_disk.github_token.is_empty() && !on_disk.github_token.starts_with("dpapi:") {
-                if let Ok(enc) = crate::security::encrypt_token(&on_disk.github_token) {
-                    on_disk.github_token = enc;
-                }
-            }
+            on_disk.hf_token = crate::security::encrypt_token(&on_disk.hf_token)
+                .map_err(|e| format!("encrypt Hugging Face token: {e}"))?;
+        }
+        if !on_disk.github_token.is_empty() && !on_disk.github_token.starts_with("dpapi:") {
+            on_disk.github_token = crate::security::encrypt_token(&on_disk.github_token)
+                .map_err(|e| format!("encrypt GitHub token: {e}"))?;
         }
         let text = serde_json::to_string_pretty(&on_disk).map_err(|e| format!("serialize: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        replace_file_atomic(&tmp, &path)?;
         Ok(())
     }
 
@@ -646,6 +849,8 @@ pub struct ServerRecipe {
     #[serde(default)]
     pub served_model_name: Option<String>,
     #[serde(default)]
+    pub kv_cache_dtype: Option<String>,
+    #[serde(default)]
     pub enforce_eager: bool,
     #[serde(default)]
     pub swap_space_gb: Option<usize>,
@@ -668,6 +873,7 @@ impl ServerRecipe {
             quant: def.quant.clone(),
             max_model_len: def.max_model_len,
             served_model_name: def.served_model_name.clone(),
+            kv_cache_dtype: def.kv_cache_dtype.clone(),
             enforce_eager: def.enforce_eager,
             swap_space_gb: def.swap_space_gb,
             cpu_offload_gb: def.cpu_offload_gb,
@@ -690,6 +896,11 @@ pub struct ConfigExportPackage {
     pub minimize_to_tray: bool,
     pub auto_restart_crashed: bool,
     pub launch_at_login: bool,
+    /// True when the package was produced by the redacted exporter.  Import
+    /// uses this marker to preserve local secrets rather than replacing them
+    /// with placeholder values.
+    #[serde(default)]
+    pub secrets_omitted: bool,
 }
 
 fn default_config_export_schema() -> String {
@@ -705,12 +916,13 @@ impl ConfigExportPackage {
             llm_dir: cfg.llm_dir.clone(),
             venv_dir: cfg.venv_dir.clone(),
             default_quant: cfg.default_quant.clone(),
-            servers: cfg.servers.clone(),
+            servers: cfg.servers.iter().map(redact_server_def).collect(),
             memory_settings: cfg.memory_settings.clone(),
-            advanced_settings: cfg.advanced_settings.clone(),
+            advanced_settings: redact_advanced_settings(&cfg.advanced_settings),
             minimize_to_tray: cfg.minimize_to_tray,
             auto_restart_crashed: cfg.auto_restart_crashed,
             launch_at_login: cfg.launch_at_login,
+            secrets_omitted: true,
         }
     }
 }
@@ -820,6 +1032,9 @@ impl VecDequeLog {
 pub struct AppState {
     pub config: Mutex<PersistedConfig>,
     pub servers: Mutex<BTreeMap<String, LiveServer>>,
+    /// IDs currently being spawned.  This closes the check-then-spawn race
+    /// between two start requests for the same server.
+    pub starting: Mutex<HashSet<String>>,
     pub http: reqwest::Client,
     /// In-flight model pulls: model_id → running flag.
     pub pulling: Arc<Mutex<HashMap<String, bool>>>,
@@ -879,10 +1094,8 @@ impl AppState {
             .build()
             .unwrap_or_default();
         let mut config = PersistedConfig::load();
-        // If the configured distro does not respond or is empty, auto-heal to detected working distro
-        if !config.distro.starts_with("__test_")
-            && (config.distro.is_empty() || !crate::wsl::run_script(&config.distro, "echo ok").ok)
-        {
+        // Only resolve an empty distro at startup; never boot WSL just to validate it.
+        if config.distro.is_empty() && !config.distro.starts_with("__test_") {
             if let Some(detected) = crate::wsl::detect_default_distro() {
                 config.distro = detected;
                 let _ = config.save();
@@ -891,6 +1104,7 @@ impl AppState {
         AppState {
             config: Mutex::new(config),
             servers: Mutex::new(BTreeMap::new()),
+            starting: Mutex::new(HashSet::new()),
             http,
             pulling: Arc::new(Mutex::new(HashMap::new())),
             gpu: Mutex::new(None),
@@ -942,9 +1156,11 @@ impl AppState {
         if current.starts_with("__test_") {
             return current;
         }
+        // If configured distro exists and is responsive, use it
         if !current.is_empty() && crate::wsl::run_script(&current, "echo ok").ok {
             return current;
         }
+        // Otherwise detect and save the best available (prefers dedicated distro)
         if let Some(detected) = crate::wsl::detect_default_distro() {
             let mut cfg = self.config.lock().unwrap();
             cfg.distro = detected.clone();
@@ -973,6 +1189,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn atomic_replace_replaces_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "llm-panel-config-replace-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("config.json");
+        let temporary = dir.join("config.json.tmp");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&temporary, b"new").unwrap();
+        replace_file_atomic(&temporary, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert!(!temporary.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn config_round_trip() {
         let mut cfg = PersistedConfig::default();
         cfg.distro = "Ubuntu-22.04".to_string();
@@ -988,6 +1222,7 @@ mod tests {
             max_model_len: Some(4096),
             quant: "fp16".into(),
             served_model_name: None,
+            kv_cache_dtype: None,
             llamacpp_channel: LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: None,
@@ -1062,6 +1297,7 @@ mod tests {
         assert_eq!(cfg.servers[0].backend, "vllm");
         assert_eq!(cfg.servers[0].n_gpu_layers, Some(99));
         assert_eq!(cfg.servers[0].cache_type_k, "q8_0");
+        assert!(cfg.servers[0].kv_cache_dtype.is_none());
         assert!(cfg.servers[0].jinja);
         assert!(!cfg.llamacpp_dir.is_empty());
         assert!(!cfg.gguf_dir.is_empty());
@@ -1075,6 +1311,88 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.servers[0].n_gpu_layers, None);
         assert!(cfg.servers[0].fit);
+    }
+
+    #[test]
+    fn backend_normalization_removes_opposite_settings() {
+        let populated = r#"{
+            "backend":"vllm",
+            "id":"mixed",
+            "name":"mixed",
+            "model_id":"Qwen/test",
+            "task":"instruct",
+            "port":8000,
+            "gpu_mem_util":0.85,
+            "max_model_len":32768,
+            "quant":"gptq",
+            "served_model_name":"alias",
+            "kv_cache_dtype":"fp8_e4m3",
+            "swap_space_gb":8,
+            "cpu_offload_gb":4,
+            "model_path":"C:\\models\\model.gguf",
+            "mmproj_path":"C:\\models\\mmproj.gguf",
+            "ctx_size":4096,
+            "n_gpu_layers":99,
+            "n_cpu_moe":24,
+            "fit":true,
+            "fit_target":1024,
+            "device":"CUDA0",
+            "api_key":"server-key",
+            "log_verbosity":4,
+            "flash_attn":true,
+            "cache_type_k":"q8_0",
+            "cache_type_v":"q8_0",
+            "threads":12,
+            "batch_size":512,
+            "ubatch_size":128,
+            "parallel":2,
+            "jinja":true,
+            "no_kv_offload":true,
+            "metrics":true,
+            "extra_args":["--no-mmap"],
+            "env":{"VLLM_LOGGING_LEVEL":"DEBUG"}
+        }"#;
+
+        let mut vllm: ServerDef = serde_json::from_str(populated).unwrap();
+        vllm.normalize_for_backend().unwrap();
+        assert_eq!(vllm.backend_kind().unwrap(), ServerBackend::Vllm);
+        assert!(vllm.model_path.is_none());
+        assert!(vllm.ctx_size.is_none());
+        assert!(vllm.n_gpu_layers.is_none());
+        assert!(vllm.cache_type_k.is_empty());
+        assert!(vllm.threads.is_none());
+        assert_eq!(vllm.parallel, 0);
+        assert!(vllm.extra_args.is_empty());
+        assert!(!vllm.fit);
+        assert!(!vllm.flash_attn);
+        assert!(!vllm.jinja);
+        assert_eq!(vllm.effective_model_name(), "alias");
+        assert_eq!(vllm.api_key.as_deref(), Some("server-key"));
+        assert_eq!(vllm.kv_cache_dtype.as_deref(), Some("fp8_e4m3"));
+
+        let mut native: ServerDef = serde_json::from_str(populated).unwrap();
+        native.backend = "llamacpp".into();
+        native.normalize_for_backend().unwrap();
+        assert_eq!(native.backend_kind().unwrap(), ServerBackend::Llamacpp);
+        assert!(native.max_model_len.is_none());
+        assert!(native.swap_space_gb.is_none());
+        assert!(native.cpu_offload_gb.is_none());
+        assert!(native.env.is_empty());
+        assert_eq!(native.gpu_mem_util, 0.0);
+        assert!(!native.enforce_eager);
+        assert_eq!(native.task, "instruct");
+        assert_eq!(native.effective_model_name(), "alias");
+        assert_eq!(native.api_key.as_deref(), Some("server-key"));
+        assert!(native.kv_cache_dtype.is_none());
+    }
+
+    #[test]
+    fn backend_normalization_rejects_unknown_backend() {
+        let mut server: ServerDef = serde_json::from_str(
+            r#"{"backend":"llamacpp ","id":"s","name":"s","model_id":"m","task":"instruct","port":8000,"gpu_mem_util":0.85,"quant":"GGUF"}"#,
+        )
+        .unwrap();
+        assert!(server.normalize_for_backend().is_err());
     }
 
     #[test]
@@ -1323,6 +1641,7 @@ mod tests {
             max_model_len: None,
             quant: "fp16".into(),
             served_model_name: None,
+            kv_cache_dtype: None,
             llamacpp_channel: LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: None,
@@ -1374,6 +1693,7 @@ mod tests {
             max_model_len: Some(8192),
             quant: "fp8".into(),
             served_model_name: Some("qwen-7b".into()),
+            kv_cache_dtype: Some("fp8_e4m3".into()),
             llamacpp_channel: LlamaCppChannel::Upstream,
             enforce_eager: false,
             params_b: Some(7.6),
@@ -1408,6 +1728,7 @@ mod tests {
         assert_eq!(recipe.model_id, "Qwen/Qwen2.5-7B-Instruct");
         assert_eq!(recipe.port, 8088);
         assert_eq!(recipe.swap_space_gb, Some(4));
+        assert_eq!(recipe.kv_cache_dtype.as_deref(), Some("fp8_e4m3"));
 
         let text = serde_json::to_string_pretty(&recipe).unwrap();
         let parsed_recipe: ServerRecipe = serde_json::from_str(&text).unwrap();
@@ -1420,6 +1741,42 @@ mod tests {
         let parsed_pkg: ConfigExportPackage = serde_json::from_str(&export_json).unwrap();
         assert_eq!(parsed_pkg.servers.len(), 1);
         assert_eq!(parsed_pkg.servers[0].id, "recipe-test");
+
+        let mut secret_cfg = super::PersistedConfig::default();
+        secret_cfg.hf_token = "hf_export_secret".into();
+        secret_cfg.github_token = "gh_export_secret".into();
+        secret_cfg.advanced_settings.api_key = Some("gateway_export_secret".into());
+        let mut secret_server = cfg.servers[0].clone();
+        secret_server.api_key = Some("server_export_secret".into());
+        secret_server
+            .env
+            .insert("CUSTOM_TOKEN".into(), "env_export_secret".into());
+        secret_cfg.servers = vec![secret_server];
+        let secret_json = serde_json::to_string(&ConfigExportPackage::from_persisted(&secret_cfg))
+            .unwrap();
+        for secret in [
+            "hf_export_secret",
+            "gh_export_secret",
+            "gateway_export_secret",
+            "server_export_secret",
+            "env_export_secret",
+        ] {
+            assert!(!secret_json.contains(secret), "export leaked {secret}");
+        }
+        assert!(secret_json.contains(SECRET_PLACEHOLDER));
+        let public_json = serde_json::to_string(&redact_config_for_display(&secret_cfg)).unwrap();
+        assert!(!public_json.contains("hf_export_secret"));
+        assert!(!public_json.contains("gh_export_secret"));
+        assert!(!public_json.contains("gateway_export_secret"));
+        assert!(!public_json.contains("server_export_secret"));
+        assert!(!public_json.contains("env_export_secret"));
+
+        let mut redacted = secret_cfg.servers[0].clone();
+        let restored = secret_cfg.servers[0].clone();
+        redacted = redact_server_def(&redacted);
+        merge_server_secret_placeholders(&mut redacted, Some(&restored));
+        assert_eq!(redacted.api_key, restored.api_key);
+        assert_eq!(redacted.env.get("CUSTOM_TOKEN"), restored.env.get("CUSTOM_TOKEN"));
     }
 
     #[test]

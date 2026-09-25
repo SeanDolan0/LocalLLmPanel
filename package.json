@@ -1,13 +1,16 @@
 {
   "name": "local-llm-panel",
   "private": true,
-  "version": "1.8.0",
+  "version": "1.8.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "release:check": "node scripts/validate-release.mjs --setup",
+    "test:contract": "node --test scripts/frontend-smoke.mjs",
+    "test:smoke": "npm run test:contract",
     "check": "node scripts/build.mjs --check",
     "build:fast": "node scripts/build.mjs --fast",
     "build:setup": "node scripts/build.mjs --setup",
@@ -19,7 +22,7 @@
     "@tauri-apps/plugin-dialog": "2.7.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.30.0"
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.7",

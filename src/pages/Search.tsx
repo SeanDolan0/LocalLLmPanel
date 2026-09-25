@@ -14,11 +14,17 @@ import type {
   EnvStatus,
   FitResultBackend,
   FitVerdict,
+  LlamaCppChannel,
   ModelWithFit,
   PullStatus,
   QuantVariantWithFit,
   RunMode,
 } from "../types";
+
+interface DeployOptions {
+  modelPath?: string;
+  channel?: LlamaCppChannel;
+}
 
 // ---------------------------------------------------------------------------
 // Inline debounce hook (no new external dependencies)
@@ -643,15 +649,25 @@ export default function Search() {
     });
   };
 
-  const deploy = (repoId: string, quant: string, fit?: FitResultBackend) => {
+  const deploy = (
+    repoId: string,
+    quant: string,
+    fit?: FitResultBackend,
+    options?: DeployOptions,
+  ) => {
+    const isGguf = quant.toUpperCase() === "GGUF";
     navigate("/servers", {
       state: {
         prefillModel: repoId,
+        prefillBackend: isGguf ? "llamacpp" : "vllm",
+        prefillModelPath: options?.modelPath,
+        prefillChannel: options?.channel,
         prefillQuant: quant,
         prefillSwapSpace: fit?.swap_space_gb,
         prefillCpuOffload: fit?.cpu_offload_gb,
         prefillMaxLen: fit?.extended_context,
         prefillVramContext: fit?.vram_context,
+        prefillTask: isGguf ? "instruct" : /embed|bge|gte/i.test(repoId) ? "embed" : "instruct",
       },
     });
   };
@@ -1034,7 +1050,14 @@ export default function Search() {
                             <Button
                               variant="primary"
                               className="text-xs px-2.5 py-1"
-                              onClick={() => deploy(variant?.repo_id || m.id, (variant?.format || "fp16").toLowerCase(), fit)}
+                              onClick={() => deploy(
+                                 variant?.repo_id || m.id,
+                                 (variant?.format || "fp16").toLowerCase(),
+                                 fit,
+                                 variant
+                                   ? { modelPath: variant.gguf_file ?? undefined, channel: variant.required_channel }
+                                   : undefined,
+                               )}
                             >
                               Deploy
                             </Button>
@@ -1149,7 +1172,12 @@ function ModelCard({
 }: {
   model: ModelWithFit;
   onSelect: () => void;
-  onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
+  onDeploy: (
+    repoId: string,
+    quant: string,
+    fit?: FitResultBackend,
+    options?: DeployOptions,
+  ) => void;
   onPull: (repoId: string, quant?: string) => void;
   onCancelPull?: (repoId: string) => void;
   pullState?: PullStatus;
@@ -1399,7 +1427,14 @@ function ModelCard({
           <Button
             variant="primary"
             className="text-xs px-3 py-1 font-medium shadow-sm"
-            onClick={() => onDeploy(variant?.repo_id || model.id, (variant?.format || "fp16").toLowerCase(), fit)}
+            onClick={() => onDeploy(
+              variant?.repo_id || model.id,
+              (variant?.format || "fp16").toLowerCase(),
+              fit,
+              variant
+                ? { modelPath: variant.gguf_file ?? undefined, channel: variant.required_channel }
+                : undefined,
+            )}
           >
             Deploy
           </Button>
@@ -1439,7 +1474,12 @@ function ModelDetailModal({
   pulls: Record<string, PullStatus>;
   onPull: (repoId: string, quant?: string) => void;
   onCancelPull?: (repoId: string) => void;
-  onDeploy: (repoId: string, quant: string, fit?: FitResultBackend) => void;
+  onDeploy: (
+    repoId: string,
+    quant: string,
+    fit?: FitResultBackend,
+    options?: DeployOptions,
+  ) => void;
   totalVramMb: number | null;
   isModelInstalled?: (modelId?: string | null) => boolean;
 }) {
@@ -1767,7 +1807,15 @@ function ModelDetailModal({
                           <Button
                             variant="primary"
                             className="text-xs px-3 py-1"
-                            onClick={() => onDeploy(variant.repo_id, variant.format.toLowerCase(), fit)}
+                            onClick={() => onDeploy(
+                              variant.repo_id,
+                              variant.format.toLowerCase(),
+                              fit,
+                              {
+                                modelPath: variant.gguf_file ?? undefined,
+                                channel: variant.required_channel,
+                              },
+                            )}
                             title={`Deploy server with ${variant.label}`}
                           >
                             Deploy →

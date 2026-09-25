@@ -5,7 +5,9 @@ import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../a
 import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import { effectiveModelName } from "../types";
-import type { ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice } from "../types";
+import type { ContextFitReport, ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice } from "../types";
+
+const SECRET_PLACEHOLDER = "__LLM_PANEL_SECRET_REDACTED__";
 
 export default function Servers() {
   const location = useLocation();
@@ -24,7 +26,9 @@ export default function Servers() {
   const [prefillVramContext, setPrefillVramContext] = useState<number | undefined>(undefined);
   const [prefillGpuUtil, setPrefillGpuUtil] = useState<number | undefined>(undefined);
   const [prefillServed, setPrefillServed] = useState<string | undefined>(undefined);
+  const [prefillKvDtype, setPrefillKvDtype] = useState<string | undefined>(undefined);
   const [prefillTask, setPrefillTask] = useState<"instruct" | "embed" | undefined>(undefined);
+  const [prefillChannel, setPrefillChannel] = useState<"upstream" | "prism" | undefined>(undefined);
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
@@ -55,7 +59,9 @@ export default function Servers() {
     setPrefillVramContext(undefined);
     setPrefillGpuUtil(undefined);
     setPrefillServed(undefined);
+    setPrefillKvDtype(undefined);
     setPrefillTask(undefined);
+    setPrefillChannel(undefined);
     setEditingServer(null);
   };
 
@@ -82,6 +88,7 @@ export default function Servers() {
       setPrefillMaxLen(r.max_model_len && r.max_model_len > 0 ? r.max_model_len : undefined);
       setPrefillGpuUtil(r.gpu_mem_util);
       setPrefillServed(r.served_model_name ?? undefined);
+      setPrefillKvDtype(r.kv_cache_dtype ?? undefined);
       setPrefillTask(r.task as "instruct" | "embed");
       setShowImportRecipe(false);
       setRecipeInput("");
@@ -102,6 +109,11 @@ export default function Servers() {
       prefillCpuOffload?: number;
       prefillMaxLen?: number;
       prefillVramContext?: number;
+      prefillGpuUtil?: number;
+      prefillServed?: string;
+      prefillKvDtype?: string;
+      prefillTask?: "instruct" | "embed";
+      prefillChannel?: "upstream" | "prism";
     } | null;
     if (state?.prefillModel) {
       setPrefillModel(state.prefillModel);
@@ -126,6 +138,21 @@ export default function Servers() {
       if (state.prefillVramContext !== undefined) {
         setPrefillVramContext(state.prefillVramContext);
       }
+      if (state.prefillGpuUtil !== undefined) {
+        setPrefillGpuUtil(state.prefillGpuUtil);
+      }
+      if (state.prefillServed !== undefined) {
+        setPrefillServed(state.prefillServed);
+      }
+      if (state.prefillKvDtype !== undefined) {
+        setPrefillKvDtype(state.prefillKvDtype);
+      }
+      if (state.prefillTask !== undefined) {
+        setPrefillTask(state.prefillTask);
+      }
+      if (state.prefillChannel !== undefined) {
+        setPrefillChannel(state.prefillChannel);
+      }
       setShowNew(true);
       window.history.replaceState({}, document.title);
     }
@@ -143,7 +170,9 @@ export default function Servers() {
       setPrefillMaxLen(editingServer.max_model_len ?? undefined);
       setPrefillGpuUtil(editingServer.gpu_mem_util);
       setPrefillServed(editingServer.served_model_name ?? undefined);
+      setPrefillKvDtype(editingServer.kv_cache_dtype ?? undefined);
       setPrefillTask(editingServer.task as "instruct" | "embed");
+      setPrefillChannel(editingServer.llamacpp_channel);
       setShowNew(true);
     }
   }, [editingServer]);
@@ -317,8 +346,9 @@ export default function Servers() {
           initialVramContext={prefillVramContext}
           initialGpuUtil={prefillGpuUtil}
           initialServed={prefillServed}
+          initialKvDtype={prefillKvDtype}
           initialTask={prefillTask}
-          initialGlobalDefaults={editingServer?.env ?? {}}
+          initialChannel={prefillChannel}
           initialEnv={editingServer?.env ?? {}}
           initialServer={editingServer}
           onDone={(s) => {
@@ -369,15 +399,15 @@ export default function Servers() {
                     <span>{r.def.task}</span>
                     <span>·</span>
                     <span>{quantLabel(r.def.quant)}</span>
-                    {r.def.max_model_len ? <span>· ctx {fmtNum(r.def.max_model_len)}</span> : null}
+                    {r.def.backend === "vllm" && r.def.max_model_len ? <span>· ctx {fmtNum(r.def.max_model_len)}</span> : null}
                     {r.def.backend === "llamacpp" && r.def.ctx_size ? <span>· ctx {fmtNum(r.def.ctx_size)}</span> : null}
                     {r.def.params_b ? <span>· ~{r.def.params_b.toFixed(2)}B</span> : null}
-                    {r.def.swap_space_gb != null && r.def.swap_space_gb > 0 && (
+                    {r.def.backend === "vllm" && r.def.swap_space_gb != null && r.def.swap_space_gb > 0 && (
                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-950/80 text-cyan-300 border border-cyan-800">
                         swap {r.def.swap_space_gb}GB
                       </span>
                     )}
-                    {r.def.cpu_offload_gb != null && r.def.cpu_offload_gb > 0 && (
+                    {r.def.backend === "vllm" && r.def.cpu_offload_gb != null && r.def.cpu_offload_gb > 0 && (
                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950/80 text-amber-300 border border-amber-800">
                         offload {r.def.cpu_offload_gb}GB
                       </span>
@@ -464,15 +494,17 @@ export default function Servers() {
                       Restart
                     </Button>
                   )}
-                  <Button
-                    variant="ghost"
-                    title="Copy portable server recipe JSON to clipboard"
-                    onClick={() => {
-                      copyRecipe(r.def);
-                    }}
-                  >
-                    {copiedId === r.def.id ? "Copied!" : "Recipe"}
-                  </Button>
+                  {r.def.backend === "vllm" && (
+                    <Button
+                      variant="ghost"
+                      title="Copy portable vLLM server recipe JSON to clipboard"
+                      onClick={() => {
+                        copyRecipe(r.def);
+                      }}
+                    >
+                      {copiedId === r.def.id ? "Copied!" : "Recipe"}
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     title="Edit server configuration"
@@ -622,6 +654,158 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 // ---------------------------------------------------------------------------
 
+function inferVllmQuant(modelId: string): string {
+  const id = modelId.toUpperCase();
+  if (id.includes("GPTQ")) return "gptq";
+  if (id.includes("AWQ")) return "awq";
+  if (id.includes("FP8")) return "fp8";
+  return "auto";
+}
+
+function inferGgufQuantLabel(modelPath: string): string {
+  const file = modelPath.split(/[\\/]/).pop() || "";
+  const match = file.match(/(?:^|[-_.])(Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32)(?=\.gguf$)/i);
+  return match?.[1]?.toUpperCase() || "GGUF";
+}
+
+function formatMemoryMb(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return value >= 1024 ? `${(value / 1024).toFixed(2)} GiB` : `${Math.round(value)} MiB`;
+}
+
+function ContextFitResultPanel({
+  result,
+  error,
+  loading,
+  onApply,
+}: {
+  result: ContextFitReport | null;
+  error: string | null;
+  loading: boolean;
+  onApply: () => void;
+}) {
+  if (!loading && !error && !result) return null;
+  if (loading) {
+    return (
+      <div className="mt-4 rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-4 text-sm text-cyan-200">
+        <Spinner label="Analyzing weights, KV cache, VRAM, and RAM…" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-rose-200">
+        Context fit test failed: {error}
+      </div>
+    );
+  }
+  if (!result) return null;
+
+  const tone =
+    result.status === "fits"
+      ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-200"
+      : result.status === "fits_with_cpu"
+        ? "border-cyan-500/30 bg-cyan-500/5 text-cyan-200"
+        : result.status === "tight"
+          ? "border-amber-500/30 bg-amber-500/5 text-amber-200"
+          : result.status === "does_not_fit"
+            ? "border-rose-500/30 bg-rose-500/5 text-rose-200"
+            : "border-slate-500/30 bg-slate-500/5 text-slate-300";
+  const title =
+    result.status === "fits"
+      ? "Context fits"
+      : result.status === "fits_with_cpu"
+        ? "Fits with CPU offload"
+        : result.status === "tight"
+          ? "Fits, but VRAM is tight"
+          : result.status === "does_not_fit"
+            ? result.backend === "llamacpp" && result.warnings.some((warning) => warning.includes("--fit"))
+              ? "GPU-only placement does not fit"
+              : "Context does not fit"
+            : "More metadata is required";
+  const hasRecommendation =
+    result.recommended_context != null ||
+    result.recommended_kv_cache_dtype != null ||
+    result.recommended_cache_type_k != null;
+
+  return (
+    <div className={`mt-4 rounded-xl border p-4 ${tone}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">{title}</div>
+          <div className="mt-1 text-xs opacity-80">
+            {fmtNum(result.requested_context)} tokens · {result.kv_cache_label} · {result.weight_source.replaceAll("_", " ")}
+          </div>
+        </div>
+        {hasRecommendation && (
+          <Button variant="subtle" className="shrink-0 text-xs" onClick={onApply}>
+            Apply recommendation
+          </Button>
+        )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Weights</div>
+          <div className="mt-0.5 font-mono">{formatMemoryMb(result.weight_gib == null ? null : result.weight_gib * 1024)}</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">KV cache</div>
+          <div className="mt-0.5 font-mono">{formatMemoryMb(result.required_kv_mb)}</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">VRAM headroom</div>
+          <div className="mt-0.5 font-mono">{formatMemoryMb(result.vram_headroom_mb)}</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Max without overflow</div>
+          <div className="mt-0.5 font-mono">{result.max_context_no_overflow == null ? "—" : fmtNum(result.max_context_no_overflow)}</div>
+          <div className="mt-0.5 text-[10px] opacity-60">GPU only · current free VRAM</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Max with overflow</div>
+          <div className="mt-0.5 font-mono">{result.max_context_with_overflow == null ? "—" : fmtNum(result.max_context_with_overflow)}</div>
+          <div className="mt-0.5 text-[10px] opacity-60">
+            {result.overflow_enabled
+              ? `${result.overflow_label} enabled`
+              : result.overflow_required_gb
+                ? `potential · needs ${result.overflow_required_gb} GB ${result.overflow_label}`
+                : `potential · ${result.overflow_label} not enabled`}
+          </div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Free VRAM now</div>
+          <div className="mt-0.5 font-mono">{formatMemoryMb(result.vram_free_mb)}</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Available RAM</div>
+          <div className="mt-0.5 font-mono">{formatMemoryMb(result.ram_available_mb)}</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Native context</div>
+          <div className="mt-0.5 font-mono">{result.native_context == null ? "unknown" : fmtNum(result.native_context)}</div>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/10 p-2">
+          <div className="opacity-65">Weight offload needed</div>
+          <div className="mt-0.5 font-mono">{result.required_cpu_offload_gb == null ? "—" : `${result.required_cpu_offload_gb} GiB`}</div>
+        </div>
+      </div>
+
+      {result.fits_with_current_free === false && result.status !== "does_not_fit" && (
+        <p className="mt-3 text-xs text-amber-200">
+          The no-overflow limit uses current free VRAM. Close GPU-heavy apps to raise it, or enable CPU KV overflow for a larger context.
+        </p>
+      )}
+      <p className="mt-3 text-xs leading-relaxed">{result.recommendation}</p>
+      {result.warnings.length > 0 && (
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-[11px] opacity-80">
+          {result.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function NewServerForm({
   freeGb,
   devices = [],
@@ -635,8 +819,9 @@ function NewServerForm({
   initialVramContext,
   initialGpuUtil,
   initialServed,
+  initialKvDtype,
   initialTask,
-  initialGlobalDefaults,
+  initialChannel,
   initialEnv,
   initialServer, // When provided, enables edit mode
   onDone,
@@ -655,8 +840,9 @@ function NewServerForm({
   initialVramContext?: number;
   initialGpuUtil?: number;
   initialServed?: string;
+  initialKvDtype?: string;
   initialTask?: "instruct" | "embed";
-  initialGlobalDefaults?: Record<string, string>;
+  initialChannel?: "upstream" | "prism";
   initialEnv?: Record<string, string>;
   initialServer?: ServerDef | null; // For editing existing server
   onDone: (s: { id: string }) => void;
@@ -678,7 +864,9 @@ function NewServerForm({
   const [backend, setBackend] = useState<"vllm" | "llamacpp">(
     initialBackend || (isInitialGguf ? "llamacpp" : "vllm")
   );
-  const [quant, setQuant] = useState(initialQuant || "fp16");
+  const [quant, setQuant] = useState(
+    initialQuant || (isInitialGguf ? "GGUF" : inferVllmQuant(initialModelId))
+  );
   const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.85");
   const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
   const [swapSpaceGb, setSwapSpaceGb] = useState<string>(
@@ -689,6 +877,7 @@ function NewServerForm({
   );
   const [vramContextLimit, setVramContextLimit] = useState<number | undefined>(initialVramContext);
   const [served, setServed] = useState(initialServed || "");
+  const [enforceEager, setEnforceEager] = useState(true);
   const [creating, setCreating] = useState(false);
   const [modelPath, setModelPath] = useState(initialModelPath || "");
   const [mmprojPath, setMmprojPath] = useState("");
@@ -701,26 +890,27 @@ function NewServerForm({
     () => devices.find((candidate) => candidate.backend.toLowerCase() === "cuda")?.id ?? ""
   );
   const [apiKey, setApiKey] = useState("");
+  const [apiKeyDirty, setApiKeyDirty] = useState(false);
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [logVerbosity, setLogVerbosity] = useState("");
   const [flashAttn, setFlashAttn] = useState(true);
   const [jinja, setJinja] = useState(true);
+  const [noKvOffload, setNoKvOffload] = useState(false);
+  const [metrics, setMetrics] = useState(true);
+  const [threads, setThreads] = useState("");
+  const [batchSize, setBatchSize] = useState("");
+  const [ubatchSize, setUbatchSize] = useState("");
+  const [parallel, setParallel] = useState("0");
+  const [extraArgs, setExtraArgs] = useState("");
   const [moePresetApplied, setMoePresetApplied] = useState(false);
-  const [env, setEnv] = useState<Record<string, string>>({});
-  const [flashInferDisabled, setFlashInferDisabled] = useState<boolean>(() => {
-    const defaults = initialGlobalDefaults ?? {};
-    return defaults["VLLM_USE_FLASHINFER_SAMPLER"] === "0";
-  });
-  const [llamaCppChannel, setLlamaCppChannel] = useState<"upstream" | "prism">("upstream");
+  const [env, setEnv] = useState<Record<string, string>>(initialEnv ?? {});
+  const [llamaCppChannel, setLlamaCppChannel] = useState<"upstream" | "prism">(initialChannel || "upstream");
   const [cacheTypeK, setCacheTypeK] = useState("q8_0");
   const [cacheTypeV, setCacheTypeV] = useState("q8_0");
-
-  // Sync flashInferDisabled checkbox with env
-  useEffect(() => {
-    setEnv((prev) => ({
-      ...prev,
-      VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1",
-    }));
-  }, [flashInferDisabled]);
+  const [kvCacheDtype, setKvCacheDtype] = useState(initialKvDtype || "");
+  const [contextFit, setContextFit] = useState<ContextFitReport | null>(null);
+  const [contextFitError, setContextFitError] = useState<string | null>(null);
+  const [contextFitLoading, setContextFitLoading] = useState(false);
 
   useEffect(() => {
     if (initialModelId) {
@@ -756,26 +946,43 @@ function NewServerForm({
     if (initialServed !== undefined) {
       setServed(initialServed);
     }
+    if (initialKvDtype !== undefined) {
+      setKvCacheDtype(initialKvDtype);
+    }
     if (initialTask !== undefined) {
       setTask(initialTask);
     }
+    if (initialChannel !== undefined) {
+      setLlamaCppChannel(initialChannel);
+    }
     if (initialServer) {
+      setEnforceEager(initialServer.enforce_eager ?? true);
       setLlamaCppChannel(initialServer.llamacpp_channel === "prism" ? "prism" : "upstream");
-      setCacheTypeK(initialServer.cache_type_k);
-      setCacheTypeV(initialServer.cache_type_v);
-      if (initialServer.ctx_size) setCtxSize(String(initialServer.ctx_size));
-      if (initialServer.n_gpu_layers) setNGpuLayers(String(initialServer.n_gpu_layers));
-      if (initialServer.n_cpu_moe) setNCpuMoe(String(initialServer.n_cpu_moe));
+      setCacheTypeK(initialServer.cache_type_k || "q8_0");
+      setCacheTypeV(initialServer.cache_type_v || "q8_0");
+      setKvCacheDtype(initialServer.kv_cache_dtype || "");
+      setCtxSize(initialServer.ctx_size ? String(initialServer.ctx_size) : "");
+      setNGpuLayers(initialServer.n_gpu_layers != null ? String(initialServer.n_gpu_layers) : "");
+      setNCpuMoe(initialServer.n_cpu_moe != null ? String(initialServer.n_cpu_moe) : "");
       setFit(initialServer.fit ?? true);
-      if (initialServer.fit_target) setFitTarget(String(initialServer.fit_target));
-      if (initialServer.device) setDevice(initialServer.device);
-      if (initialServer.api_key) setApiKey(initialServer.api_key);
-      if (initialServer.log_verbosity !== undefined && initialServer.log_verbosity !== null) {
-        setLogVerbosity(String(initialServer.log_verbosity));
-      }
+      setFitTarget(initialServer.fit_target != null ? String(initialServer.fit_target) : "");
+      setDevice(initialServer.device || "");
+      const initialApiKey = initialServer.api_key || "";
+      setApiKey(initialApiKey === SECRET_PLACEHOLDER ? "" : initialApiKey);
+      setApiKeyConfigured(!!initialApiKey);
+      setApiKeyDirty(false);
+      setLogVerbosity(initialServer.log_verbosity != null ? String(initialServer.log_verbosity) : "");
       setFlashAttn(initialServer.flash_attn);
       setJinja(initialServer.jinja);
-      if (initialServer.mmproj_path) setMmprojPath(initialServer.mmproj_path);
+      setNoKvOffload(initialServer.no_kv_offload);
+      setMetrics(initialServer.metrics);
+      setThreads(initialServer.threads != null ? String(initialServer.threads) : "");
+      setBatchSize(initialServer.batch_size != null ? String(initialServer.batch_size) : "");
+      setUbatchSize(initialServer.ubatch_size != null ? String(initialServer.ubatch_size) : "");
+      setParallel(String(initialServer.parallel ?? 0));
+      setExtraArgs((initialServer.extra_args || []).join("\n"));
+      setEnv(initialServer.env ?? {});
+      setMmprojPath(initialServer.mmproj_path || "");
     }
   }, [
     initialModelId,
@@ -789,9 +996,131 @@ function NewServerForm({
     initialVramContext,
     initialGpuUtil,
     initialServed,
+    initialKvDtype,
     initialTask,
+    initialChannel,
     initialServer,
   ]);
+
+  const changeBackend = (nextBackend: "vllm" | "llamacpp") => {
+    setBackend(nextBackend);
+    setContextFit(null);
+    setContextFitError(null);
+    if (nextBackend === "vllm") {
+      if (/[\\/]|\.gguf$/i.test(modelId)) setModelId("");
+      setModelPath("");
+      setMmprojPath("");
+      setCtxSize("");
+      setNGpuLayers("");
+      setNCpuMoe("");
+      setFit(false);
+      setFitTarget("");
+      setDevice("");
+      setLogVerbosity("");
+      setFlashAttn(false);
+      setCacheTypeK("");
+      setCacheTypeV("");
+      setKvCacheDtype("");
+      setThreads("");
+      setBatchSize("");
+      setUbatchSize("");
+      setParallel("0");
+      setNoKvOffload(false);
+      setJinja(false);
+      setExtraArgs("");
+      setLlamaCppChannel("upstream");
+      setQuant(inferVllmQuant(modelId));
+    } else {
+      setGpuUtil("0.85");
+      setMaxLen("");
+      setSwapSpaceGb("");
+      setCpuOffloadGb("");
+      setEnforceEager(false);
+      setEnv({});
+      setModelId("");
+      setTask("instruct");
+      setQuant("GGUF");
+      setFit(true);
+      setFlashAttn(true);
+      setJinja(true);
+      setCacheTypeK("q8_0");
+      setCacheTypeV("q8_0");
+    }
+  };
+
+  const analyzeContext = async () => {
+    const chosenModelId = modelId.trim();
+    const chosenModelPath = modelPath.trim();
+    if (backend === "vllm" && !chosenModelId) {
+      setContextFitError("Enter a model ID before testing context fit.");
+      return;
+    }
+    if (backend === "llamacpp" && !chosenModelPath) {
+      setContextFitError("Select or enter a GGUF file before testing context fit.");
+      return;
+    }
+    setContextFitLoading(true);
+    setContextFitError(null);
+    setContextFit(null);
+    try {
+      const result = await api.analyzeContextFit({
+        backend,
+        model_id: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : chosenModelId,
+        model_path: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : null,
+        context_tokens:
+          backend === "vllm"
+            ? maxLen
+              ? parseInt(maxLen, 10)
+              : null
+            : ctxSize
+              ? parseInt(ctxSize, 10)
+              : null,
+        quant: backend === "vllm" ? quant : null,
+        kv_cache_dtype: backend === "vllm" ? (kvCacheDtype || null) : null,
+        gpu_mem_util: backend === "vllm" ? parseFloat(gpuUtil) : null,
+        cpu_offload_gb:
+          backend === "vllm" && cpuOffloadGb ? parseInt(cpuOffloadGb, 10) : 0,
+        kv_offload_gb:
+          backend === "vllm" && swapSpaceGb ? parseInt(swapSpaceGb, 10) : 0,
+        cache_type_k: backend === "llamacpp" ? cacheTypeK : null,
+        cache_type_v: backend === "llamacpp" ? cacheTypeV : null,
+        flash_attn: backend === "llamacpp" ? flashAttn : null,
+        n_gpu_layers:
+          backend === "llamacpp" && nGpuLayers ? parseInt(nGpuLayers, 10) : null,
+        n_cpu_moe:
+          backend === "llamacpp" && nCpuMoe ? parseInt(nCpuMoe, 10) : null,
+        fit: backend === "llamacpp" ? fit : null,
+        fit_target:
+          backend === "llamacpp" && fitTarget ? parseInt(fitTarget, 10) : 1024,
+        no_kv_offload: backend === "llamacpp" ? noKvOffload : null,
+      });
+      setContextFit(result);
+    } catch (error) {
+      setContextFitError(String(error));
+    } finally {
+      setContextFitLoading(false);
+    }
+  };
+
+  const applyContextRecommendation = () => {
+    if (!contextFit) return;
+    if (contextFit.recommended_context && contextFit.recommended_context > 0) {
+      if (backend === "vllm") {
+        setMaxLen(String(contextFit.recommended_context));
+      } else {
+        setCtxSize(String(contextFit.recommended_context));
+      }
+    }
+    if (contextFit.recommended_kv_cache_dtype) {
+      setKvCacheDtype(contextFit.recommended_kv_cache_dtype);
+    }
+    if (contextFit.recommended_cache_type_k) {
+      setCacheTypeK(contextFit.recommended_cache_type_k);
+    }
+    if (contextFit.recommended_cache_type_v) {
+      setCacheTypeV(contextFit.recommended_cache_type_v);
+    }
+  };
 
   const submit = async () => {
     const chosenModelId = modelId.trim();
@@ -810,31 +1139,58 @@ function NewServerForm({
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
       const serverData = {
         backend,
-        model_id: chosenModelId || chosenModelPath,
-        name: name.trim() || chosenModelId.split("/").pop() || "server",
-        task,
+        model_id: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : chosenModelId,
+        name:
+          name.trim() ||
+          (chosenModelId || chosenModelPath).split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") ||
+          "server",
+        task: backend === "vllm" ? task : "instruct",
         quant,
-        gpu_mem_util: backend === "vllm" ? parseFloat(gpuUtil) || 0.85 : undefined,
-        max_model_len: backend === "vllm" && maxLen ? parseInt(maxLen, 10) : undefined,
-        swap_space_gb: backend === "vllm" && parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : undefined,
-        cpu_offload_gb: backend === "vllm" && parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : undefined,
-        served_model_name: backend === "vllm" ? served.trim() || undefined : undefined,
-        model_path: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : undefined,
-        mmproj_path: backend === "llamacpp" ? (mmprojPath.trim() || undefined) : undefined,
-        ctx_size: backend === "llamacpp" ? parseInt(ctxSize, 10) || undefined : undefined,
-        n_gpu_layers: backend === "llamacpp" && nGpuLayers.trim() ? parseInt(nGpuLayers, 10) : undefined,
-        n_cpu_moe: backend === "llamacpp" ? parseInt(nCpuMoe, 10) || undefined : undefined,
+        gpu_mem_util: backend === "vllm" ? parseFloat(gpuUtil) : undefined,
+        max_model_len: backend === "vllm" && maxLen ? parseInt(maxLen, 10) : null,
+        swap_space_gb:
+          backend === "vllm" && parsedSwap !== null && !isNaN(parsedSwap) ? parsedSwap : null,
+        cpu_offload_gb:
+          backend === "vllm" && parsedOffload !== null && !isNaN(parsedOffload) ? parsedOffload : null,
+        enforce_eager: backend === "vllm" ? enforceEager : undefined,
+        served_model_name: served.trim() || null,
+        kv_cache_dtype: backend === "vllm" ? (kvCacheDtype || null) : null,
+        ...(apiKeyDirty || !isEditing
+          ? { api_key: apiKey.trim() || null }
+          : {}),
+        ...(isEditing && apiKeyDirty && !apiKey.trim() ? { clear_api_key: true } : {}),
+        metrics,
+        model_path: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : null,
+        mmproj_path: backend === "llamacpp" ? (mmprojPath.trim() || null) : null,
+        ctx_size: backend === "llamacpp" && ctxSize ? parseInt(ctxSize, 10) : null,
+        n_gpu_layers:
+          backend === "llamacpp" && nGpuLayers.trim() ? parseInt(nGpuLayers, 10) : null,
+        n_cpu_moe: backend === "llamacpp" && nCpuMoe.trim() ? parseInt(nCpuMoe, 10) : null,
         fit: backend === "llamacpp" ? fit : undefined,
-        fit_target: backend === "llamacpp" && fitTarget.trim() ? parseInt(fitTarget, 10) : undefined,
-        device: backend === "llamacpp" ? (device.trim() || undefined) : undefined,
-        api_key: backend === "llamacpp" ? (apiKey.trim() || undefined) : undefined,
-        log_verbosity: backend === "llamacpp" && logVerbosity.trim() ? parseInt(logVerbosity, 10) : undefined,
+        fit_target: backend === "llamacpp" && fitTarget.trim() ? parseInt(fitTarget, 10) : null,
+        device: backend === "llamacpp" ? (device.trim() || null) : null,
+        log_verbosity:
+          backend === "llamacpp" && logVerbosity.trim() ? parseInt(logVerbosity, 10) : null,
         flash_attn: backend === "llamacpp" ? flashAttn : undefined,
         jinja: backend === "llamacpp" ? jinja : undefined,
+        no_kv_offload: backend === "llamacpp" ? noKvOffload : undefined,
         llamacpp_channel: backend === "llamacpp" ? llamaCppChannel : undefined,
-        cache_type_k: backend === "llamacpp" ? cacheTypeK : undefined,
-        cache_type_v: backend === "llamacpp" ? cacheTypeV : undefined,
-        env: backend === "vllm" && Object.keys(env).length > 0 ? env : undefined,
+        cache_type_k: backend === "llamacpp" ? cacheTypeK : null,
+        cache_type_v: backend === "llamacpp" ? cacheTypeV : null,
+        threads: backend === "llamacpp" && threads.trim() ? parseInt(threads, 10) : null,
+        batch_size:
+          backend === "llamacpp" && batchSize.trim() ? parseInt(batchSize, 10) : null,
+        ubatch_size:
+          backend === "llamacpp" && ubatchSize.trim() ? parseInt(ubatchSize, 10) : null,
+        parallel: backend === "llamacpp" ? parseInt(parallel, 10) || 0 : 0,
+        extra_args:
+          backend === "llamacpp"
+            ? extraArgs
+                .split(/\r?\n/)
+                .map((arg) => arg.trim())
+                .filter(Boolean)
+            : null,
+        env: backend === "vllm" ? env : {},
       };
       let s;
       if (isEditing && initialServer) {
@@ -860,7 +1216,7 @@ function NewServerForm({
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Backend">
-          <select className={inputCls} value={backend} onChange={(e) => setBackend(e.target.value as "vllm" | "llamacpp")}>
+          <select className={inputCls} value={backend} onChange={(e) => changeBackend(e.target.value as "vllm" | "llamacpp")}>
             <option value="vllm">vLLM (WSL2)</option>
             <option value="llamacpp">llama.cpp (Windows)</option>
           </select>
@@ -873,9 +1229,11 @@ function NewServerForm({
                 placeholder="C:\models\model-Q4_K_M.gguf"
                 value={modelPath}
                 onChange={(e) => {
-                  setModelPath(e.target.value);
+                  const nextPath = e.target.value;
+                  setModelPath(nextPath);
+                  setQuant(inferGgufQuantLabel(nextPath));
                   if (!name) {
-                    setName(e.target.value.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
+                    setName(nextPath.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
                   }
                 }}
               />
@@ -890,6 +1248,7 @@ function NewServerForm({
                     });
                     if (selected && typeof selected === "string") {
                       setModelPath(selected);
+                      setQuant(inferGgufQuantLabel(selected));
                       if (!modelId) setModelId(selected);
                       if (!name) {
                         setName(selected.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
@@ -908,12 +1267,31 @@ function NewServerForm({
               className={inputCls}
               placeholder="Qwen/Qwen2.5-0.5B-Instruct"
               value={modelId}
-              onChange={(e) => setModelId(e.target.value)}
+              onChange={(e) => {
+                setModelId(e.target.value);
+                if (!initialServer) setQuant(inferVllmQuant(e.target.value));
+              }}
             />
           )}
         </Field>
         <Field label="Name (optional)">
           <input className={inputCls} placeholder="coder-0.5b" value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="API model name / alias" hint="Blank uses the model ID or GGUF filename. vLLM maps this to --served-model-name; llama.cpp maps it to --alias.">
+          <input className={inputCls} placeholder="blank = model identity" value={served} onChange={(e) => setServed(e.target.value)} />
+        </Field>
+        <Field label="Per-server API key (optional)" hint="Overrides the global vLLM key for this server and is also passed to llama.cpp.">
+          <div className="flex gap-1.5">
+            <input
+              type="password"
+              className={inputCls}
+              value={apiKey}
+              placeholder={apiKeyConfigured ? "A key is stored; enter a replacement" : "Optional"}
+              onChange={(e) => { setApiKey(e.target.value); setApiKeyDirty(true); }}
+            />
+            <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => { setApiKey(crypto.randomUUID().replaceAll("-", "")); setApiKeyDirty(true); }}>Generate</Button>
+            {apiKey && <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => navigator.clipboard.writeText(apiKey)}>Copy</Button>}
+          </div>
         </Field>
         {backend === "vllm" && <Field label="Task">
           <select className={inputCls} value={task} onChange={(e) => setTask(e.target.value as "instruct" | "embed")}>
@@ -921,12 +1299,13 @@ function NewServerForm({
             <option value="embed">embed (embeddings)</option>
           </select>
         </Field>}
-        {backend === "vllm" && <Field label="Quantization">
-          <select className={inputCls} value={quant} onChange={(e) => setQuant(e.target.value)}>
-            <option value="fp16">FP16</option>
-            <option value="fp8">FP8</option>
-            <option value="awq">AWQ</option>
-            <option value="gptq">GPTQ</option>
+        {backend === "vllm" && <Field label="Checkpoint format" hint="Pre-quantized GPTQ/AWQ/FP8 checkpoints are auto-detected from model config.">
+          <select className={inputCls} value={quant.toLowerCase()} onChange={(e) => setQuant(e.target.value)}>
+            <option value="auto">Auto (recommended)</option>
+            <option value="fp16">FP16 / BF16</option>
+            <option value="fp8">FP8 runtime quantization</option>
+            <option value="gptq">GPTQ checkpoint</option>
+            <option value="awq">AWQ checkpoint</option>
           </select>
         </Field>}
         {backend === "llamacpp" && (
@@ -960,7 +1339,7 @@ function NewServerForm({
                 </Button>
               </div>
             )}
-            <Field label="Quantization">
+            <Field label="GGUF quantization label" hint="Metadata inferred from the filename; llama.cpp reads it from the GGUF itself.">
               <input className={inputCls} placeholder="e.g. PQ2_0, PTQ1_0, Q2_0_g64" value={quant} onChange={(e) => setQuant(e.target.value)} />
             </Field>
             {nGpuLayers.trim() && fit && (
@@ -1027,19 +1406,6 @@ function NewServerForm({
             <label className="flex items-center gap-2 text-sm text-slate-300">
               <input type="checkbox" checked={fit} onChange={(e) => setFit(e.target.checked)} /> Automatic memory fit (when supported)
             </label>
-            <Field label="API key (optional)" hint="Used for requests sent to this native endpoint.">
-              <div className="flex gap-1.5">
-                <input type="password" className={inputCls} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-                <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => setApiKey(crypto.randomUUID().replaceAll("-", ""))}>
-                  Generate
-                </Button>
-                {apiKey && (
-                  <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => navigator.clipboard.writeText(apiKey)}>
-                    Copy
-                  </Button>
-                )}
-              </div>
-            </Field>
             <Field label="Log verbosity (0–5)" hint="llama.cpp: 0 generic, 1 error, 2 warning, 3 info, 4 trace, 5 debug.">
               <input className={inputCls} placeholder="3" value={logVerbosity} onChange={(e) => setLogVerbosity(e.target.value)} />
             </Field>
@@ -1049,9 +1415,53 @@ function NewServerForm({
             <label className="flex items-center gap-2 text-sm text-slate-300">
               <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} /> Flash attention
             </label>
+            <Field label="KV Cache Type K (--cache-type-k)" hint="Data type for the K cache. Lower precision saves VRAM at some quality cost.">
+              <select className={inputCls} value={cacheTypeK} onChange={(e) => setCacheTypeK(e.target.value)}>
+                <option value="f16">f16 (default, highest quality)</option>
+                <option value="bf16">bf16</option>
+                <option value="q8_0">q8_0 (recommended)</option>
+                <option value="q5_1">q5_1</option>
+                <option value="q5_0">q5_0</option>
+                <option value="q4_1">q4_1</option>
+                <option value="q4_0">q4_0</option>
+                <option value="iq4_nl">iq4_nl</option>
+                <option value="f32">f32</option>
+              </select>
+            </Field>
+            <Field label="KV Cache Type V (--cache-type-v)" hint="Data type for the V cache. Can differ from K; q4_0/q5_0 saves the most VRAM.">
+              <select className={inputCls} value={cacheTypeV} onChange={(e) => setCacheTypeV(e.target.value)}>
+                <option value="f16">f16 (default, highest quality)</option>
+                <option value="bf16">bf16</option>
+                <option value="q8_0">q8_0 (recommended)</option>
+                <option value="q5_1">q5_1</option>
+                <option value="q5_0">q5_0</option>
+                <option value="q4_1">q4_1</option>
+                <option value="q4_0">q4_0</option>
+                <option value="iq4_nl">iq4_nl</option>
+                <option value="f32">f32</option>
+              </select>
+            </Field>
             <label className="flex items-center gap-2 text-sm text-slate-300">
               <input type="checkbox" checked={jinja} onChange={(e) => setJinja(e.target.checked)} /> Jinja tool-calling templates
             </label>
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={noKvOffload} onChange={(e) => setNoKvOffload(e.target.checked)} /> Disable KV-cache offload
+            </label>
+            <Field label="CPU threads" hint="Blank uses llama.cpp auto-detection.">
+              <input type="number" min="1" className={inputCls} placeholder="auto" value={threads} onChange={(e) => setThreads(e.target.value)} />
+            </Field>
+            <Field label="Logical batch size">
+              <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
+            </Field>
+            <Field label="Physical micro-batch size">
+              <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={ubatchSize} onChange={(e) => setUbatchSize(e.target.value)} />
+            </Field>
+            <Field label="Parallel request slots" hint="0 uses llama.cpp automatic selection.">
+              <input type="number" min="0" className={inputCls} placeholder="auto" value={parallel} onChange={(e) => setParallel(e.target.value)} />
+            </Field>
+            <Field label="Extra llama.cpp arguments" hint="One argument per line. Structured settings above take precedence.">
+              <textarea className={`${inputCls} min-h-20 font-mono text-xs`} placeholder={"--jinja\n--override-kv key=value"} value={extraArgs} onChange={(e) => setExtraArgs(e.target.value)} />
+            </Field>
           </>
         )}
         {backend === "vllm" && (
@@ -1102,27 +1512,60 @@ function NewServerForm({
                 </div>
               )}
             </Field>
-            <Field label="RAM Swap Space (GB)" hint="vLLM RAM offload (--kv-offloading-size). Allocates system RAM for spilled KV cache blocks.">
-              <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 16, 32)" value={swapSpaceGb} onChange={(e) => setSwapSpaceGb(e.target.value)} />
+            <Field label="KV cache precision" hint="Blank inherits the global vLLM setting. FP8 reduces KV-cache VRAM; verify quality on long-context tasks.">
+              <select className={inputCls} value={kvCacheDtype} onChange={(e) => setKvCacheDtype(e.target.value)}>
+                <option value="">Global / Auto</option>
+                <option value="float16">FP16</option>
+                <option value="bfloat16">BF16</option>
+                <option value="fp8_e4m3">FP8 E4M3</option>
+                <option value="fp8_e5m2">FP8 E5M2</option>
+              </select>
             </Field>
-            <Field label="CPU Weight Offload (GB)" hint="vLLM --cpu-offload-gb. Offloads model parameter weights to CPU RAM.">
+            <Field label="KV Cache CPU Offload (GB)" hint="Advanced vLLM V1 option (--kv-offloading-size). Leave at 0 for normal GPU KV caching.">
+              <input type="number" step="1" min="0" className={inputCls} placeholder="0" value={swapSpaceGb} onChange={(e) => setSwapSpaceGb(e.target.value)} />
+            </Field>
+            <Field label="CPU Weight Offload (GB)" hint="vLLM --cpu-offload-gb. Offloads model parameters to CPU RAM; use only when GPU-only placement cannot fit.">
               <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 8)" value={cpuOffloadGb} onChange={(e) => setCpuOffloadGb(e.target.value)} />
             </Field>
-            <Field label="Served model name (optional)">
-              <input className={inputCls} placeholder="blank = model id" value={served} onChange={(e) => setServed(e.target.value)} />
+            <Field label="Startup / performance mode" hint="Eager mode starts fastest and uses less VRAM. CUDA graphs improve steady-state throughput but add compile/capture time.">
+              <select className={inputCls} value={enforceEager ? "eager" : "graphs"} onChange={(e) => setEnforceEager(e.target.value === "eager")}>
+                <option value="eager">Eager (recommended for 12 GB GPUs)</option>
+                <option value="graphs">CUDA graphs (higher throughput)</option>
+              </select>
             </Field>
-            <EnvironmentVarsEditor
-              initialEnv={initialEnv}
-              onChange={setEnv}
-              onFlashInferToggle={(disabled) => setFlashInferDisabled(disabled)}
-              flashInferDisabled={flashInferDisabled}
-            />
+            <div className="sm:col-span-2 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-xs text-slate-400">
+              <span className="font-semibold text-indigo-200">vLLM 0.30+ defaults:</span> attention backend Auto, prefix caching enabled, and chunked prefill managed by vLLM. KV precision can be inherited globally or overridden per server above.
+            </div>
+            <EnvironmentVarsEditor initialEnv={env} onChange={setEnv} />
           </>
         )}
+        <label className="flex items-center gap-2 text-sm text-slate-300 sm:col-span-2">
+          <input type="checkbox" checked={metrics} onChange={(e) => setMetrics(e.target.checked)} /> Collect runtime metrics from this server
+        </label>
       </div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-edge bg-surface-2/60 p-3">
+        <div>
+          <div className="text-sm font-semibold text-slate-200">Context fit test</div>
+          <div className="text-xs text-slate-500">
+            Checks the configured context against model weights, KV cache, current VRAM, and available RAM without starting a server.
+          </div>
+        </div>
+        <Button variant="subtle" onClick={analyzeContext} disabled={contextFitLoading}>
+          {contextFitLoading ? <Spinner label="Testing…" /> : "Analyze context fit"}
+        </Button>
+      </div>
+      <ContextFitResultPanel
+        result={contextFit}
+        error={contextFitError}
+        loading={contextFitLoading}
+        onApply={applyContextRecommendation}
+      />
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-        <Button onClick={submit} disabled={creating || !modelId.trim()}>
+        <Button
+          onClick={submit}
+          disabled={creating || (backend === "vllm" ? !modelId.trim() : !modelPath.trim())}
+        >
           {creating ? <Spinner label={isEditing ? "saving…" : "creating…"} /> : isEditing ? "Save" : "Create"}
         </Button>
       </div>
@@ -1135,8 +1578,6 @@ function NewServerForm({
 interface EnvironmentVarsEditorProps {
   initialEnv?: Record<string, string>;
   onChange: (env: Record<string, string>) => void;
-  onFlashInferToggle: (disabled: boolean) => void;
-  flashInferDisabled: boolean;
 }
 
 /// Sanitize a user-supplied environment variable value:
@@ -1158,6 +1599,7 @@ function sanitizeEnvValue(value: string): string {
 /// Check if an env var name is a known boolean vLLM var (VLLM_USE_* or similar)
 /// and validate that its value is "0" or "1".
 function validateBooleanEnvVar(key: string, value: string): string | null {
+  if (value === SECRET_PLACEHOLDER) return null;
   const knownBooleanPrefixes = ["VLLM_USE_"];
   const isKnownBoolean = knownBooleanPrefixes.some((prefix) => key.startsWith(prefix));
   if (isKnownBoolean) {
@@ -1169,33 +1611,17 @@ function validateBooleanEnvVar(key: string, value: string): string | null {
   return null;
 }
 
-function EnvironmentVarsEditor({
-  initialEnv,
-  onChange,
-  onFlashInferToggle,
-  flashInferDisabled,
-}: EnvironmentVarsEditorProps) {
-  const [localEnv, setLocalEnv] = useState<Record<string, string>>({});
+function EnvironmentVarsEditor({ initialEnv, onChange }: EnvironmentVarsEditorProps) {
+  const [localEnv, setLocalEnv] = useState<Record<string, string>>(initialEnv ?? {});
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
-  const [warnings, setWarnings] = useState<Record<string, string>>({});
-
-  // Initialize localEnv from initialEnv (but don't include VLLM_USE_FLASHINFER_SAMPLER since it's handled by checkbox)
-  useEffect(() => {
-    const filtered: Record<string, string> = {};
-    const newWarnings: Record<string, string> = {};
-    // Merge initialEnv (per-server overrides)
-    for (const [k, v] of Object.entries(initialEnv ?? {})) {
-      if (k !== "VLLM_USE_FLASHINFER_SAMPLER") {
-        filtered[k] = v;
-        const warn = validateBooleanEnvVar(k, v);
-        if (warn) newWarnings[k] = warn;
-      }
-    }
-    setLocalEnv(filtered);
-    setWarnings(newWarnings);
-    onChange({ ...filtered, VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1" });
-  }, [initialEnv, flashInferDisabled, onChange]);
+  const [warnings, setWarnings] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      Object.entries(initialEnv ?? {})
+        .map(([key, value]) => [key, validateBooleanEnvVar(key, value)] as const)
+        .filter((entry): entry is [string, string] => Boolean(entry[1]))
+    )
+  );
 
   const handleAdd = () => {
     const key = newKey.trim();
@@ -1242,33 +1668,14 @@ function EnvironmentVarsEditor({
     });
   };
 
-  // Merge localEnv with flashInfer setting and call onChange
   useEffect(() => {
-    onChange({ ...localEnv, VLLM_USE_FLASHINFER_SAMPLER: flashInferDisabled ? "0" : "1" });
-  }, [localEnv, flashInferDisabled, onChange]);
+    onChange(localEnv);
+  }, [localEnv, onChange]);
 
   return (
-    <Field label="Environment Variables" hint="Per-server environment variables. Global defaults (from Settings) are shown as read-only and can be overridden.">
+    <Field label="Environment Variables" hint="Per-server vLLM overrides. Safe global defaults from Settings are merged first; these values win.">
       <div className="space-y-2">
-        {/* FlashInfer Sampler Toggle */}
-        <label className="flex items-center gap-2 text-sm text-slate-300 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-          <input
-            type="checkbox"
-            checked={flashInferDisabled}
-            onChange={(e) => onFlashInferToggle(e.target.checked)}
-            className="h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
-          />
-          <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-100">
-              Disable FlashInfer sampler (<code className="bg-black/40 px-1 py-0.5 rounded text-cyan-300">VLLM_USE_FLASHINFER_SAMPLER=0</code>) — recommended unless the CUDA toolkit is installed in WSL
-            </div>
-            <div className="text-xs text-slate-400">
-              vLLM's FlashInfer-based top-k/top-p sampler JIT-compiles a CUDA kernel on first use, which requires nvcc (CUDA toolkit), a C compiler, and ninja in WSL. Disabling uses the built-in PyTorch sampler and avoids this JIT entirely.
-            </div>
-          </div>
-</label>
-
-{/* Per-server Overrides */}
+        {/* Per-server Overrides */}
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-[11px] text-slate-500 font-medium uppercase tracking-wider">
             Per-Server Overrides
@@ -1305,7 +1712,8 @@ function EnvironmentVarsEditor({
                   <span className="font-mono text-xs text-slate-400 w-48 truncate">{key}</span>
                   <input
                     className={inputCls}
-                    value={value}
+                    value={value === SECRET_PLACEHOLDER ? "" : value}
+                     placeholder={value === SECRET_PLACEHOLDER ? "Stored securely; leave blank to keep" : "value"}
                     onChange={(e) => handleChange(key, e.target.value)}
                     style={{ flex: 1 }}
                   />

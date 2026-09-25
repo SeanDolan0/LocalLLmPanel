@@ -32,6 +32,25 @@ pub fn validate_env_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a configured venv path before it is used to create, clear, or
+/// remove launch files.  Quoting prevents command injection, but it does not
+/// make destructive operations on `/` or a home directory safe.
+pub fn validate_venv_dir(path: &str) -> Result<(), String> {
+    let path = path.trim();
+    let normalized = path.replace('\\', "/");
+    if path.is_empty()
+        || matches!(path, "~" | "/" | "\\" | "$HOME")
+        || normalized == "/"
+        || path.contains('\0')
+        || path.contains('\r')
+        || path.contains('\n')
+        || normalized.split('/').any(|component| component == "..")
+    {
+        return Err("venv_dir must be a non-root path without parent traversal".into());
+    }
+    Ok(())
+}
+
 /// Safely single-quote a value for POSIX sh.
 /// Wraps in single quotes and replaces each embedded ' with '\''.
 /// This is the ONLY quoting function that should be used for shell values.
@@ -64,6 +83,29 @@ const DEFAULT_PORT_START: u16 = 8000;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_POLL: Duration = Duration::from_secs(2);
 const METRICS_POLL: Duration = Duration::from_secs(5);
+
+struct StartPermit {
+    state: Arc<AppState>,
+    id: String,
+}
+
+impl Drop for StartPermit {
+    fn drop(&mut self) {
+        self.state.starting.lock().unwrap().remove(&self.id);
+    }
+}
+
+fn acquire_start_permit(state: &Arc<AppState>, id: &str) -> Result<StartPermit> {
+    let mut starting = state.starting.lock().unwrap();
+    if !starting.insert(id.to_string()) {
+        bail!("server {id} is already starting");
+    }
+    drop(starting);
+    Ok(StartPermit {
+        state: Arc::clone(state),
+        id: id.to_string(),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Port allocation
@@ -141,15 +183,34 @@ fn launch_script(
     let mut merged_env = global_default_env.clone();
     merged_env.extend(def.env.clone());
 
+    let safe_run_id: String = def
+        .id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut id_hash = 0xcbf29ce484222325u64;
+    for byte in def.id.as_bytes() {
+        id_hash ^= u64::from(*byte);
+        id_hash = id_hash.wrapping_mul(0x100000001b3);
+    }
+    let run_id = if safe_run_id == def.id {
+        safe_run_id
+    } else {
+        format!("{safe_run_id}-{id_hash:016x}")
+    };
     let mut parts: Vec<String> = vec![
-        format!("mkdir -p {}/../run", shell_quote(venv_dir)),
-        format!("cd {}/..", shell_quote(venv_dir)),
-        format!(". {}/bin/activate", shell_quote(venv_dir)),
-        format!("echo $$ > {}/../run/{}.pid", shell_quote(venv_dir), def.id),
+        "mkdir -p \"$venv_dir/../run\"".into(),
+        "cd \"$venv_dir/..\"".into(),
+        ". \"$venv_dir/bin/activate\"".into(),
     ];
 
     // Export environment variables (merged global defaults + per-server overrides)
-    // Log applied env vars at startup for debugging quote issues
     parts.insert(0, format!("echo '[LocalLLmPanel] Starting server {} on port {}'", shell_quote(&def.id), def.port));
     for (name, value) in &merged_env {
         if let Err(e) = validate_env_name(name) {
@@ -158,18 +219,23 @@ fn launch_script(
         }
         let quoted = shell_quote(value);
         parts.insert(0, format!("export {}={}", name, quoted));
-        // Debug log showing the exact value that will be seen by the process
-        parts.insert(0, format!("printf '[LocalLLmPanel] env %s=<%s>\\n' {} {}", shell_quote(name), quoted));
     }
 
     let mut args: Vec<String> = Vec::new();
     args.push("--model".into());
     args.push(shell_quote(&def.model_id));
     args.push("--host".into());
-    let host = if adv.host.trim().is_empty() {
+    let requested_host = adv.host.trim();
+    let host = if requested_host.is_empty() {
         "127.0.0.1"
+    } else if requested_host
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':' | '-'))
+    {
+        requested_host
     } else {
-        adv.host.trim()
+        eprintln!("[launch_script] invalid host binding, falling back to 127.0.0.1");
+        "127.0.0.1"
     };
     args.push(host.into());
     args.push("--port".into());
@@ -180,23 +246,19 @@ fn launch_script(
         args.push("--runner".into());
         args.push("pooling".into());
     }
-    // For pre-quantized models (AWQ, GPTQ, compressed-tensors, INT4, bitsandbytes,
-    // pre-quantized FP8 checkpoints, etc.), vLLM automatically reads `quant_method`
-    // from the model's `config.json`. Passing an explicit `--quantization` flag (such as
-    // `--quantization awq` for a compressed-tensors model) causes vLLM to reject the model
-    // with a ValidationError.
-    // We only pass `--quantization fp8` if an unquantized model is explicitly requested
-    // to be dynamically quantized to FP8 at runtime.
-    if def.quant.eq_ignore_ascii_case("fp8") && !is_prequantized_model(&def.model_id) {
+    // Pre-quantized checkpoints (GPTQ/AWQ/INT4/FP8) carry their own
+    // quantization_config and must use vLLM auto-detection. Explicit FP8 is
+    // only applied when an otherwise unquantized checkpoint requests it.
+    let quant = def.quant.trim().to_ascii_lowercase();
+    let should_set_quantization = quant == "fp8" && !is_prequantized_model(&def.model_id);
+    if should_set_quantization {
         args.push("--quantization".into());
-        args.push("fp8".into());
+        args.push(quant);
     }
-    let max_len = match def.max_model_len {
-        Some(len) if len > 0 => len,
-        _ => 4096,
-    };
-    args.push("--max-model-len".into());
-    args.push(max_len.to_string());
+    if let Some(max_len) = def.max_model_len.filter(|len| *len > 0) {
+        args.push("--max-model-len".into());
+        args.push(max_len.to_string());
+    }
     if def.enforce_eager {
         args.push("--enforce-eager".into());
     }
@@ -218,16 +280,29 @@ fn launch_script(
     }
 
     // Advanced vLLM engine flags
-    if let Some(key) = &adv.api_key {
-        let trimmed = key.trim();
-        if !trimmed.is_empty() {
-            args.push("--api-key".into());
-            args.push(shell_quote(trimmed));
-        }
+    let api_key = def
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .or_else(|| adv.api_key.as_deref().map(str::trim).filter(|key| !key.is_empty()));
+    if let Some(key) = api_key {
+        args.push("--api-key".into());
+        args.push(shell_quote(key));
     }
-    if adv.kv_cache_dtype.to_ascii_lowercase() != "auto" && !adv.kv_cache_dtype.trim().is_empty() {
+    let kv_cache_dtype = def
+        .kv_cache_dtype
+        .as_deref()
+        .unwrap_or(adv.kv_cache_dtype.as_str())
+        .trim();
+    if !kv_cache_dtype.is_empty()
+        && !kv_cache_dtype.eq_ignore_ascii_case("auto")
+        && kv_cache_dtype
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
         args.push("--kv-cache-dtype".into());
-        args.push(adv.kv_cache_dtype.trim().to_string());
+        args.push(kv_cache_dtype.to_string());
     }
     if adv.enable_prefix_caching {
         args.push("--enable-prefix-caching".into());
@@ -245,10 +320,50 @@ fn launch_script(
         args.push("--disable-custom-all-reduce".into());
     }
     if let Some(extra) = &adv.extra_vllm_args {
-        for token in extra.split_whitespace() {
-            if !token.is_empty() {
-                args.push(token.to_string());
+        let protected = [
+            "--model",
+            "--host",
+            "--port",
+            "--gpu-memory-utilization",
+            "--max-model-len",
+            "--quantization",
+            "--runner",
+            "--served-model-name",
+            "--enforce-eager",
+            "--kv-offloading-size",
+            "--cpu-offload-gb",
+            "--api-key",
+            "--kv-cache-dtype",
+            "--max-num-seqs",
+        ];
+        let tokens = shlex::split(extra).unwrap_or_else(|| {
+            eprintln!("[launch_script] ignoring invalid quoted extra vLLM arguments");
+            Vec::new()
+        });
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if protected.contains(&token.as_str()) {
+                index += 2;
+                continue;
             }
+            if protected
+                .iter()
+                .any(|flag| token.starts_with(&format!("{flag}=")))
+            {
+                index += 1;
+                continue;
+            }
+            let safe = token.chars().all(|ch| {
+                ch.is_ascii_alphanumeric()
+                    || matches!(ch, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '@' | '%' | '+' | '^')
+            });
+            args.push(if safe {
+                token.to_string()
+            } else {
+                shell_quote(token)
+            });
+            index += 1;
         }
     }
 
@@ -276,7 +391,10 @@ fn launch_script(
         if !home_trim.is_empty() {
             parts.insert(
                 0,
-                format!("mkdir -p {} && export HF_HOME={}", shell_quote(home_trim), shell_quote(home_trim)),
+                format!(
+                    "hf_home_dir=$(__llm_panel_expand_tilde {}) && mkdir -p \"$hf_home_dir\" && export HF_HOME=\"$hf_home_dir\"",
+                    shell_quote(home_trim)
+                ),
             );
         }
     }
@@ -291,7 +409,6 @@ fn launch_script(
                         let sanitized = sanitize_env_value(value);
                         let quoted = shell_quote(&sanitized);
                         parts.insert(0, format!("export {}={}", key, quoted));
-                        parts.insert(0, format!("printf '[LocalLLmPanel] env %s=<%s>\\n' {} {}", shell_quote(key), quoted));
                     } else {
                         eprintln!("[launch_script] Invalid custom env name '{}', skipping", key);
                     }
@@ -299,19 +416,17 @@ fn launch_script(
             }
         }
     }
-    let token_ok = !hf_token.is_empty()
-        && hf_token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || (c.is_ascii_punctuation() && c != '\''));
-    if token_ok {
+    if !hf_token.is_empty() {
         parts.insert(0, format!("export HF_TOKEN={}", shell_quote(hf_token)));
-        parts.insert(0, format!("printf '[LocalLLmPanel] env %s=<%s>\\n' {} {}", shell_quote("HF_TOKEN"), shell_quote(hf_token)));
     }
-    parts.push(format!(
-        "exec python -m vllm.entrypoints.openai.api_server {}",
-        args.join(" ")
-    ));
-    parts.join(" && ")
+    let setup_chain = parts.join(" && ");
+    format!(
+        "{tilde_snippet}\nvenv_dir=$(__llm_panel_expand_tilde {venv})\n{setup_chain}\ntrap 'rm -f -- \"$0\"' EXIT HUP INT TERM\npython -m vllm.entrypoints.openai.api_server {args} &\nserver_pid=$!\necho \"$server_pid\" > \"$venv_dir/../run/{run_id}.pid\"\nwait \"$server_pid\"\n",
+        tilde_snippet = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+        venv = shell_quote(venv_dir),
+        setup_chain = setup_chain,
+        args = args.join(" "),
+    )
 }
 
 /// Resolve a user-supplied model identifier or path to an existing GGUF file.
@@ -441,6 +556,11 @@ pub fn resolve_gguf_model_path(
     None
 }
 
+fn help_supports_flag(help: &str, flag: &str) -> bool {
+    help.split_whitespace()
+        .any(|token| token.trim_matches(|ch| matches!(ch, ',' | '[' | ']')) == flag)
+}
+
 /// Build native llama-server arguments, enabling automatic fitting only when
 /// the installed binary advertises the corresponding capability.
 pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String> {
@@ -448,6 +568,15 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
     let mut structured_flags = Vec::new();
     let model = def.model_path.as_deref().unwrap_or(&def.model_id);
     args.extend(["-m".into(), model.into()]);
+    if let Some(alias) = def
+        .served_model_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.extend(["--alias".into(), alias.into()]);
+        structured_flags.extend(["--alias", "-a"]);
+    }
     if let Some(mmproj) = def.mmproj_path.as_deref().filter(|p| !p.is_empty()) {
         args.extend(["--mmproj".into(), mmproj.into()]);
         structured_flags.push("--mmproj");
@@ -472,11 +601,11 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         structured_flags.push("--n-cpu-moe");
         structured_flags.push("-ncmoe");
     }
-    if !help.is_empty() && help.contains("--fit") {
+    if help_supports_flag(help, "--fit") {
         args.extend(["--fit".into(), if def.fit { "on" } else { "off" }.into()]);
         structured_flags.push("--fit");
         structured_flags.push("-fit");
-        if let Some(target) = def.fit_target.filter(|v| *v > 0) {
+        if let Some(target) = def.fit_target.filter(|v| *v > 0).filter(|_| def.fit) {
             args.extend(["--fit-target".into(), target.to_string()]);
             structured_flags.push("--fit-target");
             structured_flags.push("-fitt");
@@ -491,10 +620,11 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         args.extend(["--api-key".into(), api_key.to_string()]);
         structured_flags.push("--api-key");
     }
-    if def.flash_attn {
-        args.extend(["-fa".into(), "on".into()]);
-        structured_flags.extend(["-fa", "--flash-attn"]);
-    }
+    args.extend([
+        "-fa".into(),
+        if def.flash_attn { "on" } else { "off" }.into(),
+    ]);
+    structured_flags.extend(["-fa", "--flash-attn"]);
     if !def.cache_type_k.is_empty() {
         args.extend(["--cache-type-k".into(), def.cache_type_k.clone()]);
         structured_flags.extend(["--cache-type-k", "-ctk"]);
@@ -519,10 +649,12 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         args.extend(["-np".into(), def.parallel.to_string()]);
         structured_flags.extend(["-np", "--parallel"]);
     }
-    if def.jinja {
-        args.push("--jinja".into());
-        structured_flags.push("--jinja");
-    }
+    args.push(if def.jinja {
+        "--jinja".into()
+    } else {
+        "--no-jinja".into()
+    });
+    structured_flags.extend(["--jinja", "--no-jinja"]);
     if def.no_kv_offload {
         args.push("--no-kv-offload".into());
         structured_flags.extend(["--no-kv-offload", "-nkvo"]);
@@ -601,6 +733,8 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                     | "--device"
                     | "-dev"
                     | "--api-key"
+                    | "--alias"
+                    | "-a"
                     | "--log-verbosity"
                     | "-lv"
                     | "-fa"
@@ -653,7 +787,7 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
 /// llama.cpp changes option spellings between releases, so persisted configs
 /// must not make an older binary fail before it can print a useful error.
 pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
-    let supports = |flag: &str| help.contains(flag);
+    let supports = |flag: &str| help_supports_flag(help, flag);
     let mut filtered = Vec::with_capacity(args.len());
     let mut i = 0;
     while i < args.len() {
@@ -682,11 +816,12 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             "--fit-target" => supports("--fit-target"),
             "--device" => supports("--device") || supports("--dev"),
             "--api-key" => supports("--api-key"),
+            "--alias" | "-a" => supports("--alias") || supports("-a"),
             "--log-verbosity" => supports("--log-verbosity"),
             "--mmproj" => supports("--mmproj"),
             "-fa" => supports("-fa") || supports("--flash-attn"),
             "--cache-type-k" | "--cache-type-v" => supports(arg),
-            "--no-kv-offload" | "--metrics" | "--jinja" => supports(arg),
+            "--no-kv-offload" | "--metrics" | "--jinja" | "--no-jinja" => supports(arg),
             _ => true,
         };
         if supported {
@@ -699,6 +834,8 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "--device"
                     | "--log-verbosity"
                     | "--api-key"
+                    | "--alias"
+                    | "-a"
                     | "--mmproj"
                     | "-fa"
                     | "--cache-type-k"
@@ -726,6 +863,8 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--fit-target"
                 | "--device"
                 | "--api-key"
+                | "--alias"
+                | "-a"
                 | "--log-verbosity"
                 | "--mmproj"
                 | "-fa"
@@ -734,6 +873,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--no-kv-offload"
                 | "--metrics"
                 | "--jinja"
+                | "--no-jinja"
         ) {
             if matches!(
                 arg.as_str(),
@@ -742,6 +882,8 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "--fit-target"
                     | "--device"
                     | "--api-key"
+                    | "--alias"
+                    | "-a"
                     | "--log-verbosity"
                     | "--mmproj"
                     | "-fa"
@@ -798,11 +940,14 @@ fn emit_status(
 /// it beyond the command call.
 pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
+    validate_venv_dir(&cfg.venv_dir).map_err(|e| anyhow!(e))?;
     let distro = state.resolve_distro();
     let mut def = cfg
         .find_server(id)
         .cloned()
         .ok_or_else(|| anyhow!("no server with id {id}"))?;
+    let backend_kind = def.backend_kind().map_err(anyhow::Error::msg)?;
+    let _start_permit = acquire_start_permit(state, id)?;
     {
         let servers = state.servers.lock().unwrap();
         if let Some(ls) = servers.get(id) {
@@ -818,7 +963,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     // and NCCL distributed environment buffers take ~1,300-1,400 MB of VRAM BEFORE vLLM checks
     // free memory against requested utilization (init_snapshot.free_memory >= total * util).
     let mut vram_notice: Option<String> = None;
-    if def.backend == "vllm" {
+    if backend_kind == crate::state::ServerBackend::Vllm {
         if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
             if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
                 let startup_overhead_mb = 1400.0;
@@ -849,11 +994,21 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     let id_for_wsl = id_log.clone(); // Clone for WslChild::spawn call later
     let state_log = Arc::clone(state);
     let app_ev = app.map(|a| (*a).clone());
+    let log_id: String = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let log_path = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("local-llm-panel")
         .join("logs")
-        .join(format!("{id}.log"));
+        .join(format!("{log_id}.log"));
     let _ = std::fs::create_dir_all(log_path.parent().unwrap_or_else(|| Path::new(".")));
     let log_cb = move |line: String| {
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -877,45 +1032,48 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             );
         }
     };
-    let (wsl_child, native_child, wsl_pid) = if def.backend == "llamacpp" {
-        let channel = def.llamacpp_channel;
-        let exe = crate::llamacpp_install::executable_from_config_channel(&cfg, channel)
-            .ok_or_else(|| anyhow!(
-                "llama-server.exe for {channel:?} channel is not installed. Install it from Dashboard or Settings, or set a custom executable path."
-            ))?;
-        let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
-        let mut def = def.clone();
-        if let Some(resolved) = resolve_gguf_model_path(raw_model, &cfg.gguf_dir, &distro) {
-            def.model_path = Some(resolved.to_string_lossy().into_owned());
-        } else if !std::path::Path::new(raw_model).is_file() {
-            bail!(
-                "GGUF model file not found for '{raw_model}'. Please provide a valid path to a .gguf file or ensure the model is downloaded to your GGUF directory ({}).",
-                cfg.gguf_dir
-            );
+    let (wsl_child, native_child, wsl_pid) = match backend_kind {
+        crate::state::ServerBackend::Llamacpp => {
+            let channel = def.llamacpp_channel;
+            let exe = crate::llamacpp_install::executable_from_config_channel(&cfg, channel)
+                .ok_or_else(|| anyhow!(
+                    "llama-server.exe for {channel:?} channel is not installed. Install it from Dashboard or Settings, or set a custom executable path."
+                ))?;
+            let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
+            let mut def = def.clone();
+            if let Some(resolved) = resolve_gguf_model_path(raw_model, &cfg.gguf_dir, &distro) {
+                def.model_path = Some(resolved.to_string_lossy().into_owned());
+            } else if !std::path::Path::new(raw_model).is_file() {
+                bail!(
+                    "GGUF model file not found for '{raw_model}'. Please provide a valid path to a .gguf file or ensure the model is downloaded to your GGUF directory ({}).",
+                    cfg.gguf_dir
+                );
+            }
+            let help = crate::llamacpp_install::command_output(&exe, &["--help"])
+                .unwrap_or_else(|_| {
+                    cfg.llamacpp_channels
+                        .get(&channel)
+                        .and_then(|c| c.help.clone())
+                        .unwrap_or_default()
+                });
+            let args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
+            let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
+                .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
+            (None, Some(child), None)
         }
-        let help = crate::llamacpp_install::command_output(&exe, &["--help"])
-            .unwrap_or_else(|_| {
-                cfg.llamacpp_channels
-                    .get(&channel)
-                    .and_then(|c| c.help.clone())
-                    .unwrap_or_default()
-            });
-        let args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
-        let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
-            .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
-        (None, Some(child), None)
-    } else {
-        let script = launch_script(
-            &cfg.venv_dir,
-            &def,
-            &cfg.hf_token,
-            &cfg.advanced_settings,
-            &cfg.default_env,
-        );
-        let child = wsl::WslChild::spawn(&distro, &script, &id_for_wsl, log_cb)
-            .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
-        let pid = child.pid();
-        (Some(child), None, Some(pid))
+        crate::state::ServerBackend::Vllm => {
+            let script = launch_script(
+                &cfg.venv_dir,
+                &def,
+                &cfg.hf_token,
+                &cfg.advanced_settings,
+                &cfg.default_env,
+            );
+            let child = wsl::WslChild::spawn(&distro, &script, &id_for_wsl, log_cb)
+                .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
+            let pid = child.pid();
+            (Some(child), None, Some(pid))
+        }
     };
 
     let existing_retry = {
@@ -954,12 +1112,22 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             },
         );
     }
-    {
+    let persist_error = {
         let mut cfg = state.config.lock().unwrap();
         if let Some(d) = cfg.servers.iter_mut().find(|s| s.id == id) {
             d.was_running = true;
         }
-        let _ = cfg.save();
+        cfg.save().err()
+    };
+    if let Some(error) = persist_error {
+        // Drop the config guard before taking the live-server lock.  The
+        // monitor uses the opposite lock order when it records an error.
+        let (wsl_child, native_child) = take_live_children(state, id);
+        terminate_children(wsl_child, native_child);
+        let error = format!("failed to persist starting server: {error}");
+        mark_server_error(state, id, error.clone());
+        emit_status(app, id, ServerStatus::Error, Some(error.clone()));
+        return Err(anyhow!(error));
     }
     emit_status(app, id, ServerStatus::Starting, None);
 
@@ -995,8 +1163,10 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     &backend_for_monitor,
                     &exit.to_string(),
                 );
+                let (wsl_child, native_child) = take_live_children(&state_task, &id_task);
+                terminate_children(wsl_child, native_child);
+                mark_server_error(&state_task, &id_task, error.clone());
                 emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
-                update_status(&state_task, &id_task, ServerStatus::Error);
                 return;
             }
             if let Ok(resp) = http.get(&url).send().await {
@@ -1014,8 +1184,26 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 &backend_for_monitor,
                 "health check timeout",
             );
+            let (wsl_child, native_child) = take_live_children(&state_task, &id_task);
+            terminate_children(wsl_child, native_child);
+            mark_server_error(&state_task, &id_task, error.clone());
             emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
-            update_status(&state_task, &id_task, ServerStatus::Error);
+            return;
+        }
+        // A stop request may have won the race while the health request was
+        // in flight.  Do not resurrect a stopped/removed server as Running.
+        let cancelled = {
+            let servers = state_task.servers.lock().unwrap();
+            servers
+                .get(&id_task)
+                .map(|live| {
+                    live.stopping
+                        || live.status != ServerStatus::Starting
+                        || (live.wsl_child.is_none() && live.native_child.is_none())
+                })
+                .unwrap_or(true)
+        };
+        if cancelled {
             return;
         }
         {
@@ -1053,10 +1241,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             };
             if let Some(exit) = exited {
                 if !stopping {
-                    let auto_restart = {
-                        let cfg = state_task.config.lock().unwrap();
-                        cfg.auto_restart_crashed
-                    };
+                    let auto_restart = state_task.config.lock().unwrap().auto_restart_crashed;
                     let retry_count = {
                         let mut servers = state_task.servers.lock().unwrap();
                         if let Some(ls) = servers.get_mut(&id_task) {
@@ -1076,9 +1261,29 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                             "[server] auto-restarting crashed server {} (attempt {}/3 in {:?})",
                             id_task, retry_count, backoff
                         );
+                        // The old LiveServer owns the exited handle.  Clear it
+                        // before calling start_server; otherwise the new start
+                        // is rejected as "already running" and the restart is
+                        // silently lost.
+                        prepare_crashed_server_for_restart(&state_task, &id_task);
                         tokio::time::sleep(backoff).await;
-                        let _ = start_server(&state_task, app.as_ref(), &id_task);
-                        return;
+                        let restart_still_requested = state_task
+                            .config()
+                            .find_server(&id_task)
+                            .map(|def| def.was_running)
+                            .unwrap_or(false);
+                        if !restart_still_requested {
+                            return;
+                        }
+                        match start_server(&state_task, app.as_ref(), &id_task) {
+                            Ok(()) => return,
+                            Err(error) => {
+                                let error = format!("auto-restart failed: {error}");
+                                mark_server_error(&state_task, &id_task, error.clone());
+                                emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
+                                return;
+                            }
+                        }
                     }
 
                     let error = process_failure(
@@ -1087,78 +1292,92 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                         &backend_for_monitor,
                         &exit.to_string(),
                     );
+                    let (wsl_child, native_child) = take_live_children(&state_task, &id_task);
+                    terminate_children(wsl_child, native_child);
+                    mark_server_error(&state_task, &id_task, error.clone());
                     emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
-                    update_status(&state_task, &id_task, ServerStatus::Error);
                 } else {
+                    let (wsl_child, native_child) = take_live_children(&state_task, &id_task);
+                    terminate_children(wsl_child, native_child);
+                    if let Some(live) = state_task.servers.lock().unwrap().get_mut(&id_task) {
+                        live.status = ServerStatus::Stopped;
+                        live.stopping = false;
+                        live.error = None;
+                        live.wsl_child = None;
+                        live.native_child = None;
+                        live.wsl_pid = None;
+                    }
                     update_status(&state_task, &id_task, ServerStatus::Stopped);
                 }
                 return;
             }
 
-            if let Ok(resp) = http.get(&metrics_url).send().await {
-                if let Ok(text) = resp.text().await {
-                    if let Some(m) = parse_metrics(&text) {
-                        let measured = if first_sample {
-                            None
-                        } else {
-                            let dt = (now_ms() - last_measured_at).max(1000) as f64 / 1000.0;
-                            Some(crate::state::MeasuredStats {
-                                tokens_per_sec: Some(
-                                    ((m.total_generation_tokens - last_gen) as f64) / dt,
-                                ),
-                                prompt_tokens_per_sec: Some(
-                                    ((m.total_prompt_tokens - last_prompt) as f64) / dt,
-                                ),
+            if def.metrics {
+                if let Ok(resp) = http.get(&metrics_url).send().await {
+                    if let Ok(text) = resp.text().await {
+                        if let Some(m) = parse_metrics(&text) {
+                            let measured = if first_sample {
+                                None
+                            } else {
+                                let dt = (now_ms() - last_measured_at).max(1000) as f64 / 1000.0;
+                                Some(crate::state::MeasuredStats {
+                                    tokens_per_sec: Some(
+                                        ((m.total_generation_tokens - last_gen) as f64) / dt,
+                                    ),
+                                    prompt_tokens_per_sec: Some(
+                                        ((m.total_prompt_tokens - last_prompt) as f64) / dt,
+                                    ),
+                                    total_prompt_tokens: m.total_prompt_tokens,
+                                    total_generation_tokens: m.total_generation_tokens,
+                                    requests: m.requests,
+                                    measured_at_ms: Some(now_ms()),
+                                })
+                            };
+                            last_gen = m.total_generation_tokens;
+                            last_prompt = m.total_prompt_tokens;
+                            last_measured_at = now_ms();
+                            first_sample = false;
+                            let snapshot = MetricsSnapshot {
+                                running: m.running,
+                                waiting: m.waiting,
                                 total_prompt_tokens: m.total_prompt_tokens,
                                 total_generation_tokens: m.total_generation_tokens,
                                 requests: m.requests,
-                                measured_at_ms: Some(now_ms()),
-                            })
-                        };
-                        last_gen = m.total_generation_tokens;
-                        last_prompt = m.total_prompt_tokens;
-                        last_measured_at = now_ms();
-                        first_sample = false;
-                        let snapshot = MetricsSnapshot {
-                            running: m.running,
-                            waiting: m.waiting,
-                            total_prompt_tokens: m.total_prompt_tokens,
-                            total_generation_tokens: m.total_generation_tokens,
-                            requests: m.requests,
-                            measured: measured.clone(),
-                        };
-                        let tok_s = measured
-                            .as_ref()
-                            .and_then(|ms| ms.tokens_per_sec)
-                            .unwrap_or(0.0);
-                        let prompt_tok_s = measured
-                            .as_ref()
-                            .and_then(|ms| ms.prompt_tokens_per_sec)
-                            .unwrap_or(0.0);
-                        state_task.record_server_metric(
-                            &id_task,
-                            crate::state::ServerMetricPoint {
-                                timestamp: now_ms(),
-                                tok_s,
-                                prompt_tok_s,
-                                requests_running: m.running,
-                                requests_waiting: m.waiting,
-                            },
-                        );
-                        {
-                            let mut servers = state_task.servers.lock().unwrap();
-                            if let Some(ls) = servers.get_mut(&id_task) {
-                                ls.last_metrics = Some(snapshot.clone());
+                                measured: measured.clone(),
+                            };
+                            let tok_s = measured
+                                .as_ref()
+                                .and_then(|ms| ms.tokens_per_sec)
+                                .unwrap_or(0.0);
+                            let prompt_tok_s = measured
+                                .as_ref()
+                                .and_then(|ms| ms.prompt_tokens_per_sec)
+                                .unwrap_or(0.0);
+                            state_task.record_server_metric(
+                                &id_task,
+                                crate::state::ServerMetricPoint {
+                                    timestamp: now_ms(),
+                                    tok_s,
+                                    prompt_tok_s,
+                                    requests_running: m.running,
+                                    requests_waiting: m.waiting,
+                                },
+                            );
+                            {
+                                let mut servers = state_task.servers.lock().unwrap();
+                                if let Some(ls) = servers.get_mut(&id_task) {
+                                    ls.last_metrics = Some(snapshot.clone());
+                                }
+                                if let Some(app) = &app {
+                                    let _ = app.emit("server-metrics", snapshot);
+                                }
                             }
-                            if let Some(app) = &app {
-                                let _ = app.emit("server-metrics", snapshot);
-                            }
-                        }
-                        if let Some(ms) = measured {
-                            let mut cfg = state_task.config.lock().unwrap();
-                            cfg.measured.insert(model_for_metrics.clone(), ms);
-                            if let Err(e) = cfg.save() {
-                                eprintln!("[server] save measured: {e}");
+                            if let Some(ms) = measured {
+                                let mut cfg = state_task.config.lock().unwrap();
+                                cfg.measured.insert(model_for_metrics.clone(), ms);
+                                if let Err(e) = cfg.save() {
+                                    eprintln!("[server] save measured: {e}");
+                                }
                             }
                         }
                     }
@@ -1254,11 +1473,84 @@ fn process_failure(state: &Arc<AppState>, id: &str, backend: &str, exit: &str) -
     startup_failure_hint(backend, exit, &tail)
 }
 
+fn take_live_children(
+    state: &Arc<AppState>,
+    id: &str,
+) -> (Option<wsl::WslChild>, Option<wsl::NativeChild>) {
+    let mut servers = state.servers.lock().unwrap();
+    match servers.get_mut(id) {
+        Some(live) => (live.wsl_child.take(), live.native_child.take()),
+        None => (None, None),
+    }
+}
+
+fn terminate_children(
+    mut wsl_child: Option<wsl::WslChild>,
+    mut native_child: Option<wsl::NativeChild>,
+) {
+    if let Some(mut child) = wsl_child.take() {
+        let _ = child.kill();
+        child.join();
+    }
+    if let Some(mut child) = native_child.take() {
+        let _ = child.kill();
+        child.join();
+    }
+}
+
+fn mark_server_error(state: &Arc<AppState>, id: &str, error: String) {
+    {
+        let mut servers = state.servers.lock().unwrap();
+        if let Some(live) = servers.get_mut(id) {
+            live.status = ServerStatus::Error;
+            live.error = Some(error);
+            live.stopping = false;
+            live.wsl_child = None;
+            live.native_child = None;
+            live.wsl_pid = None;
+            live.last_metrics = None;
+        }
+    }
+    let mut cfg = state.config.lock().unwrap();
+    if let Some(def) = cfg.servers.iter_mut().find(|def| def.id == id) {
+        def.was_running = false;
+    }
+    if let Err(save_error) = cfg.save() {
+        eprintln!("[server] persist error state: {save_error}");
+    }
+}
+
+fn prepare_crashed_server_for_restart(state: &Arc<AppState>, id: &str) -> u32 {
+    let (wsl_child, native_child) = take_live_children(state, id);
+    terminate_children(wsl_child, native_child);
+    let mut retry_count = 0;
+    if let Some(live) = state.servers.lock().unwrap().get_mut(id) {
+        live.status = ServerStatus::Stopped;
+        live.stopping = false;
+        live.error = None;
+        live.last_metrics = None;
+        retry_count = live.crash_retry_count;
+    }
+    retry_count
+}
+
 /// Stop a server: SIGTERM to the WSL-side PID via pidfile, then wait; on
 /// timeout kill the wsl.exe process tree. Idempotent.
 pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
     let cfg = state.config();
+    validate_venv_dir(&cfg.venv_dir).map_err(|e| anyhow!(e))?;
     let distro = state.resolve_distro();
+    // A start request owns a permit until its child is registered.  Wait for
+    // that registration so Stop cannot race past a still-starting process.
+    let start_wait_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let starting = state.starting.lock().unwrap().contains(id);
+        let has_live = state.servers.lock().unwrap().contains_key(id);
+        if !starting || has_live || Instant::now() >= start_wait_deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let (mut wsl_child, mut native_child) = {
         let mut servers = state.servers.lock().unwrap();
         match servers.get_mut(id) {
@@ -1274,10 +1566,13 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
     // 1) Ask the backend process to terminate gracefully.
     let mut term_ok = false;
     if wsl_child.is_some() {
-        let pid_from_file = wsl::run_script(
-            &distro,
-            &format!("cat {}/../run/{id}.pid 2>/dev/null || true", cfg.venv_dir),
+        let pid_script = format!(
+            "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\ncat \"$venv_dir/../run/$run_id.pid\" 2>/dev/null || true",
+            wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            wsl::shell_quote_wsl(&cfg.venv_dir),
+            wsl::shell_quote_wsl(id),
         );
+        let pid_from_file = wsl::run_script(&distro, &pid_script);
         if let Some(pid) = pid_from_file.stdout.trim().parse::<u32>().ok() {
             let kill = wsl::run_script(
                 &distro,
@@ -1330,6 +1625,16 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
         }
     }
 
+    // Remove the WSL pidfile after the process is gone; stale pidfiles can
+    // otherwise make a later recovery attempt signal an unrelated process.
+    let pid_cleanup_script = format!(
+        "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\nrm -f -- \"$venv_dir/../run/$run_id.pid\"",
+        wsl::WSL_TILDE_EXPANSION_SNIPPET,
+        wsl::shell_quote_wsl(&cfg.venv_dir),
+        wsl::shell_quote_wsl(id),
+    );
+    let _ = wsl::run_script(&distro, &pid_cleanup_script);
+
     // Mark stopped.
     {
         let mut servers = state.servers.lock().unwrap();
@@ -1348,7 +1653,7 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
         if let Some(d) = cfg.servers.iter_mut().find(|s| s.id == id) {
             d.was_running = false;
         }
-        let _ = cfg.save();
+        cfg.save().map_err(|e| anyhow!("failed to persist stopped server: {e}"))?;
     }
     let _ = term_ok;
     emit_status(app, id, ServerStatus::Stopped, None);
@@ -1361,7 +1666,7 @@ pub fn restart_server(
     app: Option<&tauri::AppHandle>,
     id: &str,
 ) -> Result<()> {
-    let _ = stop_server(state, app, id);
+    stop_server(state, app, id)?;
     start_server(state, app, id)
 }
 
@@ -1523,10 +1828,11 @@ pub fn list_servers(
     let servers = state.servers.lock().unwrap();
     defs.into_iter()
         .map(|def| {
+            let public_def = crate::state::redact_server_def(&def);
             if let Some(ls) = servers.get(&def.id) {
-                (def, ls.status, ls.error.clone(), ls.last_metrics.clone())
+                (public_def, ls.status, ls.error.clone(), ls.last_metrics.clone())
             } else {
-                (def, ServerStatus::Stopped, None, None)
+                (public_def, ServerStatus::Stopped, None, None)
             }
         })
         .collect()
@@ -1553,11 +1859,17 @@ pub fn apply_vllm_auth(
     req
 }
 
-fn server_api_key(state: &Arc<AppState>, def: &ServerDef) -> Option<String> {
-    def.api_key
+pub(crate) fn server_api_key(state: &Arc<AppState>, def: &ServerDef) -> Option<String> {
+    let per_server = def
+        .api_key
         .clone()
-        .filter(|key| !key.trim().is_empty())
-        .or_else(|| state.config().advanced_settings.api_key.clone())
+        .filter(|key| !key.trim().is_empty());
+    match def.backend_kind().ok() {
+        Some(crate::state::ServerBackend::Vllm) => per_server
+            .or_else(|| state.config().advanced_settings.api_key.clone()),
+        Some(crate::state::ServerBackend::Llamacpp) => per_server,
+        None => None,
+    }
 }
 
 /// Issue a chat completion against an instruct server (server-side, no CORS).
@@ -1999,6 +2311,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn start_permit_prevents_duplicate_spawns() {
+        let state = Arc::new(AppState::new());
+        let permit = acquire_start_permit(&state, "duplicate-test").unwrap();
+        assert!(acquire_start_permit(&state, "duplicate-test").is_err());
+        drop(permit);
+        assert!(acquire_start_permit(&state, "duplicate-test").is_ok());
+    }
+
+    #[test]
+    fn venv_path_rejects_destructive_or_traversal_paths() {
+        assert!(validate_venv_dir("~/llm-lp/.venv").is_ok());
+        assert!(validate_venv_dir("/mnt/d/AI/venv").is_ok());
+        for path in ["/", "~", "$HOME", "/tmp/../"] {
+            assert!(validate_venv_dir(path).is_err(), "accepted unsafe path {path}");
+        }
+    }
+
+    #[test]
     fn port_allocator_skips_bound_ports() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let taken = listener.local_addr().unwrap().port();
@@ -2025,6 +2355,7 @@ mod tests {
             max_model_len: Some(2048),
             quant: quant.into(),
             served_model_name: served.map(|s| s.into()),
+            kv_cache_dtype: None,
             llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
             enforce_eager: true,
             params_b: None,
@@ -2065,16 +2396,77 @@ mod tests {
             &crate::state::AdvancedSettings::default(),
             &BTreeMap::new(),
         );
-        assert!(script.contains("exec python -m vllm.entrypoints.openai.api_server"));
+        assert!(script.contains("python -m vllm.entrypoints.openai.api_server"));
         assert!(script.contains("--model 'Qwen/Qwen2.5-0.5B-Instruct'"));
         assert!(script.contains("--port 8010"));
         assert!(script.contains("--gpu-memory-utilization 0.92"));
         assert!(script.contains("--max-model-len 2048"));
-        // Paths are now shell-quoted
-        assert!(script.contains("$$ > '~/llm-lp/.venv'/../run/s1.pid"));
+        assert!(script.contains("venv_dir=$(__llm_panel_expand_tilde '~/llm-lp/.venv')"));
+        assert!(script.contains("echo \"$server_pid\" > \"$venv_dir/../run/s1.pid\""));
         assert!(!script.contains("--runner pooling"));
         assert!(!script.contains("--quantization"));
         assert!(!script.contains("export HF_TOKEN="));
+    }
+
+    #[test]
+    fn launch_script_uses_per_server_key_and_excludes_native_options() {
+        let mut d = def(
+            "Qwen/Qwen2.5-Coder-7B-Instruct-GPTQ-Int4",
+            "instruct",
+            8010,
+            "gptq",
+            Some("coder"),
+        );
+        d.api_key = Some("server-key".into());
+        d.kv_cache_dtype = Some("fp8_e4m3".into());
+        d.cache_type_k = "q8_0".into();
+        d.cache_type_v = "q8_0".into();
+        d.n_gpu_layers = Some(99);
+        let adv = crate::state::AdvancedSettings {
+            api_key: Some("global-key".into()),
+            ..Default::default()
+        };
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &d,
+            "",
+            &adv,
+            &BTreeMap::new(),
+        );
+        assert!(script.contains("--api-key 'server-key'"));
+        assert!(!script.contains("--api-key 'global-key'"));
+        assert!(script.contains("--served-model-name 'coder'"));
+        assert!(script.contains("--kv-cache-dtype fp8_e4m3"));
+        for native_flag in [
+            "--model-path",
+            "--ctx-size",
+            "-ngl",
+            "--n-cpu-moe",
+            "--cache-type-k",
+            "--cache-type-v",
+            "--fit",
+            "--jinja",
+            "--flash-attn",
+        ] {
+            assert!(!script.contains(native_flag), "unexpected native flag {native_flag}");
+        }
+        for removed_vllm_flag in ["--swap-space", "--flash-attn", "--jinja"] {
+            assert!(!script.contains(removed_vllm_flag));
+        }
+    }
+
+    #[test]
+    fn launch_script_true_auto_context_omits_max_model_len() {
+        let mut d = def("Qwen/Qwen2.5-Coder-7B-Instruct", "instruct", 8010, "fp16", None);
+        d.max_model_len = None;
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &d,
+            "",
+            &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
+        );
+        assert!(!script.contains("--max-model-len"));
     }
 
     #[test]
@@ -2104,6 +2496,33 @@ mod tests {
     }
 
     #[test]
+    fn llamacpp_args_use_common_alias_and_explicit_modes() {
+        let mut d = def("model.gguf", "instruct", 8123, "gguf", Some("local-coder"));
+        d.backend = "llamacpp".into();
+        d.model_path = Some("C:\\models\\model.gguf".into());
+        d.flash_attn = false;
+        d.jinja = false;
+        d.fit = false;
+        d.fit_target = Some(1024);
+        let args = build_llamacpp_args_with_help(&d, "--fit on --fit-target MiB");
+        assert!(args.windows(2).any(|w| w == ["--alias", "local-coder"]));
+        assert!(args.windows(2).any(|w| w == ["-fa", "off"]));
+        assert!(args.contains(&"--no-jinja".into()));
+        assert!(args.windows(2).any(|w| w == ["--fit", "off"]));
+        assert!(!args.contains(&"--fit-target".into()));
+        for vllm_flag in [
+            "--gpu-memory-utilization",
+            "--max-model-len",
+            "--enforce-eager",
+            "--cpu-offload-gb",
+            "--kv-cache-dtype",
+            "--max-num-seqs",
+        ] {
+            assert!(!args.contains(&vllm_flag.to_string()));
+        }
+    }
+
+    #[test]
     fn llamacpp_args_omit_unset_optional_values() {
         let mut d = def("model.gguf", "instruct", 8123, "gguf", None);
         d.backend = "llamacpp".into();
@@ -2114,8 +2533,8 @@ mod tests {
         d.cache_type_k.clear();
         d.cache_type_v.clear();
         let args = build_llamacpp_args_with_help(&d, "");
-        assert!(!args.contains(&"-fa".into()));
-        assert!(!args.contains(&"--jinja".into()));
+        assert!(args.windows(2).any(|w| w == ["-fa", "off"]));
+        assert!(args.contains(&"--no-jinja".into()));
         assert!(!args.contains(&"--metrics".into()));
         assert!(!args.contains(&"-np".into()));
     }
@@ -2294,8 +2713,9 @@ llama_requests_processing 1
             &adv,
             &BTreeMap::new(),
         );
-        assert!(script.contains("export HF_HOME='/mnt/d/ai/hf'"));
-        assert!(script.contains("mkdir -p '/mnt/d/ai/hf'"));
+        assert!(script.contains("hf_home_dir=$(__llm_panel_expand_tilde '/mnt/d/ai/hf')"));
+        assert!(script.contains("export HF_HOME=\"$hf_home_dir\""));
+        assert!(script.contains("mkdir -p \"$hf_home_dir\""));
         assert!(script.contains("export HF_HUB_OFFLINE='1'"));
         assert!(script.contains("export VLLM_LOGGING_LEVEL='DEBUG'"));
         assert!(script.contains("export CUDA_VISIBLE_DEVICES='0,1'"));
@@ -2308,6 +2728,28 @@ llama_requests_processing 1
         assert!(script.contains("--max-num-seqs 64"));
         assert!(script.contains("--disable-custom-all-reduce"));
         assert!(script.contains("--tensor-parallel-size 2"));
+    }
+
+    #[test]
+    fn extra_vllm_args_are_quoted_and_cannot_override_core_settings() {
+        let adv = crate::state::AdvancedSettings {
+            extra_vllm_args: Some(
+                "--port 9999 --hf-overrides '{\"key\":\"value with spaces\"}' ; echo unsafe"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let script = launch_script(
+            "~/llm-lp/.venv",
+            &def("Qwen/test", "instruct", 8010, "fp16", None),
+            "",
+            &adv,
+            &BTreeMap::new(),
+        );
+        assert!(!script.contains("--port 9999"));
+        assert!(script.contains("--port 8010"));
+        assert!(script.contains("'{\"key\":\"value with spaces\"}'"));
+        assert!(!script.contains("; echo unsafe"));
     }
 
     #[test]
@@ -2548,8 +2990,8 @@ llama_requests_processing 1
         assert!(!script.contains("INVALID-VAR"));
     }
 
-#[test]
-    fn test_launch_script_env_export_lines_exact_format() {
+    #[test]
+    fn test_launch_script_env_exports_without_logging_values() {
         use std::collections::BTreeMap;
         let mut global_env = BTreeMap::new();
         global_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
@@ -2562,25 +3004,114 @@ llama_requests_processing 1
             "fp16",
             None,
         );
+        let adv = crate::state::AdvancedSettings {
+            custom_env_vars: Some("CUSTOM_SECRET=custom_value".into()),
+            ..Default::default()
+        };
 
         let script = launch_script(
             "~/llm-lp/.venv",
             &def,
-            "",
-            &crate::state::AdvancedSettings::default(),
+            "hf_secret_123",
+            &adv,
             &global_env,
         );
 
-        // Check that export lines are properly formatted with shell_quote
         assert!(script.contains("export VLLM_USE_FLASHINFER_SAMPLER='0'"));
         assert!(script.contains("export TEST_VAR='test_value'"));
-        
-        // Check that the debug log lines are present
-        assert!(script.contains("printf '[LocalLLmPanel] env %s=<%s>\\n' 'VLLM_USE_FLASHINFER_SAMPLER' '0'"));
-        assert!(script.contains("printf '[LocalLLmPanel] env %s=<%s>\\n' 'TEST_VAR' 'test_value'"));
-        
-        // Check that the starting log line is present
+        assert!(script.contains("export CUSTOM_SECRET='custom_value'"));
+        assert!(script.contains("export HF_TOKEN='hf_secret_123'"));
         assert!(script.contains("echo '[LocalLLmPanel] Starting server"));
+        assert!(!script.contains("[LocalLLmPanel] env"));
+        assert!(!script.contains("printf '[LocalLLmPanel] env"));
+        assert!(script.contains("trap 'rm -f -- \"$0\"' EXIT HUP INT TERM"));
+        assert!(script.contains("python -m vllm.entrypoints.openai.api_server"));
+        assert!(!script.contains("exec python"));
+        assert_eq!(script.matches("custom_value").count(), 1);
+        assert_eq!(script.matches("hf_secret_123").count(), 1);
+    }
+
+    #[test]
+    fn test_launch_script_expands_wsl_tilde_before_activation() {
+        let def = def(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "instruct",
+            8010,
+            "fp16",
+            None,
+        );
+        let script = launch_script(
+            "~/llm lp/.venv",
+            &def,
+            "",
+            &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
+        );
+        assert!(script.contains("venv_dir=$(__llm_panel_expand_tilde '~/llm lp/.venv')"));
+        assert!(script.contains(". \"$venv_dir/bin/activate\""));
+        assert!(script.contains("echo \"$server_pid\" > \"$venv_dir/../run/s1.pid\""));
+        assert!(!script.contains(". '~/llm lp/.venv/bin/activate'"));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_vllm_launch_script_smoke_and_self_cleanup() {
+        use std::sync::{Arc, Mutex};
+        if std::env::var("LLM_TEST_WSL").is_err() {
+            return;
+        }
+        let state = crate::state::AppState::new();
+        let cfg = state.config();
+        let mut def = cfg
+            .servers
+            .iter()
+            .find(|server| server.backend == "vllm")
+            .cloned()
+            .expect("configured vLLM server");
+        def.id = "srv-live-script".into();
+        def.port = 18_004;
+        let logs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let callback_logs = Arc::clone(&logs);
+        let script = launch_script(
+            &cfg.venv_dir,
+            &def,
+            "",
+            &cfg.advanced_settings,
+            &cfg.default_env,
+        );
+        let distro = state.resolve_distro();
+        let mut child = crate::wsl::WslChild::spawn(&distro, &script, &def.id, move |line| {
+            if let Ok(mut logs) = callback_logs.lock() {
+                logs.push(line);
+            }
+        })
+        .expect("spawn corrected launch script");
+
+        let health_url = format!("http://127.0.0.1:{}/health", def.port);
+        let client = reqwest::blocking::Client::new();
+        let mut ready = false;
+        for _ in 0..120 {
+            if client.get(&health_url).send().is_ok_and(|response| response.status().is_success()) {
+                ready = true;
+                break;
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                let logs = logs.lock().unwrap().clone().join("\n");
+                panic!("vLLM exited early ({status}):\n{logs}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        child.join();
+        assert!(ready, "corrected launch script did not become healthy");
+        if let Some(path) = child.script_path().map(str::to_string) {
+            let check = crate::wsl::run_script(
+                &distro,
+                &format!("test ! -e {}", crate::wsl::shell_quote_wsl(&path)),
+            );
+            assert!(check.ok, "launch script was not self-deleted: {path}");
+        }
     }
 
     /// Integration test: launch a dummy command in WSL and verify env vars are passed correctly.

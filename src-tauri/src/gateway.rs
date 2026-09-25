@@ -12,7 +12,7 @@
 //! reverse proxy are needed.
 
 use crate::server::apply_vllm_auth;
-use crate::state::{AppState, ServerStatus};
+use crate::state::{AppState, ServerDef, ServerStatus};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tauri::Manager;
@@ -75,26 +75,211 @@ pub fn find_server_port_for(
     None
 }
 
+fn configured_context_tokens(def: &ServerDef) -> Option<usize> {
+    match def.backend.as_str() {
+        "vllm" => def.max_model_len.filter(|value| *value > 0),
+        "llamacpp" => def.ctx_size.filter(|value| *value > 0),
+        _ => None,
+    }
+}
+
+fn model_row(def: &ServerDef, context: Option<usize>, context_source: &str) -> serde_json::Value {
+    let context = context.filter(|value| *value > 0);
+    let is_instruct = def.task == "instruct";
+    let mut row = serde_json::json!({
+        "id": def.effective_model_name(),
+        "object": "model",
+        "created": 0,
+        "owned_by": "local-llm-panel",
+        "root": def.model_id.clone(),
+        "parent": serde_json::Value::Null,
+        // vLLM uses max_model_len and llama.cpp calls the same value n_ctx;
+        // the other names make the effective context discoverable to clients
+        // that use OpenAI/LM Studio-style model metadata instead.
+        "max_model_len": context,
+        "context_length": context,
+        "max_context_length": context,
+        "context_window": context,
+        "n_ctx": context,
+        "context_source": context_source,
+        "backend": def.backend.clone(),
+        "quantization": def.quant.clone(),
+        "task": def.task.clone(),
+        "capabilities": {
+            "chat_completions": is_instruct,
+            "completions": is_instruct,
+            "embeddings": def.task == "embed",
+            "streaming": is_instruct,
+        },
+        "port": def.port,
+    });
+    if let Some(params) = def.params_b.filter(|value| *value > 0.0) {
+        row["parameters_billions"] = serde_json::json!(params);
+    }
+    row
+}
+
 /// OpenAI-style `data` rows for `GET /v1/models`. Prefer the served model
 /// name when present (that is the name a client would pass in `"model"`).
+///
+/// The context fields are extensions to the OpenAI schema. They are
+/// deliberately derived from the same definition used to launch the backend,
+/// so a harness never sees a different context than the process is using.
 pub fn model_rows(servers: &BTreeMap<String, crate::state::LiveServer>) -> Vec<serde_json::Value> {
     running_servers(servers, "instruct")
         .into_iter()
         .map(|ls| {
-            let id = if ls.def.served_model_name.is_some() {
-                ls.def.effective_model_name()
-            } else {
-                ls.def.model_id.clone()
-            };
-            serde_json::json!({
-                "id": id,
-                "object": "model",
-                "created": 0,
-                "owned_by": "local-llm-panel",
-                "port": ls.def.port,
-            })
+            let context = configured_context_tokens(&ls.def);
+            model_row(
+                &ls.def,
+                context,
+                if context.is_some() {
+                    "configured"
+                } else {
+                    "unknown"
+                },
+            )
         })
         .collect()
+}
+
+fn json_usize(value: &serde_json::Value) -> Option<usize> {
+    let parsed = value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })?;
+    (parsed > 0).then_some(parsed)
+}
+
+/// Read the context token limit from vLLM's model list or llama.cpp's
+/// `/props` response. Different llama.cpp releases put `n_ctx` in slightly
+/// different places, hence the small recursive lookup.
+fn extract_runtime_context(value: &serde_json::Value) -> Option<usize> {
+    const CONTEXT_KEYS: &[&str] = &[
+        "max_model_len",
+        "max_context_length",
+        "context_length",
+        "context_window",
+        "n_ctx",
+    ];
+    if let Some(object) = value.as_object() {
+        for key in CONTEXT_KEYS {
+            if let Some(value) = object.get(*key).and_then(json_usize) {
+                return Some(value);
+            }
+        }
+        for key in [
+            "data",
+            "models",
+            "default_generation_settings",
+            "model_info",
+        ] {
+            if let Some(child) = object.get(key) {
+                if let Some(context) = extract_runtime_context(child) {
+                    return Some(context);
+                }
+            }
+        }
+    } else if let Some(items) = value.as_array() {
+        for item in items {
+            if let Some(context) = extract_runtime_context(item) {
+                return Some(context);
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_runtime_context(state: &Arc<AppState>, def: &ServerDef) -> Option<usize> {
+    let api_key = crate::server::server_api_key(state, def);
+    let paths: &[&str] = if def.backend == "llamacpp" {
+        &["/props", "/v1/models"]
+    } else {
+        &["/v1/models"]
+    };
+    for path in paths {
+        let url = format!("http://127.0.0.1:{}{path}", def.port);
+        let request = apply_vllm_auth(state.http.get(&url), api_key.as_deref());
+        let response =
+            match tokio::time::timeout(std::time::Duration::from_millis(350), request.send()).await
+            {
+                Ok(Ok(response)) if response.status().is_success() => response,
+                _ => continue,
+            };
+        let value = match tokio::time::timeout(
+            std::time::Duration::from_millis(350),
+            response.json::<serde_json::Value>(),
+        )
+        .await
+        {
+            Ok(Ok(value)) => value,
+            _ => continue,
+        };
+        if let Some(context) = extract_runtime_context(&value) {
+            return Some(context);
+        }
+    }
+    None
+}
+
+async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
+    let defs: Vec<ServerDef> = {
+        let servers = state.servers.lock().unwrap();
+        running_servers(&servers, "instruct")
+            .into_iter()
+            .map(|server| server.def.clone())
+            .collect()
+    };
+    let mut rows = Vec::with_capacity(defs.len());
+    for def in defs {
+        let configured = configured_context_tokens(&def);
+        let (context, source) = if let Some(context) = configured {
+            (Some(context), "configured")
+        } else if let Some(context) = fetch_runtime_context(state, &def).await {
+            (Some(context), "runtime")
+        } else {
+            (None, "unknown")
+        };
+        rows.push(model_row(&def, context, source));
+    }
+    rows
+}
+
+fn decode_path_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            decoded.push((digit(high)? << 4) | digit(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn model_id_from_path(path: &str) -> Option<String> {
+    let raw = path.split('?').next()?.strip_prefix("/v1/models/")?;
+    if raw.is_empty() {
+        None
+    } else {
+        decode_path_component(raw)
+    }
 }
 
 /// Extract the requested model id from a chat/completions JSON body.
@@ -106,29 +291,50 @@ pub fn model_from_body(body: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Validate the Authorization header against the global gateway API key.
-/// Returns Ok(()) if auth passes or no global key is configured.
-/// Returns Err(status, message) if auth fails.
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
+/// Validate the Authorization header against the configured gateway API key.
+///
+/// A gateway without a key is a misconfiguration, not an open server.  Return
+/// a configuration error instead of silently exposing every routed model to
+/// any local process (or browser page) that can reach localhost.
 pub fn check_gateway_auth(
     headers: &HashMap<String, String>,
     global_key: Option<&str>,
 ) -> Result<(), (u16, String)> {
-    let Some(expected_key) = global_key.filter(|k| !k.is_empty()) else {
-        return Ok(()); // No global key configured, allow
+    let Some(expected_key) = global_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return Err((
+            503,
+            "Gateway API key is not configured; set one in Settings before using /v1 routes"
+                .to_string(),
+        ));
     };
     let auth_header = headers
         .get("authorization")
         .or_else(|| headers.get("Authorization"));
     match auth_header {
         Some(h) if h.starts_with("Bearer ") => {
-            let provided = &h["Bearer ".len()..];
-            if provided == expected_key {
+            let provided = h["Bearer ".len()..].trim();
+            if !provided.is_empty() && constant_time_eq(provided, expected_key) {
                 Ok(())
             } else {
                 Err((401, "Invalid API key".to_string()))
             }
         }
-        Some(_) => Err((401, "Authorization header must use Bearer scheme".to_string())),
+        Some(_) => Err((
+            401,
+            "Authorization header must use Bearer scheme".to_string(),
+        )),
         None => Err((401, "Missing Authorization header".to_string())),
     }
 }
@@ -167,9 +373,40 @@ pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
     })
 }
 
-/// CORS headers emitted on every gateway response so browser-based
-/// coding clients (Continue web, etc.) can call the gateway directly.
-pub const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+/// Non-origin CORS headers shared by all allowed responses.  Kept public for
+/// callers that need to inspect the policy without trusting a request origin.
+pub const CORS_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+
+/// Return CORS headers only for explicitly trusted local origins.
+///
+/// The gateway is bound to loopback, but a browser page on any origin can
+/// still attempt a localhost request.  Echoing an arbitrary `Origin` (or `*`)
+/// would turn the gateway into a cross-site credential/data exfiltration point.
+/// The Tauri origins and loopback development origins are the only origins
+/// accepted by the local panel.
+pub fn cors_headers(origin: Option<&str>) -> String {
+    let Some(origin) = origin.filter(|value| is_allowed_origin(value)) else {
+        return String::new();
+    };
+    format!(
+        "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n{CORS_HEADERS}"
+    )
+}
+
+fn is_allowed_origin(origin: &str) -> bool {
+    if origin == "tauri://localhost" || origin == "https://tauri.localhost" {
+        return true;
+    }
+    ["http://127.0.0.1:", "http://localhost:"]
+        .iter()
+        .any(|prefix| {
+            origin.strip_prefix(prefix).is_some_and(|port| {
+                !port.is_empty()
+                    && port.bytes().all(|byte| byte.is_ascii_digit())
+                    && port.parse::<u16>().is_ok_and(|number| number > 0)
+            })
+        })
+}
 
 pub fn is_head_terminated(buf: &[u8]) -> Option<usize> {
     if buf.len() < 4 {
@@ -251,7 +488,12 @@ async fn route(
     body: &[u8],
 ) -> Result<(), String> {
     if head.method.as_str() == "OPTIONS" {
-        return write_response(stream, 204, "text/plain", b"").await;
+        if let Some(origin) = head.headers.get("origin") {
+            if !is_allowed_origin(origin) {
+                return write_request_response(stream, head, 403, "text/plain", b"origin not allowed").await;
+            }
+        }
+        return write_request_response(stream, head, 204, "text/plain", b"").await;
     }
 
     // Auth check for all /v1/* routes except /health
@@ -260,8 +502,9 @@ async fn route(
         let cfg = state.config();
         let global_key = cfg.advanced_settings.api_key.as_deref();
         if let Err((status, msg)) = check_gateway_auth(&head.headers, global_key) {
-            return write_response(
+            return write_request_response(
                 stream,
+                head,
                 status,
                 "application/json",
                 serde_json::json!({ "error": { "message": msg, "type": "authentication_error" } })
@@ -272,17 +515,55 @@ async fn route(
         }
     }
 
-    match (head.method.as_str(), head.target.as_str()) {
+    let path = head.target.split('?').next().unwrap_or("");
+    match (head.method.as_str(), path) {
         ("GET", "/v1/models") => {
-            let text = {
-                let servers = state.servers.lock().unwrap();
-                let payload = serde_json::json!({ "object": "list", "data": model_rows(&servers) });
-                payload.to_string()
+            let text = serde_json::json!({
+                "object": "list",
+                "data": model_rows_for_state(state).await,
+            })
+            .to_string();
+            write_request_response(stream, head, 200, "application/json", text.as_bytes()).await
+        }
+        (candidate_path, _)
+            if head.method == "GET" && candidate_path.starts_with("/v1/models/") =>
+        {
+            let Some(model_id) = model_id_from_path(candidate_path) else {
+                return write_request_response(
+                    stream,
+                    head,
+                    400,
+                    "application/json",
+                    serde_json::json!({
+                        "error": {
+                            "message": "Model id is required",
+                            "type": "invalid_request_error",
+                        }
+                    })
+                    .to_string()
+                    .as_bytes(),
+                )
+                .await;
             };
-            write_response(stream, 200, "application/json", text.as_bytes()).await
+            let rows = model_rows_for_state(state).await;
+            let Some(row) = rows.into_iter().find(|row| {
+                row["id"].as_str() == Some(model_id.as_str())
+                    || row["root"].as_str() == Some(model_id.as_str())
+            }) else {
+                let payload = serde_json::json!({
+                    "error": {
+                        "code": "model_not_found",
+                        "message": format!("Model '{model_id}' was not found"),
+                        "type": "invalid_request_error",
+                    }
+                })
+                .to_string();
+                return write_request_response(stream, head, 404, "application/json", payload.as_bytes()).await;
+            };
+            write_request_response(stream, head, 200, "application/json", row.to_string().as_bytes()).await
         }
         ("GET", "/health") => {
-            write_response(stream, 200, "application/json", b"{\"status\":\"ok\"}").await
+            write_request_response(stream, head, 200, "application/json", b"{\"status\":\"ok\"}").await
         }
         ("POST", "/v1/chat/completions") => {
             let model = model_from_body(body)
@@ -292,11 +573,12 @@ async fn route(
                 find_server_port_for(&servers, &model, "instruct")
             };
             match port {
-                Some(port) => proxy_chat(stream, state, port, body).await,
+                Some(port) => proxy_chat(stream, state, port, body, head.headers.get("origin").map(String::as_str)).await,
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    write_response(
+                    write_request_response(
                         stream,
+                        head,
                         404,
                         "application/json",
                         not_found_payload_with_hint(&model, "instruction", &running).as_bytes(),
@@ -313,11 +595,12 @@ async fn route(
                 find_server_port_for(&servers, &model, "instruct")
             };
             match port {
-                Some(port) => proxy_post(stream, state, port, "/v1/completions", body).await,
+                Some(port) => proxy_post(stream, state, port, "/v1/completions", body, head.headers.get("origin").map(String::as_str)).await,
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    write_response(
+                    write_request_response(
                         stream,
+                        head,
                         404,
                         "application/json",
                         not_found_payload_with_hint(&model, "instruction", &running).as_bytes(),
@@ -334,11 +617,12 @@ async fn route(
                 find_server_port_for(&servers, &model, "embed")
             };
             match port {
-                Some(port) => proxy_post(stream, state, port, "/v1/embeddings", body).await,
+                Some(port) => proxy_post(stream, state, port, "/v1/embeddings", body, head.headers.get("origin").map(String::as_str)).await,
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "embed");
-                    write_response(
+                    write_request_response(
                         stream,
+                        head,
                         404,
                         "application/json",
                         not_found_payload_with_hint(&model, "embedding", &running).as_bytes(),
@@ -348,10 +632,27 @@ async fn route(
             }
         }
         (method, "/v1/models") if method != "GET" => {
-            write_response(stream, 405, "text/plain", b"method not allowed").await
+            write_request_response(stream, head, 405, "text/plain", b"method not allowed").await
         }
-        _ => write_response(stream, 404, "text/plain", b"not found").await,
+        _ => write_request_response(stream, head, 404, "text/plain", b"not found").await,
     }
+}
+
+async fn write_request_response(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    write_response_with_origin(
+        stream,
+        status,
+        content_type,
+        body,
+        head.headers.get("origin").map(String::as_str),
+    )
+    .await
 }
 
 async fn write_response(
@@ -360,16 +661,31 @@ async fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), String> {
+    write_response_with_origin(stream, status, content_type, body, None).await
+}
+
+async fn write_response_with_origin(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    origin: Option<&str>,
+) -> Result<(), String> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     };
+    let cors = cors_headers(origin);
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{CORS_HEADERS}Connection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{cors}Connection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -385,8 +701,9 @@ async fn proxy_chat(
     state: &Arc<AppState>,
     port: u16,
     body: &[u8],
+    origin: Option<&str>,
 ) -> Result<(), String> {
-    proxy_post(stream, state, port, "/v1/chat/completions", body).await
+    proxy_post(stream, state, port, "/v1/chat/completions", body, origin).await
 }
 
 /// Forward a chat/completions request to the target vLLM port, preserving
@@ -397,6 +714,7 @@ async fn proxy_post(
     port: u16,
     upstream_path: &str,
     body: &[u8],
+    origin: Option<&str>,
 ) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}{upstream_path}");
     let streaming = serde_json::from_slice::<serde_json::Value>(body)
@@ -404,7 +722,12 @@ async fn proxy_post(
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
-    let api_key = state.config().advanced_settings.api_key.clone();
+    let api_key = state
+        .config()
+        .servers
+        .iter()
+        .find(|server| server.port == port)
+        .and_then(|server| crate::server::server_api_key(state, server));
     let req = state
         .http
         .post(&url)
@@ -420,7 +743,8 @@ async fn proxy_post(
 
     if streaming {
         let head = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n{CORS_HEADERS}Connection: close\r\n\r\n"
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n{}Connection: close\r\n\r\n",
+            cors_headers(origin)
         );
         stream
             .write_all(head.as_bytes())
@@ -455,7 +779,7 @@ async fn proxy_post(
             .bytes()
             .await
             .map_err(|e| format!("upstream body read: {e}"))?;
-        write_response(stream, status, "application/json", &body_bytes).await
+        write_response_with_origin(stream, status, "application/json", &body_bytes, origin).await
     }
 }
 
@@ -509,10 +833,14 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let state: tauri::State<Arc<AppState>> = app.state();
             let cfg = state.config();
-            let wanted = cfg
-                .advanced_settings
-                .gateway_enabled
-                .then_some(cfg.advanced_settings.gateway_port);
+            let wanted = (cfg.advanced_settings.gateway_enabled
+                && cfg
+                    .advanced_settings
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|key| !key.is_empty()))
+            .then_some(cfg.advanced_settings.gateway_port);
             if let Some(port) = wanted {
                 let stale = matches!(&running, Some((p, h)) if *p != port || h.is_finished());
                 if stale {
@@ -557,6 +885,7 @@ mod tests {
                 max_model_len: None,
                 quant: "fp16".to_string(),
                 served_model_name: served.map(|s| s.to_string()),
+                kv_cache_dtype: None,
                 llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
                 enforce_eager: true,
                 params_b: None,
@@ -650,8 +979,14 @@ mod tests {
     #[test]
     fn test_route_exact_served_model_name() {
         let servers = running_map();
-        assert_eq!(find_server_port_for(&servers, "qwen-7b", "instruct"), Some(8001));
-        assert_eq!(find_server_port_for(&servers, "Qwen-7B", "instruct"), Some(8001));
+        assert_eq!(
+            find_server_port_for(&servers, "qwen-7b", "instruct"),
+            Some(8001)
+        );
+        assert_eq!(
+            find_server_port_for(&servers, "Qwen-7B", "instruct"),
+            Some(8001)
+        );
     }
 
     #[test]
@@ -699,7 +1034,10 @@ mod tests {
     #[test]
     fn test_route_unknown_or_empty_model() {
         let servers = running_map();
-        assert_eq!(find_server_port_for(&servers, "nope/model", "instruct"), None);
+        assert_eq!(
+            find_server_port_for(&servers, "nope/model", "instruct"),
+            None
+        );
         assert_eq!(find_server_port_for(&servers, "", "instruct"), None);
         assert_eq!(find_server_port_for(&servers, "   ", "instruct"), None);
     }
@@ -712,7 +1050,10 @@ mod tests {
             find_server_port_for(&servers, "BAAI/bge-small-en", "embed"),
             Some(8003)
         );
-        assert_eq!(find_server_port_for(&servers, "bge-small-en", "embed"), Some(8003));
+        assert_eq!(
+            find_server_port_for(&servers, "bge-small-en", "embed"),
+            Some(8003)
+        );
     }
 
     #[test]
@@ -751,6 +1092,56 @@ mod tests {
         assert!(rows
             .iter()
             .all(|r| r["object"] == serde_json::json!("model")));
+    }
+
+    #[test]
+    fn test_model_rows_include_effective_context_metadata() {
+        let mut servers = running_map();
+        servers.get_mut("srv-a").unwrap().def.max_model_len = Some(32_768);
+        let rows = model_rows(&servers);
+        let row = rows.iter().find(|row| row["id"] == "qwen-7b").unwrap();
+        for key in [
+            "max_model_len",
+            "context_length",
+            "max_context_length",
+            "context_window",
+            "n_ctx",
+        ] {
+            assert_eq!(row[key], serde_json::json!(32_768));
+        }
+        assert_eq!(row["context_source"], "configured");
+        assert_eq!(row["backend"], "vllm");
+        assert_eq!(row["capabilities"]["chat_completions"], true);
+    }
+
+    #[test]
+    fn test_llama_model_rows_use_configured_context_size() {
+        let mut servers = running_map();
+        let def = &mut servers.get_mut("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        def.max_model_len = None;
+        def.ctx_size = Some(262_144);
+        let rows = model_rows(&servers);
+        let row = rows.iter().find(|row| row["id"] == "qwen-7b").unwrap();
+        assert_eq!(row["max_model_len"], serde_json::json!(262_144));
+        assert_eq!(row["context_length"], serde_json::json!(262_144));
+        assert_eq!(row["context_source"], "configured");
+    }
+
+    #[test]
+    fn test_runtime_context_parser_reads_llama_props() {
+        let value = serde_json::json!({
+            "default_generation_settings": { "n_ctx": "262144" }
+        });
+        assert_eq!(extract_runtime_context(&value), Some(262_144));
+    }
+
+    #[test]
+    fn test_model_path_decodes_url_encoded_ids() {
+        assert_eq!(
+            model_id_from_path("/v1/models/Qwen%2FQwen2.5-7B-Instruct"),
+            Some("Qwen/Qwen2.5-7B-Instruct".to_string())
+        );
     }
 
     #[test]
@@ -799,20 +1190,24 @@ mod tests {
     }
 
     #[test]
-    fn test_cors_headers_cover_browser_preflight() {
-        assert!(CORS_HEADERS.contains("Access-Control-Allow-Origin: *"));
-        assert!(CORS_HEADERS.contains("Access-Control-Allow-Methods"));
-        assert!(CORS_HEADERS.contains("GET, POST, OPTIONS"));
-        assert!(CORS_HEADERS.contains("Access-Control-Allow-Headers"));
-        assert!(CORS_HEADERS.contains("Authorization"));
+    fn test_cors_headers_only_allow_trusted_local_origins() {
+        let trusted = cors_headers(Some("http://127.0.0.1:1420"));
+        assert!(trusted.contains("Access-Control-Allow-Origin: http://127.0.0.1:1420"));
+        assert!(trusted.contains("Vary: Origin"));
+        assert!(trusted.contains("Access-Control-Allow-Methods"));
+        assert!(trusted.contains("Authorization"));
+        assert_eq!(cors_headers(Some("https://evil.example")), "");
+        assert_eq!(cors_headers(None), "");
     }
 
     #[test]
     fn test_check_gateway_auth_no_key_configured() {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer anything".to_string());
-        assert!(check_gateway_auth(&headers, None).is_ok());
-        assert!(check_gateway_auth(&headers, Some("")).is_ok());
+        let err = check_gateway_auth(&headers, None).unwrap_err();
+        assert_eq!(err.0, 503);
+        assert!(err.1.contains("not configured"));
+        assert_eq!(check_gateway_auth(&headers, Some("")).unwrap_err().0, 503);
     }
 
     #[test]

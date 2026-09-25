@@ -357,8 +357,10 @@ export default function Library() {
                             e.quant?.toUpperCase() === "GGUF" || e.model_id.toUpperCase().includes("GGUF")
                               ? "llamacpp"
                               : undefined,
-                          prefillModelPath: e.model_path || undefined,
+                          prefillModelPath:
+                            e.model_path || (e.is_local ? e.model_id : undefined) || undefined,
                           prefillQuant: e.quant || undefined,
+                          prefillTask: e.task === "embed" ? "embed" : "instruct",
                         },
                       })
                     }
