@@ -471,7 +471,18 @@ mod tests {
         assert!(specs.total_ram_gb > 0.0);
         assert!(!specs.cpu_name.is_empty());
         assert!(specs.total_cpu_cores > 0);
-        assert!(specs.has_gpu);
+        assert_eq!(
+            specs.has_gpu,
+            !specs.gpus.is_empty(),
+            "has_gpu must agree with the detected GPU list"
+        );
+        if specs.has_gpu {
+            assert!(specs.gpu_name.is_some());
+            assert!(specs.gpu_count > 0);
+        } else {
+            assert!(specs.gpu_name.is_none());
+            assert_eq!(specs.gpu_count, 0);
+        }
     }
 
     #[test]
@@ -486,7 +497,13 @@ mod tests {
                 m.id, m.score, m.best_quant, m.runtime
             );
         }
-        assert_eq!(recs[0].score, 94.2);
+        // Scores depend on the detected hardware (especially whether a GPU is
+        // present), so assert ordering and validity rather than a machine-specific
+        // score value.
+        assert!(recs[0].score.is_finite());
+        assert!(recs
+            .windows(2)
+            .all(|pair| pair[0].score >= pair[1].score));
 
         for m in &recs {
             assert!(!m.id.is_empty());
