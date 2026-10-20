@@ -1005,6 +1005,16 @@ pub struct MetricsSnapshot {
     pub total_prompt_tokens: u64,
     pub total_generation_tokens: u64,
     pub requests: u64,
+    pub requests_available: bool,
+    pub requests_per_sec: Option<f64>,
+    pub kv_cache_pct: Option<f64>,
+    pub cache_hit_pct: Option<f64>,
+    pub ttft_ms: Option<f64>,
+    pub e2e_latency_ms: Option<f64>,
+    pub queue_time_ms: Option<f64>,
+    pub prefill_time_ms: Option<f64>,
+    pub preemptions: u64,
+    pub prompt_tokens_cached: u64,
     pub measured: Option<MeasuredStats>,
 }
 
@@ -1110,13 +1120,23 @@ pub struct SystemMetricPoint {
     pub gpu_util_pct: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ServerMetricPoint {
     pub timestamp: u64,
     pub tok_s: f64,
     pub prompt_tok_s: f64,
     pub requests_running: u64,
     pub requests_waiting: u64,
+    #[serde(default)]
+    pub kv_cache_pct: Option<f64>,
+    #[serde(default)]
+    pub cache_hit_pct: Option<f64>,
+    #[serde(default)]
+    pub ttft_ms: Option<f64>,
+    #[serde(default)]
+    pub e2e_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub requests_per_sec: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1652,6 +1672,7 @@ mod tests {
                 prompt_tok_s: 150.0,
                 requests_running: 1,
                 requests_waiting: 0,
+                ..Default::default()
             };
             app_state.record_server_metric("test-server", pt);
         }

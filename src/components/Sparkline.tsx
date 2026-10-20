@@ -50,6 +50,9 @@ export function Sparkline({
           ? formatValue(validData[validData.length - 1])
           : validData[validData.length - 1].toFixed(1)
         : "—";
+  // A string currentValue is already formatted by the caller (and often
+  // includes its own unit), so only append `unit` for numeric values.
+  const showUnit = unit && (currentValue === undefined || typeof currentValue === "number");
 
   // Build SVG points
   let polylinePoints = "";
@@ -85,7 +88,7 @@ export function Sparkline({
           {label && <span className="font-medium text-slate-400">{label}</span>}
           <span className="font-mono font-semibold" style={{ color }}>
             {latestVal}
-            {unit && <span className="text-[10px] text-slate-400 ml-0.5">{unit}</span>}
+            {showUnit && <span className="text-[10px] text-slate-400 ml-0.5">{unit}</span>}
           </span>
         </div>
       )}
@@ -164,6 +167,157 @@ export function Sparkline({
             <span className="text-[8px] text-slate-600">5m</span>
             <span>
               {formatValue ? formatValue(computedMax) : computedMax.toFixed(0)}
+              {unit}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export interface SparklineSeries {
+  label: string;
+  data: number[];
+  color: string;
+}
+
+export interface MultiSparklineProps {
+  series: SparklineSeries[];
+  width?: number;
+  height?: number;
+  unit?: string;
+  label?: string;
+  min?: number;
+  max?: number;
+  formatValue?: (val: number) => string;
+  className?: string;
+  showMinMax?: boolean;
+}
+
+/** A compact multi-line chart with a shared y-axis and an inline legend. */
+export function MultiSparkline({
+  series,
+  width = 280,
+  height = 48,
+  unit = "",
+  label,
+  min,
+  max,
+  formatValue,
+  className = "",
+  showMinMax = true,
+}: MultiSparklineProps) {
+  const paddingX = 4;
+  const paddingY = 6;
+  const allValues = series.flatMap((s) => s.data).filter((v) => Number.isFinite(v));
+  const hasPoints = allValues.length > 0;
+  const computedMin = min !== undefined ? min : hasPoints ? Math.min(...allValues) : 0;
+  const computedMax = max !== undefined ? max : hasPoints ? Math.max(...allValues) : 1;
+  const range = computedMax - computedMin || 1;
+  const fmt = formatValue ?? ((v: number) => v.toFixed(1));
+
+  const lines = series.map((s) => {
+    const valid = s.data.filter((v) => Number.isFinite(v));
+    const points = valid.map((val, idx) => {
+      const x =
+        paddingX +
+        (valid.length <= 1 ? 0 : (idx / (valid.length - 1)) * (width - 2 * paddingX));
+      const clamped = Math.max(computedMin, Math.min(computedMax, val));
+      const y = paddingY + (1 - (clamped - computedMin) / range) * (height - 2 * paddingY);
+      return [x, y] as const;
+    });
+    return {
+      ...s,
+      points,
+      last: valid.length > 0 ? valid[valid.length - 1] : null,
+    };
+  });
+
+  return (
+    <div className={`flex flex-col gap-1 ${className}`}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
+        {label ? <span className="font-medium text-slate-400">{label}</span> : <span />}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+          {lines.map((line) => (
+            <span key={line.label} className="inline-flex items-center gap-1 font-mono">
+              <span className="h-1.5 w-1.5 rounded-full" style={{ background: line.color }} />
+              <span className="text-[10px] text-slate-500">{line.label}</span>
+              <span className="text-[10px] font-semibold" style={{ color: line.color }}>
+                {line.last != null ? fmt(line.last) : "—"}
+                {unit && <span className="ml-0.5 text-[9px] font-normal text-slate-500">{unit}</span>}
+              </span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="relative overflow-hidden rounded bg-black/20 border border-edge/40 px-1 py-0.5">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="w-full h-auto block"
+          style={{ maxHeight: height }}
+          preserveAspectRatio="none"
+        >
+          {[0.25, 0.5, 0.75].map((fraction) => (
+            <line
+              key={fraction}
+              x1={paddingX}
+              y1={height * fraction}
+              x2={width - paddingX}
+              y2={height * fraction}
+              stroke="#334155"
+              strokeDasharray="2 4"
+              strokeWidth="0.75"
+              opacity="0.35"
+            />
+          ))}
+
+          {hasPoints ? (
+            lines.map((line) => (
+              <g key={line.label}>
+                {line.points.length > 1 && (
+                  <polyline
+                    points={line.points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")}
+                    fill="none"
+                    stroke={line.color}
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                )}
+                {line.points.length > 0 && (
+                  <circle
+                    cx={line.points[line.points.length - 1][0]}
+                    cy={line.points[line.points.length - 1][1]}
+                    r="2.5"
+                    fill={line.color}
+                  />
+                )}
+              </g>
+            ))
+          ) : (
+            <line
+              x1={paddingX}
+              y1={height / 2}
+              x2={width - paddingX}
+              y2={height / 2}
+              stroke="#475569"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+            />
+          )}
+        </svg>
+
+        {showMinMax && (
+          <div className="flex justify-between items-center px-0.5 mt-0.5 text-[9px] text-slate-500 font-mono">
+            <span>
+              {fmt(computedMin)}
+              {unit}
+            </span>
+            <span className="text-[8px] text-slate-600">5m</span>
+            <span>
+              {fmt(computedMax)}
               {unit}
             </span>
           </div>

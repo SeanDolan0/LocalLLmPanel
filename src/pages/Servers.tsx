@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
 import { Badge, Button, Card, CardTitle, Collapsible, Field, Menu, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
+import { ServerMetricsPanel } from "../components/ServerMetricsPanel";
 import { effectiveModelName } from "../types";
 import type { ContextFitReport, ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice } from "../types";
 
@@ -585,7 +586,7 @@ export default function Servers() {
       )}
 
       {selectedRow && (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="space-y-4">
           <Card>
             <CardTitle
               right={
@@ -641,46 +642,24 @@ export default function Servers() {
             </div>
           </Card>
           <Card>
-            <CardTitle>Metrics</CardTitle>
-            {selectedRow.metrics ? (
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <Stat label="Generation tok/s" value={selectedRow.metrics.measured?.tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.tokens_per_sec) : "– (needs traffic)"} />
-                  <Stat label="Prompt tok/s" value={selectedRow.metrics.measured?.prompt_tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.prompt_tokens_per_sec) : "–"} />
-                  <Stat label="Total gen tokens" value={fmtNum(selectedRow.metrics.total_generation_tokens)} />
-                  <Stat label="Total prompt tokens" value={fmtNum(selectedRow.metrics.total_prompt_tokens)} />
-                  <Stat label="In-flight / waiting" value={`${selectedRow.metrics.running} / ${selectedRow.metrics.waiting}`} />
-                  <Stat label="Requests" value={fmtNum(selectedRow.metrics.requests)} />
-                </div>
-                {selectedRow.status === "running" && serverSeries[selectedRow.def.id] && serverSeries[selectedRow.def.id].length > 0 && (
-                  <div className="pt-2 border-t border-edge/40">
-                    <Sparkline
-                      label="Throughput History (last 5 min)"
-                      data={serverSeries[selectedRow.def.id].map((p) => p.tok_s)}
-                      height={44}
-                      min={0}
-                      color="#38bdf8"
-                      unit="tok/s"
-                      currentValue={selectedRow.metrics.measured?.tokens_per_sec != null ? fmtTokPerSec(selectedRow.metrics.measured.tokens_per_sec) : undefined}
-                    />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="text-sm text-slate-500">No metrics yet — the monitor samples /metrics every 5s once running.</div>
-            )}
+            <CardTitle
+              right={
+                <span className="text-[11px] text-slate-500">
+                  {selectedRow.def.metrics ? "live · 5s samples" : "disabled"}
+                </span>
+              }
+            >
+              Metrics
+            </CardTitle>
+            <ServerMetricsPanel
+              metrics={selectedRow.metrics}
+              series={serverSeries[selectedRow.def.id] ?? []}
+              status={selectedRow.status}
+              metricsEnabled={selectedRow.def.metrics}
+            />
           </Card>
         </div>
       )}
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-edge bg-surface p-2.5">
-      <div className="text-[11px] text-slate-500">{label}</div>
-      <div className="mt-0.5 font-mono text-slate-200">{value}</div>
     </div>
   );
 }
@@ -1598,7 +1577,7 @@ function NewServerForm({
               <Field label="Parallel request slots" hint="0 uses llama.cpp automatic selection.">
                 <input type="number" min="0" className={inputCls} placeholder="auto" value={parallel} onChange={(e) => setParallel(e.target.value)} />
               </Field>
-              <Field label="Extra llama.cpp arguments" hint="One argument per line. Structured settings above take precedence.">
+              <Field label="Extra llama.cpp arguments" hint="One argument per line. Structured settings above take precedence; harness request parameters (thinking level, temperature, max_tokens, …) override these defaults.">
                 <textarea className={`${inputCls} min-h-20 font-mono text-xs`} placeholder={"--jinja\n--override-kv key=value"} value={extraArgs} onChange={(e) => setExtraArgs(e.target.value)} />
               </Field>
             </>

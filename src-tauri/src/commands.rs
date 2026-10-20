@@ -4533,6 +4533,7 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
                 prompt_tok_s: 220.1,
                 requests_running: 2,
                 requests_waiting: 0,
+                ..Default::default()
             });
         }
 

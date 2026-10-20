@@ -83,14 +83,442 @@ fn configured_context_tokens(def: &ServerDef) -> Option<usize> {
     }
 }
 
-fn model_row(def: &ServerDef, context: Option<usize>, context_source: &str) -> serde_json::Value {
+/// Effective CLI arguments for a running backend. llama.cpp keeps its flags on
+/// the server definition; vLLM accepts a single global extra-args string that
+/// the caller parses once for the whole `/v1/models` response.
+fn effective_launch_args<'a>(def: &'a ServerDef, vllm_args: &'a [String]) -> &'a [String] {
+    if def.backend == "llamacpp" {
+        &def.extra_args
+    } else {
+        vllm_args
+    }
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter()
+        .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    for (index, arg) in args.iter().enumerate() {
+        if arg == flag {
+            return args.get(index + 1).cloned();
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// How a backend/model exposes its thinking mode. `Off/On` is the Qwen-style
+/// boolean template switch; `Effort` is the OpenAI `reasoning_effort` scale,
+/// and `AlwaysOn` models (DeepSeek-R1 / QwQ) cannot be turned off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningMode {
+    None,
+    Toggle,
+    Effort,
+    AlwaysOn,
+}
+
+impl ReasoningMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Toggle => "toggle",
+            Self::Effort => "effort",
+            Self::AlwaysOn => "always_on",
+        }
+    }
+
+    fn levels(self) -> &'static [&'static str] {
+        match self {
+            Self::None => &[],
+            Self::Toggle => &["off", "on"],
+            Self::Effort => &["none", "low", "medium", "high"],
+            Self::AlwaysOn => &["on"],
+        }
+    }
+
+    fn default_level(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Toggle | Self::AlwaysOn => Some("on"),
+            Self::Effort => Some("medium"),
+        }
+    }
+}
+
+/// Capabilities inferred from the model family and the actual launch flags.
+///
+/// Tool calling and reasoning output are backend features, not just model
+/// features: vLLM only honors `tool_choice: "auto"` with
+/// `--enable-auto-tool-choice` plus a `--tool-call-parser`, and only returns
+/// `reasoning_content` with a `--reasoning-parser`. Reporting the model as
+/// capable when the process is not configured would make harnesses fail at
+/// request time, so `reasoning` (model can think) and `reasoning_output`
+/// (backend exposes it) are separate fields.
+#[derive(Debug, Clone, Copy)]
+struct ModelTraits {
+    tools: bool,
+    vision: bool,
+    reasoning: bool,
+    reasoning_output: bool,
+    reasoning_mode: ReasoningMode,
+    reasoning_enabled: bool,
+    reasoning_source: &'static str,
+}
+
+fn looks_like_reasoning_model(name: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "deepseek-r1",
+        "deepseek-reasoner",
+        "qwq",
+        "qwen3",
+        "thinking",
+        "reasoning",
+        "gpt-oss",
+        "glm-4.5",
+        "glm-4.6",
+        "glm-5",
+        "magistral",
+        "kimi-k2",
+        "minimax-m2",
+        "nemotron",
+        "granite-4",
+        "exaone-deep",
+        "seed-oss",
+        "olmo-3-think",
+        "ernie-4.5",
+    ];
+    MARKERS.iter().any(|marker| name.contains(marker))
+}
+
+fn reasoning_is_always_on(name: &str) -> bool {
+    // These models always emit a reasoning trace; there is no off switch.
+    [
+        "deepseek-r1",
+        "deepseek-reasoner",
+        "qwq",
+        "phi-4-reasoning",
+        "olmo-3-think",
+        "exaone-deep",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
+fn looks_like_vision_model(name: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "vision",
+        "-vl-",
+        "llava",
+        "pixtral",
+        "internvl",
+        "minicpm-v",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "qwen3-vl",
+        "gemma-3",
+        "gemma-4",
+        "idefics",
+        "llama-4",
+        "molmo",
+        "ovis",
+        "glm-4v",
+        "phi-4-multimodal",
+        "mistral-small-3",
+        "step-1o",
+        "aria",
+    ];
+    MARKERS.iter().any(|marker| name.contains(marker))
+}
+
+fn model_traits(def: &ServerDef, launch_args: &[String]) -> ModelTraits {
+    let name = format!("{} {}", def.model_id, def.effective_model_name()).to_ascii_lowercase();
+    let is_instruct = def.task == "instruct";
+
+    let family_reasoning = looks_like_reasoning_model(&name);
+    let family_always_on = reasoning_is_always_on(&name);
+    let family_effort = name.contains("gpt-oss");
+
+    let (reasoning, reasoning_output, configured, reasoning_enabled) = if def.backend == "llamacpp"
+    {
+        // llama.cpp parses think tags by default (`--reasoning-format auto`)
+        // when the Jinja template emits them; `--reasoning off` disables
+        // thinking entirely.
+        let configured =
+            has_flag(launch_args, "--reasoning-format") || has_flag(launch_args, "--reasoning");
+        let output_disabled =
+            flag_value(launch_args, "--reasoning-format").as_deref() == Some("none");
+        let reasoning = is_instruct && (family_reasoning || configured);
+        let enabled = reasoning && flag_value(launch_args, "--reasoning").as_deref() != Some("off");
+        (
+            reasoning,
+            reasoning && !output_disabled,
+            configured,
+            enabled,
+        )
+    } else {
+        // vLLM exposes reasoning_content only when a parser is configured.
+        let parser = has_flag(launch_args, "--reasoning-parser");
+        let reasoning = is_instruct && (family_reasoning || parser);
+        (reasoning, parser, parser, reasoning)
+    };
+
+    let reasoning_mode = if !reasoning {
+        ReasoningMode::None
+    } else if family_effort {
+        ReasoningMode::Effort
+    } else if family_always_on {
+        ReasoningMode::AlwaysOn
+    } else {
+        ReasoningMode::Toggle
+    };
+
+    let reasoning_source = if configured {
+        "launch_args"
+    } else if family_reasoning {
+        "model_family"
+    } else {
+        "none"
+    };
+
+    let tools = is_instruct
+        && match def.backend.as_str() {
+            // llama.cpp needs --jinja for OpenAI-style tool calls.
+            "llamacpp" => def.jinja,
+            // vLLM rejects tool_choice "auto" unless both flags are present.
+            "vllm" => {
+                has_flag(launch_args, "--enable-auto-tool-choice")
+                    && has_flag(launch_args, "--tool-call-parser")
+            }
+            _ => false,
+        };
+
+    let vision = is_instruct
+        && if def.backend == "llamacpp" {
+            def.mmproj_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+        } else {
+            looks_like_vision_model(&name)
+        };
+
+    ModelTraits {
+        tools,
+        vision,
+        reasoning,
+        reasoning_output,
+        reasoning_mode,
+        reasoning_enabled,
+        reasoning_source,
+    }
+}
+
+/// Actionable notes for fields that are false because of launch configuration
+/// rather than model support. Harnesses ignore this extension; humans reading
+/// `GET /v1/models` use it to fix tool/reasoning setup in one step.
+fn model_hints(def: &ServerDef, traits: &ModelTraits, launch_args: &[String]) -> Vec<String> {
+    let mut hints = Vec::new();
+    if def.task != "instruct" {
+        return hints;
+    }
+    if def.backend == "vllm" {
+        if !traits.tools {
+            hints.push(
+                "Tool calling is disabled: launch vLLM with --enable-auto-tool-choice and \
+                 --tool-call-parser <parser> (Advanced → extra vLLM args)."
+                    .to_string(),
+            );
+        }
+        if traits.reasoning && !traits.reasoning_output {
+            hints.push(
+                "This model reasons, but vLLM will not return reasoning_content without \
+                 --reasoning-parser <parser> (Advanced → extra vLLM args)."
+                    .to_string(),
+            );
+        }
+        if flag_value(launch_args, "--override-generation-config")
+            .is_some_and(|value| value.contains("\"max_new_tokens\""))
+        {
+            hints.push(
+                "vLLM's --override-generation-config max_new_tokens caps every request; harness \
+                 max_tokens values above that cap are clamped. Remove max_new_tokens from extra \
+                 vLLM args to let requests choose their output limit."
+                    .to_string(),
+            );
+        }
+    } else if def.backend == "llamacpp" && !def.jinja {
+        hints.push("Tool calling is disabled: llama.cpp needs --jinja.".to_string());
+    }
+    hints
+}
+
+fn model_row(
+    def: &ServerDef,
+    context: Option<usize>,
+    context_source: &str,
+    launch_args: &[String],
+) -> serde_json::Value {
     let context = context.filter(|value| *value > 0);
     let is_instruct = def.task == "instruct";
+    let is_embed = def.task == "embed";
+    let traits = model_traits(def, launch_args);
+    let hints = model_hints(def, &traits, launch_args);
+    let model_name = def.effective_model_name();
+
+    let model_type = if is_embed {
+        "embeddings"
+    } else if traits.vision {
+        "vlm"
+    } else {
+        "llm"
+    };
+    let modality = if is_embed {
+        "text->embedding"
+    } else if traits.vision {
+        "text+image->text"
+    } else {
+        "text->text"
+    };
+    let input_modalities = if traits.vision {
+        vec!["text", "image"]
+    } else {
+        vec!["text"]
+    };
+    let output_modalities = if is_embed {
+        vec!["embedding"]
+    } else {
+        vec!["text"]
+    };
+    let publisher = def
+        .model_id
+        .split_once('/')
+        .map(|(owner, _)| owner.to_string());
+    // LM Studio-compatible compatibility marker; vLLM consumes safetensors
+    // checkpoints while llama.cpp consumes GGUF files.
+    let compatibility_type = if def.backend == "llamacpp" {
+        "gguf"
+    } else {
+        "safetensors"
+    };
+    let supports_template_controls = def.backend != "llamacpp" || def.jinja;
+    let control = if !supports_template_controls {
+        "none"
+    } else {
+        match traits.reasoning_mode {
+            ReasoningMode::Effort => "reasoning_effort",
+            ReasoningMode::Toggle => "chat_template_kwargs.enable_thinking",
+            ReasoningMode::AlwaysOn | ReasoningMode::None => "none",
+        }
+    };
+    // vLLM maps reasoning_effort (low/medium/high/none) onto the model's
+    // thinking toggle; llama.cpp understands it for effort-native models such
+    // as gpt-oss.  The gateway also translates it into an explicit
+    // `enable_thinking` toggle, so it is accepted for every thinking mode.
+    // llama.cpp only applies template kwargs when Jinja is enabled.
+    let supports_effort_parameter =
+        traits.reasoning_mode != ReasoningMode::None && supports_template_controls;
+    let supports_thinking_toggle = matches!(
+        traits.reasoning_mode,
+        ReasoningMode::Toggle | ReasoningMode::Effort
+    ) && supports_template_controls;
+    let budget_parameter = if traits.reasoning_mode == ReasoningMode::None {
+        None
+    } else if def.backend == "vllm" {
+        Some("thinking_token_budget")
+    } else {
+        Some("reasoning_budget_tokens")
+    };
+    let mut reasoning_controls: Vec<&str> = Vec::new();
+    if traits.reasoning_mode != ReasoningMode::None {
+        if supports_effort_parameter {
+            reasoning_controls.push("reasoning_effort");
+        }
+        if supports_thinking_toggle {
+            reasoning_controls.push("chat_template_kwargs.enable_thinking");
+        }
+        if let Some(budget_parameter) = budget_parameter {
+            reasoning_controls.push(budget_parameter);
+        }
+        if def.backend == "llamacpp" {
+            reasoning_controls.push("reasoning_format");
+        }
+    }
+
+    let mut supported_parameters: Vec<&str> = if is_embed {
+        Vec::new()
+    } else {
+        vec![
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stop",
+            "stream",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+            "response_format",
+            "logprobs",
+        ]
+    };
+    if traits.tools {
+        supported_parameters.extend(["tools", "tool_choice", "parallel_tool_calls"]);
+    }
+    if traits.reasoning_mode != ReasoningMode::None {
+        if supports_thinking_toggle {
+            supported_parameters.push("chat_template_kwargs");
+        }
+        if supports_effort_parameter {
+            supported_parameters.push("reasoning_effort");
+        }
+        if let Some(budget_parameter) = budget_parameter {
+            supported_parameters.push(budget_parameter);
+        }
+    }
+
+    let reasoning = serde_json::json!({
+        "supported": traits.reasoning,
+        // Whether the running backend actually returns reasoning_content.
+        "output": traits.reasoning_output,
+        "enabled_by_default": traits.reasoning_enabled,
+        // Both backends let a request-level enable_thinking override the
+        // launch default.  llama.cpp additionally lets a request-level
+        // reasoning_format override --reasoning-format none.
+        "enabled_overridable": supports_thinking_toggle,
+        "output_overridable": def.backend == "llamacpp"
+            && traits.reasoning_mode != ReasoningMode::None,
+        "mode": traits.reasoning_mode.as_str(),
+        "levels": traits.reasoning_mode.levels(),
+        "default_level": traits.reasoning_mode.default_level(),
+        "control": control,
+        "controls": reasoning_controls,
+        // Request values are made explicit by the gateway and win over panel
+        // launch flags / server defaults.  Panel settings only provide the
+        // default for requests that do not control thinking themselves.
+        "request_precedence": "harness",
+        "parameters": {
+            "reasoning_effort": supports_effort_parameter,
+            "chat_template_kwargs": {
+                "enable_thinking": supports_thinking_toggle,
+            },
+            "thinking_token_budget": budget_parameter == Some("thinking_token_budget"),
+            "reasoning_budget_tokens": budget_parameter == Some("reasoning_budget_tokens"),
+            "reasoning_format": def.backend == "llamacpp"
+                && traits.reasoning_mode != ReasoningMode::None,
+        },
+        "source": traits.reasoning_source,
+    });
+
     let mut row = serde_json::json!({
-        "id": def.effective_model_name(),
+        "id": model_name,
         "object": "model",
         "created": 0,
         "owned_by": "local-llm-panel",
+        "name": def.name.clone(),
+        "display_name": def.name.clone(),
         "root": def.model_id.clone(),
         "parent": serde_json::Value::Null,
         // vLLM uses max_model_len and llama.cpp calls the same value n_ctx;
@@ -102,45 +530,98 @@ fn model_row(def: &ServerDef, context: Option<usize>, context_source: &str) -> s
         "context_window": context,
         "n_ctx": context,
         "context_source": context_source,
+        // Hard upper bound on generation: the prompt and completion share the
+        // context window. Embedding models do not generate tokens.
+        "max_output_tokens": if is_instruct { context } else { None },
+        "max_completion_tokens": if is_instruct { context } else { None },
+        "max_output_tokens_source": if is_instruct && context.is_some() {
+            Some("context_window")
+        } else {
+            None
+        },
+        "architecture": {
+            "modality": modality,
+            "input_modalities": input_modalities,
+            "output_modalities": output_modalities,
+            "instruct_type": serde_json::Value::Null,
+        },
+        "type": model_type,
+        "state": "loaded",
+        "status": "loaded",
+        "publisher": publisher,
+        "compatibility_type": compatibility_type,
         "backend": def.backend.clone(),
         "quantization": def.quant.clone(),
         "task": def.task.clone(),
         "capabilities": {
             "chat_completions": is_instruct,
             "completions": is_instruct,
-            "embeddings": def.task == "embed",
+            "embeddings": is_embed,
             "streaming": is_instruct,
+            "tools": traits.tools,
+            "tool_calling": traits.tools,
+            "parallel_tool_calls": traits.tools,
+            "vision": traits.vision,
+            "reasoning": traits.reasoning,
+            "reasoning_output": traits.reasoning_output,
+            "thinking": traits.reasoning,
+            "system_role": is_instruct,
+            "json_mode": is_instruct,
         },
+        "supports_tools": traits.tools,
+        "supports_tool_calls": traits.tools,
+        "supports_vision": traits.vision,
+        "supports_reasoning": traits.reasoning,
+        "supports_thinking": traits.reasoning,
+        "supports_embeddings": is_embed,
+        "reasoning": reasoning,
+        // Alias for harnesses that look for an explicit "thinking" object.
+        "thinking": reasoning.clone(),
+        "supported_parameters": supported_parameters,
         "port": def.port,
     });
     if let Some(params) = def.params_b.filter(|value| *value > 0.0) {
         row["parameters_billions"] = serde_json::json!(params);
+        row["parameter_count"] = serde_json::json!((params * 1_000_000_000.0).round() as u64);
+    }
+    if !hints.is_empty() {
+        row["configuration_hints"] = serde_json::json!(hints);
     }
     row
+}
+
+fn model_rows_with_launch_args(
+    servers: &BTreeMap<String, crate::state::LiveServer>,
+    vllm_args: &[String],
+) -> Vec<serde_json::Value> {
+    let mut rows = Vec::new();
+    // Instruct models come first so clients that pick the first entry of
+    // `/v1/models` still land on a chat model. Embedding models remain
+    // discoverable for RAG/indexing clients.
+    for task in ["instruct", "embed"] {
+        for server in running_servers(servers, task) {
+            let context = configured_context_tokens(&server.def);
+            let source = if context.is_some() {
+                "configured"
+            } else {
+                "unknown"
+            };
+            let args = effective_launch_args(&server.def, vllm_args);
+            rows.push(model_row(&server.def, context, source, args));
+        }
+    }
+    rows
 }
 
 /// OpenAI-style `data` rows for `GET /v1/models`. Prefer the served model
 /// name when present (that is the name a client would pass in `"model"`).
 ///
-/// The context fields are extensions to the OpenAI schema. They are
+/// The context/capability fields are extensions to the OpenAI schema. They are
 /// deliberately derived from the same definition used to launch the backend,
-/// so a harness never sees a different context than the process is using.
+/// so a harness never sees a different context or capability than the process
+/// actually provides.
 pub fn model_rows(servers: &BTreeMap<String, crate::state::LiveServer>) -> Vec<serde_json::Value> {
-    running_servers(servers, "instruct")
-        .into_iter()
-        .map(|ls| {
-            let context = configured_context_tokens(&ls.def);
-            model_row(
-                &ls.def,
-                context,
-                if context.is_some() {
-                    "configured"
-                } else {
-                    "unknown"
-                },
-            )
-        })
-        .collect()
+    model_rows_with_launch_args(servers, &[])
 }
 
 fn json_usize(value: &serde_json::Value) -> Option<usize> {
@@ -227,12 +708,24 @@ async fn fetch_runtime_context(state: &Arc<AppState>, def: &ServerDef) -> Option
 }
 
 async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
+    let vllm_args = state
+        .config()
+        .advanced_settings
+        .extra_vllm_args
+        .as_deref()
+        .map(|extra| shlex::split(extra).unwrap_or_default())
+        .unwrap_or_default();
     let defs: Vec<ServerDef> = {
         let servers = state.servers.lock().unwrap();
-        running_servers(&servers, "instruct")
-            .into_iter()
-            .map(|server| server.def.clone())
-            .collect()
+        let mut defs = Vec::new();
+        for task in ["instruct", "embed"] {
+            defs.extend(
+                running_servers(&servers, task)
+                    .into_iter()
+                    .map(|server| server.def.clone()),
+            );
+        }
+        defs
     };
     let mut rows = Vec::with_capacity(defs.len());
     for def in defs {
@@ -244,7 +737,8 @@ async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
         } else {
             (None, "unknown")
         };
-        rows.push(model_row(&def, context, source));
+        let args = effective_launch_args(&def, &vllm_args);
+        rows.push(model_row(&def, context, source, args));
     }
     rows
 }
@@ -289,6 +783,349 @@ pub fn model_from_body(body: &[u8]) -> Option<String> {
         .get("model")
         .and_then(|m| m.as_str())
         .map(str::to_string)
+}
+
+fn json_bool(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("true") => Some(true),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("on") => Some(true),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("false") => Some(false),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("off") => Some(false),
+        _ => None,
+    }
+}
+
+fn effort_disables_thinking(effort: &str) -> bool {
+    matches!(
+        effort.trim().to_ascii_lowercase().as_str(),
+        "none" | "off" | "false" | "disabled" | "no"
+    )
+}
+
+/// Best-effort mapping of a harness thinking level onto an on/off toggle.
+/// Unknown non-empty levels are treated as "on": the harness asked for
+/// thinking even if the gateway does not know that vendor's label.
+fn effort_to_toggle(effort: &str) -> Option<bool> {
+    let effort = effort.trim();
+    if effort.is_empty()
+        || effort.eq_ignore_ascii_case("auto")
+        || effort.eq_ignore_ascii_case("default")
+    {
+        None
+    } else {
+        Some(!effort_disables_thinking(effort))
+    }
+}
+
+fn is_toggle_label(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "on" | "true" | "enabled"
+    )
+}
+
+/// Map a harness label onto the vocabulary the target backend accepts.
+/// vLLM's request schema only accepts the standard levels; llama.cpp forwards
+/// unknown levels to the chat template, so vendor-specific labels survive
+/// there.  Toggle-only labels (`on`, `true`, `auto`, ...) return `None`
+/// because they are represented by `chat_template_kwargs.enable_thinking`.
+fn normalize_effort_label(effort: &str, backend: &str) -> Option<String> {
+    let value = effort.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "on" | "true" | "enabled" | "auto" | "default" => None,
+        "none" | "off" | "false" | "disabled" | "no" => Some("none".to_string()),
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => Some(value),
+        _ if backend == "llamacpp" => Some(value),
+        _ => None,
+    }
+}
+
+fn think_toggle(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("true") => Some(true),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("on") => Some(true),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("false") => Some(false),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("off") => Some(false),
+        _ => None,
+    }
+}
+
+fn think_level(value: &serde_json::Value) -> Option<&str> {
+    let value = value.as_str()?.trim();
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("on")
+        || value.eq_ignore_ascii_case("off")
+    {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Read the harness thinking level from every shape we support:
+/// OpenAI `reasoning_effort`, OpenRouter `reasoning.effort`, Anthropic
+/// `thinking.level`, Ollama `think: "high"`, and vLLM/llama.cpp
+/// `chat_template_kwargs.reasoning_effort`.
+fn harness_effort(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let nested = |key: &str| object.get(key).and_then(serde_json::Value::as_object);
+    let value = object
+        .get("reasoning_effort")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            nested("reasoning")
+                .and_then(|value| value.get("effort"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            nested("reasoning")
+                .and_then(|value| value.get("level"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            nested("thinking")
+                .and_then(|value| value.get("level"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| object.get("think").and_then(think_level))
+        .or_else(|| {
+            nested("chat_template_kwargs")
+                .and_then(|value| value.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+        })?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Explicit request toggles, in order of specificity. `chat_template_kwargs`
+/// wins because both backends treat it as the most specific request control.
+fn harness_toggle(object: &serde_json::Map<String, serde_json::Value>) -> Option<bool> {
+    if let Some(kwargs) = object
+        .get("chat_template_kwargs")
+        .and_then(serde_json::Value::as_object)
+    {
+        if let Some(value) = kwargs.get("enable_thinking").and_then(json_bool) {
+            return Some(value);
+        }
+        if let Some(value) = kwargs.get("thinking").and_then(json_bool) {
+            return Some(value);
+        }
+    }
+    if let Some(thinking) = object
+        .get("thinking")
+        .and_then(serde_json::Value::as_object)
+    {
+        if let Some(kind) = thinking.get("type").and_then(serde_json::Value::as_str) {
+            match kind.trim().to_ascii_lowercase().as_str() {
+                "enabled" | "on" => return Some(true),
+                "disabled" | "off" | "none" => return Some(false),
+                _ => {}
+            }
+        }
+    }
+    if let Some(value) = object.get("think").and_then(think_toggle) {
+        return Some(value);
+    }
+    object
+        .get("reasoning")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("enabled"))
+        .and_then(json_bool)
+}
+
+/// Every budget spelling seen from harnesses. Zero is meaningful in both
+/// backends and is preserved.
+fn harness_budget(object: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    for key in [
+        "reasoning_budget_tokens",
+        "thinking_budget_tokens",
+        "thinking_token_budget",
+        "max_thinking_tokens",
+    ] {
+        if let Some(value) = object.get(key).and_then(serde_json::Value::as_u64) {
+            return Some(value);
+        }
+    }
+    object
+        .get("thinking")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("budget_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            object
+                .get("reasoning")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|value| value.get("max_tokens"))
+                .and_then(serde_json::Value::as_u64)
+        })
+}
+
+/// Make harness-controlled fields explicit so they take precedence over any
+/// panel/server defaults (launch flags, `--chat-template-kwargs`,
+/// `--default-chat-template-kwargs`, environment variables, ...).
+///
+/// Both backends already let a request-level `chat_template_kwargs` override
+/// server defaults, but not every harness sends that shape: some send only
+/// `reasoning_effort`, and llama.cpp does not turn that into
+/// `enable_thinking=true` on toggle-style templates.  Canonicalizing here
+/// closes that gap.  Nothing is injected when the harness does not ask for
+/// thinking, so panel settings remain the default for other clients.
+fn apply_harness_precedence(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    backend: &str,
+    context_tokens: Option<usize>,
+) {
+    let raw_effort = harness_effort(object);
+    let effort = raw_effort
+        .as_deref()
+        .and_then(|effort| normalize_effort_label(effort, backend));
+
+    // Canonicalize an effort the harness already sent.  vLLM rejects
+    // toggle-only labels such as "on"/"auto" in its reasoning_effort enum, so
+    // those are represented by the explicit toggle instead.
+    if let Some(current) = object
+        .get("reasoning_effort")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    {
+        match normalize_effort_label(&current, backend) {
+            Some(canonical) if canonical != current => {
+                object.insert(
+                    "reasoning_effort".to_string(),
+                    serde_json::Value::String(canonical),
+                );
+            }
+            None if backend == "vllm" || is_toggle_label(&current) => {
+                object.remove("reasoning_effort");
+            }
+            _ => {}
+        }
+    }
+    if object
+        .get("reasoning_effort")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        if let Some(effort) = &effort {
+            object.insert(
+                "reasoning_effort".to_string(),
+                serde_json::Value::String(effort.clone()),
+            );
+        }
+    }
+
+    let explicit_toggle = harness_toggle(object);
+    let budget = harness_budget(object);
+    // A positive thinking budget is itself a request to think.
+    let toggle = explicit_toggle
+        .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
+        .or_else(|| budget.filter(|value| *value > 0).map(|_| true));
+
+    if let Some(toggle) = toggle {
+        // `chat_template_kwargs.enable_thinking` is the most specific control.
+        // llama.cpp parses `reasoning_effort: "none"` *after* it, so drop that
+        // contradictory value when the harness explicitly enabled thinking.
+        if toggle
+            && explicit_toggle == Some(true)
+            && object
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(effort_disables_thinking)
+        {
+            object.remove("reasoning_effort");
+        }
+
+        let mut kwargs = object
+            .get("chat_template_kwargs")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let current = kwargs.get("enable_thinking");
+        let needs_insert = current.and_then(json_bool) != Some(toggle)
+            || current.is_some_and(|value| !value.is_boolean());
+        if needs_insert {
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(toggle),
+            );
+            object.insert(
+                "chat_template_kwargs".to_string(),
+                serde_json::Value::Object(kwargs),
+            );
+        }
+
+        if backend == "llamacpp" {
+            // A panel `--reasoning-format none` must not hide the reasoning
+            // trace the harness explicitly asked for.  A request-level
+            // `reasoning_format` always overrides the launch default.
+            if toggle && object.get("reasoning_format").is_none() {
+                object.insert(
+                    "reasoning_format".to_string(),
+                    serde_json::Value::String("auto".to_string()),
+                );
+            }
+            // llama.cpp cannot express "unlimited" per request when the panel
+            // set `--reasoning-budget 0` (-1 falls back to the server value),
+            // so an explicit "thinking on" request without a budget gets the
+            // full context window as its budget.
+            if toggle && budget.is_none() && object.get("reasoning_budget_tokens").is_none() {
+                let budget = context_tokens.filter(|value| *value > 0).unwrap_or(32_768);
+                object.insert(
+                    "reasoning_budget_tokens".to_string(),
+                    serde_json::Value::Number((budget as u64).into()),
+                );
+            }
+        }
+    }
+
+    if let Some(budget) = budget {
+        let target = if backend == "vllm" {
+            "thinking_token_budget"
+        } else {
+            "reasoning_budget_tokens"
+        };
+        if object.get(target).is_none() {
+            object.insert(target.to_string(), serde_json::Value::Number(budget.into()));
+        }
+    }
+
+    // OpenAI's newer alias and the Responses-style spelling are not understood
+    // by llama.cpp, and `max_output_tokens` is not understood by either chat
+    // endpoint.  Keep the harness limit effective under the canonical name.
+    if object.get("max_tokens").is_none() {
+        if let Some(value) = object
+            .get("max_completion_tokens")
+            .or_else(|| object.get("max_output_tokens"))
+            .cloned()
+        {
+            object.insert("max_tokens".to_string(), value);
+        }
+    }
+}
+
+/// Normalize a chat request for the target backend.
+///
+/// The original bytes are returned verbatim when the harness did not ask for
+/// any thinking control or OpenAI token-limit alias, so panel settings remain
+/// the default for clients that do not care.  When the harness did ask, the
+/// returned body contains explicit request-level controls that both vLLM and
+/// llama.cpp rank above server defaults.
+fn normalize_chat_request(body: &[u8], backend: &str, context_tokens: Option<usize>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.to_vec();
+    };
+    let original = object.clone();
+    apply_harness_precedence(object, backend, context_tokens);
+    if *object == original {
+        return body.to_vec();
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -703,7 +1540,21 @@ async fn proxy_chat(
     body: &[u8],
     origin: Option<&str>,
 ) -> Result<(), String> {
-    proxy_post(stream, state, port, "/v1/chat/completions", body, origin).await
+    let (backend, context) = {
+        let servers = state.servers.lock().unwrap();
+        servers
+            .values()
+            .find(|server| server.def.port == port)
+            .map(|server| {
+                (
+                    server.def.backend.clone(),
+                    configured_context_tokens(&server.def),
+                )
+            })
+            .unwrap_or_else(|| ("vllm".to_string(), None))
+    };
+    let body = normalize_chat_request(body, &backend, context);
+    proxy_post(stream, state, port, "/v1/chat/completions", &body, origin).await
 }
 
 /// Forward a chat/completions request to the target vLLM port, preserving
@@ -1083,12 +1934,20 @@ mod tests {
     }
 
     #[test]
-    fn test_model_rows_only_lists_running_instruct_servers() {
+    fn test_model_rows_lists_all_running_models_and_excludes_stopped() {
         let servers = running_map();
         let rows = model_rows(&servers);
-        // 2 running instruct servers, prefer the served_model_name for display
+        // Instruct models come first, then the embedding model; the stopped
+        // server must never appear.
         let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
-        assert_eq!(ids, vec!["qwen-7b", "meta-llama/Llama-3.1-8B-Instruct"]);
+        assert_eq!(
+            ids,
+            vec![
+                "qwen-7b",
+                "meta-llama/Llama-3.1-8B-Instruct",
+                "BAAI/bge-small-en"
+            ]
+        );
         assert!(rows
             .iter()
             .all(|r| r["object"] == serde_json::json!("model")));
@@ -1106,12 +1965,272 @@ mod tests {
             "max_context_length",
             "context_window",
             "n_ctx",
+            "max_output_tokens",
+            "max_completion_tokens",
         ] {
             assert_eq!(row[key], serde_json::json!(32_768));
         }
         assert_eq!(row["context_source"], "configured");
+        assert_eq!(row["max_output_tokens_source"], "context_window");
         assert_eq!(row["backend"], "vllm");
         assert_eq!(row["capabilities"]["chat_completions"], true);
+        assert_eq!(row["capabilities"]["system_role"], true);
+    }
+
+    #[test]
+    fn test_model_rows_report_thinking_capability_and_levels() {
+        let mut servers = running_map();
+        {
+            let def = &mut servers.get_mut("srv-a").unwrap().def;
+            def.model_id = "Qwen/Qwen3-8B".into();
+            def.served_model_name = Some("qwen3-8b".into());
+            def.max_model_len = Some(65_536);
+        }
+        let rows = model_rows(&servers);
+        let row = rows.iter().find(|row| row["id"] == "qwen3-8b").unwrap();
+        assert_eq!(row["name"], "srv-a");
+        assert_eq!(row["publisher"], "Qwen");
+        assert_eq!(row["capabilities"]["reasoning"], true);
+        assert_eq!(row["capabilities"]["thinking"], true);
+        assert_eq!(row["reasoning"]["supported"], true);
+        assert_eq!(row["reasoning"]["mode"], "toggle");
+        assert_eq!(row["reasoning"]["levels"], serde_json::json!(["off", "on"]));
+        assert_eq!(row["reasoning"]["default_level"], "on");
+        assert_eq!(
+            row["reasoning"]["control"],
+            "chat_template_kwargs.enable_thinking"
+        );
+        assert_eq!(row["reasoning"]["request_precedence"], "harness");
+        assert!(row["reasoning"]["controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("reasoning_effort")));
+        assert!(row["reasoning"]["controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("thinking_token_budget")));
+        // No --reasoning-parser on this vLLM launch, so reasoning_content is
+        // not returned even though the model can reason.
+        assert_eq!(row["reasoning"]["output"], false);
+        assert_eq!(row["capabilities"]["reasoning_output"], false);
+        assert_eq!(row["capabilities"]["tools"], false);
+        assert!(row["configuration_hints"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|hint| hint
+                .as_str()
+                .unwrap_or_default()
+                .contains("--reasoning-parser"))));
+        assert_eq!(row["max_output_tokens"], serde_json::json!(65_536));
+    }
+
+    #[test]
+    fn test_vllm_launch_args_enable_tools_and_reasoning_output() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.model_id = "Qwen/Qwen3-8B".into();
+        def.max_model_len = Some(32_768);
+        let args: Vec<String> = [
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "hermes",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect();
+        let row = model_row(&def, Some(32_768), "configured", &args);
+        assert_eq!(row["capabilities"]["tools"], true);
+        assert_eq!(row["capabilities"]["parallel_tool_calls"], true);
+        assert_eq!(row["reasoning"]["output"], true);
+        assert_eq!(row["reasoning"]["source"], "launch_args");
+        assert_eq!(
+            row["reasoning"]["control"],
+            "chat_template_kwargs.enable_thinking"
+        );
+        assert_eq!(row["reasoning"]["parameters"]["reasoning_effort"], true);
+        assert_eq!(
+            row["reasoning"]["parameters"]["chat_template_kwargs"]["enable_thinking"],
+            true
+        );
+        assert!(row["supported_parameters"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("tools")));
+        assert!(row.get("configuration_hints").is_none());
+    }
+
+    #[test]
+    fn test_vllm_max_token_cap_is_reported_as_a_hint() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.model_id = "Qwen/Qwen3-8B".into();
+        let args: Vec<String> = [
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "hermes",
+            "--reasoning-parser",
+            "qwen3",
+            "--override-generation-config",
+            r#"{"max_new_tokens":1024}"#,
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect();
+        let row = model_row(&def, Some(32_768), "configured", &args);
+        assert!(row["configuration_hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hint| hint.as_str().unwrap_or_default().contains("max_new_tokens")));    }
+
+    #[test]
+    fn test_gpt_oss_reports_effort_levels() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.model_id = "openai/gpt-oss-120b".into();
+        def.max_model_len = Some(131_072);
+        let args = vec!["--reasoning-parser".to_string(), "openai".to_string()];
+        let row = model_row(&def, Some(131_072), "configured", &args);
+        assert_eq!(row["reasoning"]["mode"], "effort");
+        assert_eq!(
+            row["reasoning"]["levels"],
+            serde_json::json!(["none", "low", "medium", "high"])
+        );
+        assert_eq!(row["reasoning"]["default_level"], "medium");
+        assert_eq!(row["reasoning"]["control"], "reasoning_effort");
+    }
+
+    #[test]
+    fn test_always_on_reasoning_model_has_no_off_level() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.model_id = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B".into();
+        let args = vec!["--reasoning-parser".to_string(), "deepseek_r1".to_string()];
+        let row = model_row(&def, None, "unknown", &args);
+        assert_eq!(row["reasoning"]["mode"], "always_on");
+        assert_eq!(row["reasoning"]["levels"], serde_json::json!(["on"]));
+        assert_eq!(row["reasoning"]["default_level"], "on");
+        assert_eq!(row["reasoning"]["control"], "none");
+    }
+
+    #[test]
+    fn test_llamacpp_reports_vision_and_jinja_tools() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        def.model_id = "Qwen/Qwen3-VL-8B-Thinking-GGUF".into();
+        def.max_model_len = None;
+        def.ctx_size = Some(131_072);
+        def.jinja = true;
+        def.mmproj_path = Some("/models/mmproj.gguf".into());
+        let row = model_row(&def, Some(131_072), "configured", &[]);
+        assert_eq!(row["capabilities"]["vision"], true);
+        assert_eq!(
+            row["architecture"]["input_modalities"],
+            serde_json::json!(["text", "image"])
+        );
+        assert_eq!(row["capabilities"]["tools"], true);
+        assert_eq!(row["reasoning"]["supported"], true);
+        // llama.cpp parses think tags by default when the template emits them.
+        assert_eq!(row["reasoning"]["output"], true);
+        assert_eq!(row["reasoning"]["source"], "model_family");
+        assert_eq!(row["reasoning"]["request_precedence"], "harness");
+        assert_eq!(
+            row["reasoning"]["parameters"]["reasoning_budget_tokens"],
+            true
+        );
+        assert!(row["reasoning"]["controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("reasoning_budget_tokens")));
+        assert!(row["reasoning"]["controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("reasoning_format")));
+        assert_eq!(row["type"], "vlm");
+        assert_eq!(row["compatibility_type"], "gguf");
+        assert_eq!(row["context_length"], serde_json::json!(131_072));
+    }
+
+    #[test]
+    fn test_llamacpp_without_jinja_reports_tools_disabled() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        def.model_id = "Qwen/Qwen2.5-7B-Instruct-GGUF".into();
+        def.jinja = false;
+        let row = model_row(&def, None, "unknown", &[]);
+        assert_eq!(row["capabilities"]["tools"], false);
+        assert!(row["configuration_hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hint| hint.as_str().unwrap_or_default().contains("--jinja")));
+    }
+
+    #[test]
+    fn test_llamacpp_without_jinja_reports_thinking_as_not_overridable() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        def.model_id = "Qwen/Qwen3-8B-GGUF".into();
+        def.jinja = false;
+        let row = model_row(&def, None, "unknown", &[]);
+        assert_eq!(row["reasoning"]["supported"], true);
+        assert_eq!(row["reasoning"]["enabled_overridable"], false);
+        assert_eq!(row["reasoning"]["control"], "none");
+        assert_eq!(
+            row["reasoning"]["parameters"]["chat_template_kwargs"]["enable_thinking"],
+            false
+        );
+        assert!(!row["reasoning"]["controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("reasoning_effort")));
+    }
+
+    #[test]
+    fn test_llamacpp_panel_reasoning_locks_are_request_overridable() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        def.model_id = "Qwen/Qwen3-8B-GGUF".into();
+        def.extra_args = vec![
+            "--reasoning".into(),
+            "off".into(),
+            "--reasoning-format".into(),
+            "none".into(),
+            "--reasoning-budget".into(),
+            "0".into(),
+        ];
+        let row = model_row(&def, Some(16_384), "configured", &def.extra_args);
+        assert_eq!(row["reasoning"]["enabled_by_default"], false);
+        assert_eq!(row["reasoning"]["output"], false);
+        assert_eq!(row["reasoning"]["enabled_overridable"], true);
+        assert_eq!(row["reasoning"]["output_overridable"], true);
+
+        // The harness request becomes explicit about every thinking control,
+        // so the panel's launch defaults cannot keep thinking off.
+        let body = br#"{"model":"qwen3","messages":[],"reasoning_effort":"high"}"#;
+        let normalized = normalize_chat_request(body, "llamacpp", Some(16_384));
+        let value: serde_json::Value = serde_json::from_slice(&normalized).unwrap();
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(value["reasoning_format"], "auto");
+        assert_eq!(value["reasoning_budget_tokens"], 16_384);
+    }
+
+    #[test]
+    fn test_embedding_model_reports_embedding_modalities() {
+        let servers = running_map();
+        let rows = model_rows(&servers);
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == "BAAI/bge-small-en")
+            .unwrap();
+        assert_eq!(row["type"], "embeddings");
+        assert_eq!(row["capabilities"]["embeddings"], true);
+        assert_eq!(row["capabilities"]["tools"], false);
+        assert_eq!(row["capabilities"]["reasoning"], false);
+        assert_eq!(row["supports_embeddings"], true);
+        assert_eq!(row["max_output_tokens"], serde_json::Value::Null);
+        assert_eq!(
+            row["architecture"]["output_modalities"],
+            serde_json::json!(["embedding"])
+        );
+        assert_eq!(row["architecture"]["modality"], "text->embedding");
     }
 
     #[test]
@@ -1248,5 +2367,304 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("Authorization".to_string(), "Bearer secret123".to_string());
         assert!(check_gateway_auth(&headers, Some("secret123")).is_ok());
+    }
+
+    fn normalized(body: &str, backend: &str, context: Option<usize>) -> serde_json::Value {
+        let bytes = normalize_chat_request(body.as_bytes(), backend, context);
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn test_normalize_chat_request_untouched_without_harness_controls() {
+        let body = r#"{
+            "model": "qwen-7b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2,
+            "max_tokens": 256,
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "f"}}]
+        }"#;
+        for backend in ["vllm", "llamacpp"] {
+            assert_eq!(
+                normalize_chat_request(body.as_bytes(), backend, Some(8_192)),
+                body.as_bytes()
+            );
+        }
+        assert_eq!(
+            normalize_chat_request(b"not json", "vllm", None),
+            b"not json".to_vec()
+        );
+        assert_eq!(
+            normalize_chat_request(br#"["not","an","object"]"#, "vllm", None),
+            br#"["not","an","object"]"#.to_vec()
+        );
+    }
+
+    #[test]
+    fn test_normalize_chat_request_reasoning_effort_becomes_explicit_toggle() {
+        for backend in ["vllm", "llamacpp"] {
+            let value = normalized(
+                r#"{"model":"qwen3","messages":[],"reasoning_effort":"high"}"#,
+                backend,
+                Some(8_192),
+            );
+            assert_eq!(value["reasoning_effort"], "high");
+            assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+        }
+
+        let value = normalized(
+            r#"{"model":"qwen3","messages":[],"reasoning_effort":"none"}"#,
+            "vllm",
+            Some(8_192),
+        );
+        assert_eq!(value["reasoning_effort"], "none");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn test_normalize_chat_request_explicit_kwargs_win_over_effort() {
+        let value = normalized(
+            r#"{
+                "model": "qwen3",
+                "messages": [],
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"enable_thinking": false, "custom": "keep"}
+            }"#,
+            "llamacpp",
+            Some(8_192),
+        );
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(value["chat_template_kwargs"]["custom"], "keep");
+
+        // llama.cpp parses reasoning_effort=none after the kwargs, so the
+        // gateway drops the contradictory effort when kwargs explicitly
+        // enable thinking.
+        let value = normalized(
+            r#"{
+                "model": "qwen3",
+                "messages": [],
+                "reasoning_effort": "none",
+                "chat_template_kwargs": {"enable_thinking": true}
+            }"#,
+            "llamacpp",
+            Some(8_192),
+        );
+        assert!(value.get("reasoning_effort").is_none());
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn test_normalize_chat_request_accepts_common_harness_shapes() {
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning":{"effort":"low"}}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(value["reasoning_effort"], "low");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"think":"high"}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(value["reasoning_effort"], "high");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"think":false}"#,
+            "llamacpp",
+            None,
+        );
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"thinking":{"type":"disabled"}}"#,
+            "llamacpp",
+            None,
+        );
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning":{"enabled":true}}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"chat_template_kwargs":{"enable_thinking":"true"}}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn test_normalize_chat_request_canonicalizes_effort_labels() {
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"off"}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(value["reasoning_effort"], "none");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"thinking":{"level":"disabled"}}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(value["reasoning_effort"], "none");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
+
+        // vLLM's reasoning_effort enum does not accept toggle-only labels;
+        // the explicit toggle carries the signal instead.
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"on"}"#,
+            "vllm",
+            None,
+        );
+        assert!(value.get("reasoning_effort").is_none());
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"on"}"#,
+            "llamacpp",
+            None,
+        );
+        assert!(value.get("reasoning_effort").is_none());
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"auto"}"#,
+            "vllm",
+            None,
+        );
+        assert!(value.get("reasoning_effort").is_none());
+        assert!(value.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn test_normalize_chat_request_maps_budgets_per_backend() {
+        let llama = normalized(
+            r#"{"model":"m","messages":[],"thinking":{"type":"enabled","budget_tokens":2048}}"#,
+            "llamacpp",
+            Some(16_384),
+        );
+        assert_eq!(llama["reasoning_budget_tokens"], 2048);
+        assert_eq!(llama["reasoning_format"], "auto");
+        assert_eq!(llama["chat_template_kwargs"]["enable_thinking"], true);
+
+        let vllm = normalized(
+            r#"{"model":"m","messages":[],"thinking":{"type":"enabled","budget_tokens":2048}}"#,
+            "vllm",
+            Some(16_384),
+        );
+        assert_eq!(vllm["thinking_token_budget"], 2048);
+        assert!(vllm.get("reasoning_budget_tokens").is_none());
+        assert!(vllm.get("reasoning_format").is_none());
+
+        // llama.cpp names, mapped onto vLLM's field.
+        let vllm = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"low","reasoning_budget_tokens":512}"#,
+            "vllm",
+            None,
+        );
+        assert_eq!(vllm["thinking_token_budget"], 512);
+
+        // vLLM name, mapped onto llama.cpp's field.
+        let llama = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"low","thinking_token_budget":512}"#,
+            "llamacpp",
+            None,
+        );
+        assert_eq!(llama["reasoning_budget_tokens"], 512);
+
+        // An explicit harness budget is never replaced by the context-window
+        // fallback that protects against a panel `--reasoning-budget 0`.
+        let llama = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"high","reasoning_budget_tokens":77}"#,
+            "llamacpp",
+            Some(16_384),
+        );
+        assert_eq!(llama["reasoning_budget_tokens"], 77);
+
+        // No harness budget: enabling thinking grants the full context so a
+        // panel budget cannot cut the requested thinking short.
+        let llama = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"high"}"#,
+            "llamacpp",
+            Some(16_384),
+        );
+        assert_eq!(llama["reasoning_budget_tokens"], 16_384);
+    }
+
+    #[test]
+    fn test_normalize_chat_request_preserves_explicit_reasoning_format() {
+        let value = normalized(
+            r#"{"model":"m","messages":[],"reasoning_effort":"high","reasoning_format":"none"}"#,
+            "llamacpp",
+            None,
+        );
+        assert_eq!(value["reasoning_format"], "none");
+    }
+
+    #[test]
+    fn test_normalize_chat_request_maps_max_token_aliases() {
+        for backend in ["vllm", "llamacpp"] {
+            let value = normalized(
+                r#"{"model":"m","messages":[],"max_completion_tokens":123}"#,
+                backend,
+                None,
+            );
+            assert_eq!(value["max_tokens"], 123);
+
+            let value = normalized(
+                r#"{"model":"m","messages":[],"max_output_tokens":64}"#,
+                backend,
+                None,
+            );
+            assert_eq!(value["max_tokens"], 64);
+
+            let value = normalized(
+                r#"{"model":"m","messages":[],"max_tokens":10,"max_completion_tokens":123}"#,
+                backend,
+                None,
+            );
+            assert_eq!(value["max_tokens"], 10);
+        }
+    }
+
+    #[test]
+    fn test_normalize_chat_request_preserves_all_other_harness_fields() {
+        let body = r#"{
+            "model": "qwen3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "medium",
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "top_k": 20,
+            "seed": 7,
+            "stop": ["\n\n"],
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "response_format": {"type": "json_object"}
+        }"#;
+        let value = normalized(body, "vllm", Some(8_192));
+        assert_eq!(value["model"], "qwen3");
+        assert_eq!(value["temperature"], 0.3);
+        assert_eq!(value["top_p"], 0.9);
+        assert_eq!(value["top_k"], 20);
+        assert_eq!(value["seed"], 7);
+        assert_eq!(value["stream"], true);
+        assert_eq!(value["tool_choice"], "auto");
+        assert_eq!(value["parallel_tool_calls"], true);
+        assert_eq!(value["response_format"]["type"], "json_object");
+        assert_eq!(value["messages"][0]["content"], "hi");
+        assert_eq!(value["tools"][0]["function"]["name"], "f");
+        assert_eq!(value["stop"][0], "\n\n");
     }
 }

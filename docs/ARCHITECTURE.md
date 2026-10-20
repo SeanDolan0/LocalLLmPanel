@@ -47,8 +47,9 @@ External Client (Cursor, Continue, etc.)
          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  gateway.rs — single port, routes by model name             │
-│    • GET  /v1/models          → lists running instruct servers │
-│                                  + effective context metadata   │
+│    • GET  /v1/models          → running instruct + embedding    │
+│                                  servers, with context/capability│
+│                                  metadata (name, thinking, tools)│
 │    • GET  /v1/models/{id}     → model detail + same metadata    │
 │    • POST /v1/chat/completions→ find_server_port_for(model)   │
 │    • Streams SSE frames back to client                       │
@@ -66,7 +67,9 @@ changes `.wslconfig`; llama.cpp remains usable when WSL has not been provisioned
 ### `gateway.rs`
 - **Unified OpenAI-compatible reverse proxy** listening on port 11434 (default, Ollama-compatible).
 - `find_server_port_for(servers, model, task)` — routes by exact or fuzzy match on served model name or HF id against running `instruct` servers.
-- `model_rows(servers)` — emits OpenAI `/v1/models` rows with the served id, backend metadata, and effective context fields (`max_model_len`, `context_length`, `max_context_length`, `context_window`, `n_ctx`). The configured launch value is preferred; implicit vLLM/llama.cpp limits are read from the running backend.
+- `model_rows(servers)` — emits OpenAI `/v1/models` rows for every running server (instruct first, then embeddings). Each row includes the served id plus `name`, `root`, `publisher`, `type`, `state`, `quantization`, `compatibility_type`, and the effective context under `max_model_len` / `context_length` / `max_context_length` / `context_window` / `n_ctx`. The configured launch value is preferred; implicit vLLM/llama.cpp limits are read from the running backend. Rows also report `max_output_tokens`, input/output modalities, and capability aliases (`supports_tools`, `supports_vision`, `supports_reasoning`, `supports_embeddings`).
+- **Thinking metadata** — each row carries `reasoning` (and a `thinking` alias) with `supported`, `output`, `enabled_by_default`, `mode` (`toggle` / `effort` / `always_on`), `levels` (`["off","on"]` or `["none","low","medium","high"]`), `default_level`, the request `control`, the full `controls` list, and `request_precedence: "harness"`. `supported` means the model family can reason; `output` means the running backend will actually return `reasoning_content`. vLLM needs `--reasoning-parser` for the latter and `--enable-auto-tool-choice` + `--tool-call-parser` for tools; llama.cpp needs `--jinja` for tools. `configuration_hints` lists the exact missing flags when a capability is disabled by launch configuration.
+- **Harness precedence** — panel launch flags (and environment variables) only provide defaults. Before forwarding `/v1/chat/completions`, the gateway canonicalizes every harness thinking shape (`reasoning_effort`, `reasoning.effort`, `thinking.type`/`budget_tokens`, Ollama `think`, `chat_template_kwargs.enable_thinking`/`thinking`, and the various budget spellings) into explicit request-level fields. Both backends rank explicit `chat_template_kwargs` above their launch defaults, llama.cpp ranks request `reasoning_format` above `--reasoning-format`, and request `reasoning_budget_tokens` above `--reasoning-budget`; when thinking is enabled without a harness budget, the gateway supplies the context window so a panel `--reasoning-budget 0` cannot suppress it. Requests that touch neither thinking nor token-limit aliases are forwarded byte-for-byte, so no gateway defaults are injected. `max_completion_tokens` / `max_output_tokens` are mapped to `max_tokens` so output limits also survive the proxy.
 - Hand-rolled HTTP/1.1 framing (Tokio `TcpListener` + `AsyncReadExt`/`AsyncWriteExt`) — no external HTTP deps.
 - Streams SSE `data:` frames bidirectionally; copies headers, handles `Content-Length` and chunked encoding.
 - `spawn_supervisor(app_handle)` — background task binds port, accepts connections, routes per-request.
@@ -126,7 +129,7 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `start(def)` — compose launch script; spawn via `wsl.rs::spawn_script`; write `~/llm-lp/run/<id>.pid` with the WSL-side PID (script prints `$$` after `exec`-less start); poll `/health` until 200 or timeout (300s); emit `server-status`.
 - `stop(id)` — read pidfile → `wsl -d <distro> -- kill -TERM <pid>`; poll health down (30s); fallback terminate child process tree (`taskkill /T /F /PID <wslpid>`); emit status.
 - `logs(id)` — streaming: child stdout/stderr chunks accumulated in an in-memory ring buffer (per server) AND appended to `~/llm-lp/logs/<id>.log` in WSL (via `tee` in launcher) for restart-persistence.
-- `metrics(id)` — GET `:port/metrics`, parse Prometheus counters `vllm:generation_tokens_total`, `vllm:prompt_tokens_total`, `vllm:num_requests_running`; delta between polls → measured tok/s (prompt+generation split), persisted to `state.rs`.
+- `metrics(id)` — GET `:port/metrics` (with the server API key when configured), strip Prometheus label suffixes, and sum per-label series. Supports vLLM (`vllm:*`, labelled by `model_name`/`finished_reason`) and llama.cpp (`llamacpp:*`): requests running/waiting, prompt/generation totals, KV-cache usage, prefix-cache hit rate, TTFT/E2E/queue/prefill latency histograms, preemptions, and instant throughput gauges. Counter deltas between polls produce decode/prefill tok/s and request rate, persisted to `state.rs` and streamed to the Servers metrics panel.
 - `chat(id, messages)` — POST `:port/v1/chat/completions` (instruct servers only) from Rust (avoids webview CORS).
 - `build_llamacpp_args` — pure mapping of persisted llama.cpp settings to `llama-server` flags; the runtime filters flags against the installed `--help` output.
 - Native launch fitting is capability-gated: `--fit on/off` and `--fit-target` are emitted only when supported, while `n_cpu_moe` remains the manual fallback. Structured settings take precedence over arbitrary extra flags, and all `--override-kv` entries (including the AgentWorld metadata workaround) are merged into one last-wins list.

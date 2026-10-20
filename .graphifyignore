@@ -1,0 +1,29 @@
+# graphify corpus scoping
+#
+# Everything below is excluded so the knowledge graph reflects the *architecture*
+# of the panel (Rust core, React frontend, build/release scripts, docs) instead
+# of app artwork and the community benchmark corpus.
+#
+# Rationale: these two trees were 403 of 509 detected files. They parse into
+# thousands of nodes with no cross-module structure, which drowns community
+# detection. Re-include them if you need model/hardware lookups over the graph.
+
+# Tauri app icons - 49 binary PNGs, no architectural signal
+src-tauri/icons/
+
+# Community-submitted hardware benchmark profiles - 354 tiny JSONs.
+# Query these directly (jq, ripgrep) rather than through the graph.
+src-tauri/crates/llmfit-core/data/community/
+
+# Local model/quant catalogs, large and machine-specific
+src-tauri/crates/llmfit-core/data/hf_models.json
+src-tauri/crates/llmfit-core/data/onnx_models.json
+src-tauri/crates/llmfit-core/data/benchmark_cache.json
+
+# Test fixtures
+src-tauri/crates/llmfit-core/tests/fixtures/
+
+# Build output and graphify's own artifacts
+dist/
+dist-release/
+graphify-out/

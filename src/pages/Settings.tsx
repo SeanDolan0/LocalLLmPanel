@@ -970,7 +970,7 @@ export default function Settings() {
               <div className="sm:col-span-2">
                 <Field
                   label="Extra vLLM Launch CLI Arguments"
-                  hint="Arbitrary CLI flags appended directly to python -m vllm.entrypoints.openai.api_server."
+                  hint="Arbitrary CLI flags appended directly to python -m vllm.entrypoints.openai.api_server. These are server defaults: request parameters from your harness (reasoning_effort, temperature, max_tokens, tools, …) take precedence."
                 >
                   <input
                     className={inputCls}

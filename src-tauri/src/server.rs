@@ -1218,8 +1218,10 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
 
         // Metrics + liveness loop
         let metrics_url = format!("http://127.0.0.1:{}/metrics", def.port);
+        let metrics_api_key = server_api_key(&state_task, &def);
         let mut last_gen = 0u64;
         let mut last_prompt = 0u64;
+        let mut last_requests = 0u64;
         let mut last_measured_at = now_ms();
         let mut first_sample = true;
         loop {
@@ -1314,29 +1316,49 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             }
 
             if def.metrics {
-                if let Ok(resp) = http.get(&metrics_url).send().await {
+                let request = apply_vllm_auth(http.get(&metrics_url), metrics_api_key.as_deref());
+                if let Ok(resp) = request.send().await {
                     if let Ok(text) = resp.text().await {
                         if let Some(m) = parse_metrics(&text) {
-                            let measured = if first_sample {
+                            let now = now_ms();
+                            let dt = now.saturating_sub(last_measured_at).max(1000) as f64 / 1000.0;
+                            let gen_delta = m.total_generation_tokens.saturating_sub(last_gen);
+                            let prompt_delta = m.total_prompt_tokens.saturating_sub(last_prompt);
+                            let request_delta = m.requests.saturating_sub(last_requests);
+                            let tok_s = if first_sample {
+                                m.predicted_tok_s.unwrap_or(0.0)
+                            } else {
+                                gen_delta as f64 / dt
+                            };
+                            let prompt_tok_s = if first_sample {
+                                m.prompt_tok_s.unwrap_or(0.0)
+                            } else {
+                                prompt_delta as f64 / dt
+                            };
+                            let requests_per_sec = if first_sample || !m.requests_available {
                                 None
                             } else {
-                                let dt = (now_ms() - last_measured_at).max(1000) as f64 / 1000.0;
+                                Some(request_delta as f64 / dt)
+                            };
+                            let measured = if first_sample
+                                && m.predicted_tok_s.is_none()
+                                && m.prompt_tok_s.is_none()
+                            {
+                                None
+                            } else {
                                 Some(crate::state::MeasuredStats {
-                                    tokens_per_sec: Some(
-                                        ((m.total_generation_tokens - last_gen) as f64) / dt,
-                                    ),
-                                    prompt_tokens_per_sec: Some(
-                                        ((m.total_prompt_tokens - last_prompt) as f64) / dt,
-                                    ),
+                                    tokens_per_sec: Some(tok_s),
+                                    prompt_tokens_per_sec: Some(prompt_tok_s),
                                     total_prompt_tokens: m.total_prompt_tokens,
                                     total_generation_tokens: m.total_generation_tokens,
                                     requests: m.requests,
-                                    measured_at_ms: Some(now_ms()),
+                                    measured_at_ms: Some(now),
                                 })
                             };
                             last_gen = m.total_generation_tokens;
                             last_prompt = m.total_prompt_tokens;
-                            last_measured_at = now_ms();
+                            last_requests = m.requests;
+                            last_measured_at = now;
                             first_sample = false;
                             let snapshot = MetricsSnapshot {
                                 running: m.running,
@@ -1344,24 +1366,31 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                                 total_prompt_tokens: m.total_prompt_tokens,
                                 total_generation_tokens: m.total_generation_tokens,
                                 requests: m.requests,
+                                requests_available: m.requests_available,
+                                requests_per_sec,
+                                kv_cache_pct: m.kv_cache_pct,
+                                cache_hit_pct: m.cache_hit_pct,
+                                ttft_ms: m.ttft_ms,
+                                e2e_latency_ms: m.e2e_latency_ms,
+                                queue_time_ms: m.queue_time_ms,
+                                prefill_time_ms: m.prefill_time_ms,
+                                preemptions: m.preemptions,
+                                prompt_tokens_cached: m.prompt_tokens_cached,
                                 measured: measured.clone(),
                             };
-                            let tok_s = measured
-                                .as_ref()
-                                .and_then(|ms| ms.tokens_per_sec)
-                                .unwrap_or(0.0);
-                            let prompt_tok_s = measured
-                                .as_ref()
-                                .and_then(|ms| ms.prompt_tokens_per_sec)
-                                .unwrap_or(0.0);
                             state_task.record_server_metric(
                                 &id_task,
                                 crate::state::ServerMetricPoint {
-                                    timestamp: now_ms(),
+                                    timestamp: now,
                                     tok_s,
                                     prompt_tok_s,
                                     requests_running: m.running,
                                     requests_waiting: m.waiting,
+                                    kv_cache_pct: m.kv_cache_pct,
+                                    cache_hit_pct: m.cache_hit_pct,
+                                    ttft_ms: m.ttft_ms,
+                                    e2e_latency_ms: m.e2e_latency_ms,
+                                    requests_per_sec,
                                 },
                             );
                             {
@@ -1696,77 +1725,285 @@ pub struct Metrics {
     pub total_prompt_tokens: u64,
     pub total_generation_tokens: u64,
     pub requests: u64,
+    pub requests_available: bool,
+    pub kv_cache_pct: Option<f64>,
+    pub cache_hit_pct: Option<f64>,
+    pub ttft_ms: Option<f64>,
+    pub e2e_latency_ms: Option<f64>,
+    pub queue_time_ms: Option<f64>,
+    pub prefill_time_ms: Option<f64>,
+    pub preemptions: u64,
+    pub prompt_tokens_cached: u64,
+    /// Instantaneous throughput gauges exposed by llama.cpp.  vLLM does not
+    /// expose these, so the monitor normally derives throughput from counter
+    /// deltas instead.
+    pub predicted_tok_s: Option<f64>,
+    pub prompt_tok_s: Option<f64>,
 }
 
-/// Parse the Prometheus text from vLLM `/metrics`.
+/// Return the first alias present in the summed sample map.
+fn metric_first(sums: &BTreeMap<String, f64>, names: &[&str]) -> Option<f64> {
+    names.iter().find_map(|name| sums.get(*name).copied())
+}
+
+/// Sum all aliases present in the summed sample map.
+fn metric_total(sums: &BTreeMap<String, f64>, names: &[&str]) -> Option<f64> {
+    let mut found = false;
+    let mut total = 0.0;
+    for name in names {
+        if let Some(value) = sums.get(*name) {
+            found = true;
+            total += *value;
+        }
+    }
+    found.then_some(total)
+}
+
+/// Compute the mean of a Prometheus histogram from its `_sum` and `_count`
+/// samples.  vLLM histograms are labelled per model, so both are pre-summed.
+fn histogram_avg_ms(sums: &BTreeMap<String, f64>, base: &str) -> Option<f64> {
+    let sum = sums.get(&format!("{base}_sum")).copied();
+    let count = sums.get(&format!("{base}_count")).copied();
+    match (sum, count) {
+        (Some(sum), Some(count)) if count > 0.0 => Some(sum / count * 1000.0),
+        _ => None,
+    }
+}
+
+/// Parse Prometheus text from vLLM or llama.cpp `/metrics`.
+///
+/// Both backends label many samples (for example
+/// `vllm:num_requests_running{model_name="..."}`), and vLLM emits one
+/// `request_success_total` series per finish reason.  Strip the label suffix
+/// and sum all series that share a metric name before interpreting values.
 pub fn parse_metrics(text: &str) -> Option<Metrics> {
-    let mut m = Metrics::default();
-    let mut saw = false;
+    let mut sums: BTreeMap<String, f64> = BTreeMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        let Some((name, value)) = line.split_once(' ') else {
+        // Split the sample name/labels from the value.  Label values may
+        // contain spaces, so prefer the closing brace when present.
+        let (name_part, rest) = if let Some(close) = line.rfind('}') {
+            (&line[..=close], &line[close + 1..])
+        } else {
+            let Some(split) = line.find(char::is_whitespace) else {
+                continue;
+            };
+            (&line[..split], &line[split..])
+        };
+        let Some(value) = rest.split_whitespace().next() else {
             continue;
         };
-        let Ok(val) = value.trim().parse::<f64>() else {
+        let Ok(value) = value.parse::<f64>() else {
             continue;
         };
-        match name {
-            "vllm:num_requests_running"
-            | "vllm:num_requests_running_gauge"
-            | "llama_requests_processing"
-            | "llamacpp_requests_processing" => {
-                m.running = val as u64;
-                saw = true;
-            }
-            "vllm:num_requests_waiting" | "vllm:num_requests_waiting_gauge" => {
-                m.waiting = val as u64;
-                saw = true;
-            }
-            "vllm:prompt_tokens_total"
-            | "vllm:prompt_tokens_succeeded_total"
-            | "llama_prompt_tokens_total"
-            | "llama_prompt_tokens"
-            | "llamacpp_prompt_tokens_total"
-            | "llamacpp_prompt_tokens" => {
-                m.total_prompt_tokens = val as u64;
-                saw = true;
-            }
-            "vllm:generation_tokens_total"
-            | "vllm:generation_tokens_succeeded_total"
-            | "llama_generation_tokens_total"
-            | "llama_tokens_predicted_total"
-            | "llama_generation_tokens"
-            | "llamacpp_tokens_predicted_total"
-            | "llamacpp_generation_tokens_total" => {
-                m.total_generation_tokens = val as u64;
-                saw = true;
-            }
-            "vllm:generation_tokens_failed_total" => {
-                m.total_generation_tokens += val as u64;
-                saw = true;
-            }
-            "vllm:request_success_total"
-            | "vllm:requests_succeeded_total"
-            | "llama_requests_total"
-            | "llama_requests_completed_total"
-            | "llamacpp_requests_total"
-            | "llamacpp_requests_completed_total" => {
-                m.requests = val as u64;
-                saw = true;
-            }
-            _ => {}
+        let name = name_part.split('{').next().unwrap_or(name_part).trim();
+        if name.is_empty() {
+            continue;
         }
+        *sums.entry(name.to_string()).or_insert(0.0) += value;
     }
 
-    if saw {
-        Some(m)
-    } else {
-        None
+    let running = metric_first(
+        &sums,
+        &[
+            "vllm:num_requests_running",
+            "vllm:num_requests_running_gauge",
+            "llamacpp:requests_processing",
+            "llama_requests_processing",
+            "llamacpp_requests_processing",
+        ],
+    );
+    let waiting = metric_first(
+        &sums,
+        &[
+            "vllm:num_requests_waiting",
+            "vllm:num_requests_waiting_gauge",
+            "llamacpp:requests_deferred",
+            "llama_requests_deferred",
+            "llamacpp_requests_deferred",
+        ],
+    );
+    let prompt_tokens = metric_first(
+        &sums,
+        &[
+            "vllm:prompt_tokens_total",
+            "vllm:prompt_tokens",
+            "vllm:prompt_tokens_succeeded_total",
+            "llamacpp:prompt_tokens_total",
+            "llamacpp:prompt_tokens",
+            "llama_prompt_tokens_total",
+            "llama_prompt_tokens",
+            "llamacpp_prompt_tokens_total",
+        ],
+    );
+    let generation_tokens = metric_first(
+        &sums,
+        &[
+            "vllm:generation_tokens_total",
+            "vllm:generation_tokens",
+            "llamacpp:tokens_predicted_total",
+            "llamacpp:generation_tokens_total",
+            "llama_generation_tokens_total",
+            "llama_tokens_predicted_total",
+            "llama_generation_tokens",
+            "llamacpp_tokens_predicted_total",
+        ],
+    )
+    .or_else(|| {
+        // Very old vLLM builds exposed success/failure counters separately.
+        metric_total(
+            &sums,
+            &[
+                "vllm:generation_tokens_succeeded_total",
+                "vllm:generation_tokens_failed_total",
+            ],
+        )
+    });
+    let requests = metric_first(
+        &sums,
+        &[
+            "vllm:request_success_total",
+            "vllm:request_success",
+            "vllm:requests_succeeded_total",
+            "llamacpp:requests_total",
+            "llamacpp:requests_completed_total",
+            "llama_requests_total",
+            "llama_requests_completed_total",
+            "llamacpp_requests_total",
+        ],
+    );
+    let kv_cache_raw = metric_first(
+        &sums,
+        &[
+            "vllm:kv_cache_usage_perc",
+            "vllm:kv_cache_usage_percent",
+            "vllm:gpu_cache_usage_perc",
+            "llamacpp:kv_cache_usage_ratio",
+            "llama_kv_cache_usage_ratio",
+        ],
+    );
+    let kv_cache_pct = kv_cache_raw.map(|value| {
+        // vLLM and llama.cpp expose a 0..1 ratio; tolerate backends that
+        // already report a percentage.
+        if value <= 1.0 {
+            (value * 100.0).clamp(0.0, 100.0)
+        } else {
+            value.clamp(0.0, 100.0)
+        }
+    });
+    let prompt_tokens_cached = metric_first(
+        &sums,
+        &[
+            "vllm:prompt_tokens_cached",
+            "llamacpp:prompt_tokens_cached_total",
+            "llamacpp:prompt_tokens_cached",
+            "llama_prompt_tokens_cached_total",
+        ],
+    )
+    .unwrap_or(0.0) as u64;
+    let prefix_hits = metric_first(
+        &sums,
+        &[
+            "vllm:prefix_cache_hits",
+            "vllm:prefix_cache_hits_total",
+            "vllm:gpu_prefix_cache_hits_total",
+        ],
+    );
+    let prefix_queries = metric_first(
+        &sums,
+        &[
+            "vllm:prefix_cache_queries",
+            "vllm:prefix_cache_queries_total",
+            "vllm:gpu_prefix_cache_queries_total",
+        ],
+    );
+    let direct_cache_hit_rate = metric_first(
+        &sums,
+        &[
+            "vllm:gpu_prefix_cache_hit_rate",
+            "vllm:cpu_prefix_cache_hit_rate",
+            "vllm:prefix_cache_hit_rate",
+        ],
+    );
+    let cache_hit_pct = match (prefix_hits, prefix_queries) {
+        (Some(hits), Some(queries)) if queries > 0.0 => {
+            Some((hits / queries * 100.0).clamp(0.0, 100.0))
+        }
+        _ if direct_cache_hit_rate.is_some() => direct_cache_hit_rate
+            .map(|rate| (rate * 100.0).clamp(0.0, 100.0)),
+        _ if prompt_tokens_cached > 0 => {
+            let prompt = prompt_tokens.unwrap_or(0.0);
+            let total = prompt + prompt_tokens_cached as f64;
+            (total > 0.0).then_some((prompt_tokens_cached as f64 / total * 100.0).clamp(0.0, 100.0))
+        }
+        _ => None,
+    };
+    let ttft_ms = histogram_avg_ms(&sums, "vllm:time_to_first_token_seconds");
+    let e2e_latency_ms = histogram_avg_ms(&sums, "vllm:e2e_request_latency_seconds");
+    let queue_time_ms = histogram_avg_ms(&sums, "vllm:request_queue_time_seconds");
+    let prefill_time_ms = histogram_avg_ms(&sums, "vllm:request_prefill_time_seconds");
+    let preemptions = metric_first(
+        &sums,
+        &["vllm:num_preemptions_total", "vllm:num_preemptions"],
+    )
+    .unwrap_or(0.0) as u64;
+    let predicted_tok_s = metric_first(
+        &sums,
+        &[
+            "llamacpp:predicted_tokens_seconds",
+            "llamacpp:generation_tokens_seconds",
+            "llama_predicted_tokens_seconds",
+        ],
+    );
+    let prompt_tok_s = metric_first(
+        &sums,
+        &[
+            "llamacpp:prompt_tokens_seconds",
+            "llama_prompt_tokens_seconds",
+        ],
+    );
+
+    let saw = running.is_some()
+        || waiting.is_some()
+        || prompt_tokens.is_some()
+        || generation_tokens.is_some()
+        || requests.is_some()
+        || kv_cache_pct.is_some()
+        || cache_hit_pct.is_some()
+        || ttft_ms.is_some()
+        || e2e_latency_ms.is_some()
+        || queue_time_ms.is_some()
+        || prefill_time_ms.is_some()
+        || preemptions > 0
+        || prompt_tokens_cached > 0
+        || predicted_tok_s.is_some()
+        || prompt_tok_s.is_some();
+    if !saw {
+        return None;
     }
+
+    Some(Metrics {
+        running: running.unwrap_or(0.0).max(0.0) as u64,
+        waiting: waiting.unwrap_or(0.0).max(0.0) as u64,
+        total_prompt_tokens: prompt_tokens.unwrap_or(0.0).max(0.0) as u64,
+        total_generation_tokens: generation_tokens.unwrap_or(0.0).max(0.0) as u64,
+        requests: requests.unwrap_or(0.0).max(0.0) as u64,
+        requests_available: requests.is_some(),
+        kv_cache_pct,
+        cache_hit_pct,
+        ttft_ms,
+        e2e_latency_ms,
+        queue_time_ms,
+        prefill_time_ms,
+        preemptions,
+        prompt_tokens_cached,
+        predicted_tok_s,
+        prompt_tok_s,
+    })
 }
 
 pub async fn chat_with_tools(
@@ -2845,17 +3082,70 @@ mod tests {
     #[test]
     fn llamacpp_metrics_sample_is_parsed() {
         let sample = r#"
-# HELP llama_tokens_predicted_total Tokens generated
-llama_tokens_predicted_total 42
-llama_prompt_tokens 18
-llama_requests_completed_total 2
-llama_requests_processing 1
+# HELP llamacpp:tokens_predicted_total Tokens generated
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 42
+llamacpp:tokens_predicted_seconds_total 0.6
+llamacpp:predicted_tokens_seconds 70.0
+llamacpp:prompt_tokens_total 18
+llamacpp:prompt_tokens_cached_total 7
+llamacpp:prompt_tokens_seconds 200.0
+llamacpp:requests_processing 1
+llamacpp:requests_deferred 2
 "#;
         let metrics = parse_metrics(sample).expect("llama metrics should be recognized");
         assert_eq!(metrics.total_generation_tokens, 42);
         assert_eq!(metrics.total_prompt_tokens, 18);
-        assert_eq!(metrics.requests, 2);
+        assert_eq!(metrics.requests, 0);
+        assert!(!metrics.requests_available);
         assert_eq!(metrics.running, 1);
+        assert_eq!(metrics.waiting, 2);
+        assert_eq!(metrics.prompt_tokens_cached, 7);
+        assert_eq!(metrics.predicted_tok_s, Some(70.0));
+        assert_eq!(metrics.prompt_tok_s, Some(200.0));
+        assert!((metrics.cache_hit_pct.unwrap() - 28.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn vllm_labeled_metrics_are_aggregated() {
+        let sample = r#"
+# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="my model"} 2.0
+vllm:num_requests_waiting{model_name="my model"} 3.0
+vllm:kv_cache_usage_perc{model_name="my model"} 0.42
+vllm:prompt_tokens_total{model_name="my model"} 100.0
+vllm:generation_tokens_total{model_name="my model"} 250.0
+vllm:request_success_total{finished_reason="stop",model_name="my model"} 4.0
+vllm:request_success_total{finished_reason="length",model_name="my model"} 6.0
+vllm:prompt_tokens_cached{model_name="my model"} 40.0
+vllm:prefix_cache_hits{model_name="my model"} 40.0
+vllm:prefix_cache_queries{model_name="my model"} 100.0
+vllm:time_to_first_token_seconds_sum{model_name="my model"} 0.5
+vllm:time_to_first_token_seconds_count{model_name="my model"} 2
+vllm:e2e_request_latency_seconds_sum{model_name="my model"} 1.2
+vllm:e2e_request_latency_seconds_count{model_name="my model"} 3
+vllm:request_queue_time_seconds_sum{model_name="my model"} 0.2
+vllm:request_queue_time_seconds_count{model_name="my model"} 2
+vllm:request_prefill_time_seconds_sum{model_name="my model"} 0.4
+vllm:request_prefill_time_seconds_count{model_name="my model"} 2
+vllm:num_preemptions_total{model_name="my model"} 5
+"#;
+        let metrics = parse_metrics(sample).expect("vLLM labeled metrics should be recognized");
+        assert_eq!(metrics.running, 2);
+        assert_eq!(metrics.waiting, 3);
+        assert_eq!(metrics.total_prompt_tokens, 100);
+        assert_eq!(metrics.total_generation_tokens, 250);
+        assert_eq!(metrics.requests, 10);
+        assert!(metrics.requests_available);
+        assert_eq!(metrics.kv_cache_pct, Some(42.0));
+        assert_eq!(metrics.cache_hit_pct, Some(40.0));
+        assert!((metrics.ttft_ms.unwrap() - 250.0).abs() < 0.001);
+        assert!((metrics.e2e_latency_ms.unwrap() - 400.0).abs() < 0.001);
+        assert!((metrics.queue_time_ms.unwrap() - 100.0).abs() < 0.001);
+        assert!((metrics.prefill_time_ms.unwrap() - 200.0).abs() < 0.001);
+        assert_eq!(metrics.preemptions, 5);
+        assert_eq!(metrics.prompt_tokens_cached, 40);
     }
 
     #[test]

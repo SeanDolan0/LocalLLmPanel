@@ -224,6 +224,16 @@ export interface MetricsSnapshot {
   total_prompt_tokens: number;
   total_generation_tokens: number;
   requests: number;
+  requests_available: boolean;
+  requests_per_sec: number | null;
+  kv_cache_pct: number | null;
+  cache_hit_pct: number | null;
+  ttft_ms: number | null;
+  e2e_latency_ms: number | null;
+  queue_time_ms: number | null;
+  prefill_time_ms: number | null;
+  preemptions: number;
+  prompt_tokens_cached: number;
   measured: MeasuredStats | null;
 }
 
@@ -587,6 +597,11 @@ export interface ServerMetricPoint {
   prompt_tok_s: number;
   requests_running: number;
   requests_waiting: number;
+  kv_cache_pct: number | null;
+  cache_hit_pct: number | null;
+  ttft_ms: number | null;
+  e2e_latency_ms: number | null;
+  requests_per_sec: number | null;
 }
 
 export interface ServerRecipe {

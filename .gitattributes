@@ -14,3 +14,4 @@
 *.css text eol=lf
 *.html text eol=lf
 *.lock text eol=lf
+graphify-out/graph.json merge=graphify

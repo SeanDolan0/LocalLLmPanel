@@ -19,3 +19,11 @@ Thumbs.db
 # Tauri generated (regenerable via `npm run tauri icon`)
 src-tauri/gen/
 src-tauri/icons/icon.ico.tmp
+# graphify knowledge graph (regenerable: `graphify extract .`)
+# Machine-local: graph.json is ~3.4MB and graph.html ~2.8MB. To share the graph
+# with a team, force-add only the queryable products:
+#   git add -f graphify-out/graph.json graphify-out/GRAPH_REPORT.md
+graphify-out/
+# Python bytecode from the release tooling
+__pycache__/
+*.pyc
