@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
-import { Badge, Button, Card, CardTitle, Field, inputCls, Spinner } from "../ui";
+import { Badge, Button, Card, CardTitle, Collapsible, Field, Menu, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import { effectiveModelName } from "../types";
 import type { ContextFitReport, ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice } from "../types";
@@ -38,6 +38,9 @@ export default function Servers() {
   const [toolResults, setToolResults] = useState<Record<string, string>>({});
   const [toolMaxTokens, setToolMaxTokens] = useState(2048);
   const [toolDisableThinking, setToolDisableThinking] = useState(true);
+  // Advanced per-row tooling, opened from the overflow menu instead of inline
+  const [toolsOpen, setToolsOpen] = useState<Record<string, boolean>>({});
+  const [benchFor, setBenchFor] = useState<string | null>(null);
 
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // server id being start/stop/delete
@@ -263,6 +266,30 @@ export default function Servers() {
     }
   };
 
+  const runToolTest = async (def: ServerDef) => {
+    try {
+      const result = await api.serversTestToolCall(def.id, toolMaxTokens, toolDisableThinking);
+      const timing = result.response.timings as { prompt_per_second?: number; predicted_per_second?: number } | undefined;
+      const timingText = timing
+        ? `\nTiming: prompt ${timing.prompt_per_second ?? "?"} tok/s, predicted ${timing.predicted_per_second ?? "?"} tok/s. The first request after loading is slower while weights are paged in.`
+        : "";
+      const callText = result.tool_call
+        ? `\nParsed call: ${JSON.stringify(result.tool_call)}`
+        : "";
+      const reasoningText = result.reasoning_content
+        ? `\nReasoning content:\n${result.reasoning_content}`
+        : "";
+      setToolResults((prev) => ({
+        ...prev,
+        [def.id]: result.passed
+          ? `Tool call passed${callText}${timingText}`
+          : `Failed: ${result.hint}${reasoningText}${timingText}\nRaw response:\n${JSON.stringify(result.response, null, 2)}`,
+      }));
+    } catch (e) {
+      setToolResults((prev) => ({ ...prev, [def.id]: `Tool call error: ${String(e)}` }));
+    }
+  };
+
   const selectedRow = rows.find((r) => r.def.id === selected) ?? null;
   const selectedLog = selected ? logs[selected] ?? "" : "";
   const freeGb = gpu ? gpu.vram_free_mb / 1024 : null;
@@ -431,9 +458,80 @@ export default function Servers() {
                     </Button>
                   )}
                   {r.status === "running" && r.def.task === "instruct" && (
-                    <>
-                      <ChatButton serverId={r.def.id} port={r.def.port} model={effectiveModelName(r.def)} />
-                      <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                    <ChatButton serverId={r.def.id} port={r.def.port} model={effectiveModelName(r.def)} />
+                  )}
+                  <Menu
+                    items={[
+                      ...(r.status === "running"
+                        ? [
+                            {
+                              label: copiedUrlId === r.def.id ? "URL copied ✓" : "Copy API URL",
+                              onClick: async () => {
+                                await navigator.clipboard.writeText(`http://127.0.0.1:${r.def.port}/v1`);
+                                setCopiedUrlId(r.def.id);
+                                setTimeout(() => setCopiedUrlId(null), 2000);
+                              },
+                            },
+                            {
+                              label: "Restart server",
+                              disabled: busy === r.def.id,
+                              onClick: () => act(r.def.id, () => api.serversRestart(r.def.id)),
+                            },
+                            ...(r.def.task === "instruct"
+                              ? [
+                                  {
+                                    label: toolsOpen[r.def.id] ? "Hide tool test" : "Tool-calling test",
+                                    onClick: () => setToolsOpen((s) => ({ ...s, [r.def.id]: !s[r.def.id] })),
+                                  },
+                                  {
+                                    label: "Benchmark",
+                                    onClick: () => setBenchFor(r.def.id),
+                                  },
+                                ]
+                              : []),
+                          ]
+                        : []),
+                      ...(r.def.backend === "vllm"
+                        ? [
+                            {
+                              label: copiedId === r.def.id ? "Recipe copied ✓" : "Copy recipe (JSON)",
+                              onClick: () => copyRecipe(r.def),
+                            },
+                          ]
+                        : []),
+                      {
+                        label: "Edit server",
+                        onClick: () => {
+                          setEditingServer(r.def);
+                          setShowNew(true);
+                        },
+                      },
+                      {
+                        label: "Delete server",
+                        danger: true,
+                        onClick: () => {
+                          if (confirm(`Delete server "${r.def.name}"?`)) act(r.def.id, () => api.serversDelete(r.def.id));
+                        },
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
+              {r.error && <div className="mt-2 text-xs text-red-300">{r.error}</div>}
+              {toolsOpen[r.def.id] && r.status === "running" && r.def.task === "instruct" && (
+                <Collapsible
+                  compact
+                  open
+                  onOpenChange={(o) => {
+                    if (!o) setToolsOpen((s) => ({ ...s, [r.def.id]: false }));
+                  }}
+                  title="Tool-calling test"
+                  subtitle="Asks the model to call a built-in tool and checks the parsed call"
+                  className="mt-2.5"
+                >
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+                      <label className="flex items-center gap-1">
                         max tokens
                         <input
                           className="w-16 rounded border border-edge bg-surface-2 px-1.5 py-1 text-right text-slate-200"
@@ -444,7 +542,7 @@ export default function Servers() {
                           onChange={(e) => setToolMaxTokens(Math.max(1, Number(e.target.value) || 1))}
                         />
                       </label>
-                      <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                      <label className="flex items-center gap-1">
                         <input
                           type="checkbox"
                           checked={toolDisableThinking}
@@ -452,84 +550,19 @@ export default function Servers() {
                         />
                         disable thinking
                       </label>
-                      <Button variant="subtle" onClick={async () => {
-                        try {
-                          const result = await api.serversTestToolCall(r.def.id, toolMaxTokens, toolDisableThinking);
-                          const timing = result.response.timings as { prompt_per_second?: number; predicted_per_second?: number } | undefined;
-                          const timingText = timing
-                            ? `\nTiming: prompt ${timing.prompt_per_second ?? "?"} tok/s, predicted ${timing.predicted_per_second ?? "?"} tok/s. The first request after loading is slower while weights are paged in.`
-                            : "";
-                          const callText = result.tool_call
-                            ? `\nParsed call: ${JSON.stringify(result.tool_call)}`
-                            : "";
-                          const reasoningText = result.reasoning_content
-                            ? `\nReasoning content:\n${result.reasoning_content}`
-                            : "";
-                          setToolResults((prev) => ({
-                            ...prev,
-                            [r.def.id]: result.passed
-                              ? `Tool call passed${callText}${timingText}`
-                              : `Failed: ${result.hint}${reasoningText}${timingText}\nRaw response:\n${JSON.stringify(result.response, null, 2)}`,
-                          }));
-                        } catch (e) {
-                          setToolResults((prev) => ({ ...prev, [r.def.id]: `Tool call error: ${String(e)}` }));
-                        }
-                      }}>
+                      <Button variant="primary" disabled={busy === r.def.id} onClick={() => runToolTest(r.def)}>
                         Test tool calling
                       </Button>
-                      <BenchmarkButton serverId={r.def.id} model={effectiveModelName(r.def)} />
-                    </>
-                  )}
-                  {r.status === "running" && (
-                    <Button variant="ghost" onClick={async () => {
-                      await navigator.clipboard.writeText(`http://127.0.0.1:${r.def.port}/v1`);
-                      setCopiedUrlId(r.def.id);
-                      setTimeout(() => setCopiedUrlId(null), 2000);
-                    }}>
-                      {copiedUrlId === r.def.id ? "URL copied" : "Copy API URL"}
-                    </Button>
-                  )}
-                  {r.status === "running" && (
-                    <Button variant="ghost" disabled={busy === r.def.id} onClick={() => act(r.def.id, () => api.serversRestart(r.def.id))}>
-                      Restart
-                    </Button>
-                  )}
-                  {r.def.backend === "vllm" && (
-                    <Button
-                      variant="ghost"
-                      title="Copy portable vLLM server recipe JSON to clipboard"
-                      onClick={() => {
-                        copyRecipe(r.def);
-                      }}
-                    >
-                      {copiedId === r.def.id ? "Copied!" : "Recipe"}
-                    </Button>
-                  )}
-                  <Button
-                    variant="ghost"
-                    title="Edit server configuration"
-                    onClick={() => {
-                      setEditingServer(r.def);
-                      setShowNew(true);
-                    }}
-                  >
-                    Edit
-                  </Button>
-                  <Button variant="subtle" disabled={busy === r.def.id} onClick={() => { if (confirm(`Delete server "${r.def.name}"?`)) act(r.def.id, () => api.serversDelete(r.def.id)); }}>
-                    ✕
-                  </Button>
-                </div>
-              </div>
-              {r.error && <div className="mt-2 text-xs text-red-300">{r.error}</div>}
-              {toolResults[r.def.id] && (
-                <pre className="mt-2 whitespace-pre-wrap rounded-md border border-edge bg-surface p-2 text-[11px] text-slate-300">{toolResults[r.def.id]}</pre>
+                    </div>
+                    {toolResults[r.def.id] && (
+                      <pre className="whitespace-pre-wrap rounded-md border border-edge bg-surface p-2 text-[11px] text-slate-300">{toolResults[r.def.id]}</pre>
+                    )}
+                  </div>
+                </Collapsible>
               )}
-              {r.metrics && r.status === "running" && (
-                <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500 sm:grid-cols-4">
-                  <div>gen tok: <span className="text-slate-300">{fmtNum(r.metrics.total_generation_tokens)}</span></div>
-                  <div>prompt tok: <span className="text-slate-300">{fmtNum(r.metrics.total_prompt_tokens)}</span></div>
-                  <div>running: <span className="text-slate-300">{r.metrics.running}</span> · waiting <span className="text-slate-300">{r.metrics.waiting}</span></div>
-                  <div>requests: <span className="text-slate-300">{fmtNum(r.metrics.requests)}</span></div>
+              {benchFor === r.def.id && (
+                <div className="mt-2.5">
+                  <BenchmarkDrawer serverId={r.def.id} model={effectiveModelName(r.def)} onClose={() => setBenchFor(null)} />
                 </div>
               )}
               {r.status === "running" && serverSeries[r.def.id] && serverSeries[r.def.id].length > 0 && (
@@ -1277,272 +1310,305 @@ function NewServerForm({
         <Field label="Name (optional)">
           <input className={inputCls} placeholder="coder-0.5b" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="API model name / alias" hint="Blank uses the model ID or GGUF filename. vLLM maps this to --served-model-name; llama.cpp maps it to --alias.">
-          <input className={inputCls} placeholder="blank = model identity" value={served} onChange={(e) => setServed(e.target.value)} />
-        </Field>
-        <Field label="Per-server API key (optional)" hint="Overrides the global vLLM key for this server and is also passed to llama.cpp.">
-          <div className="flex gap-1.5">
-            <input
-              type="password"
-              className={inputCls}
-              value={apiKey}
-              placeholder={apiKeyConfigured ? "A key is stored; enter a replacement" : "Optional"}
-              onChange={(e) => { setApiKey(e.target.value); setApiKeyDirty(true); }}
-            />
-            <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => { setApiKey(crypto.randomUUID().replaceAll("-", "")); setApiKeyDirty(true); }}>Generate</Button>
-            {apiKey && <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => navigator.clipboard.writeText(apiKey)}>Copy</Button>}
-          </div>
-        </Field>
         {backend === "vllm" && <Field label="Task">
           <select className={inputCls} value={task} onChange={(e) => setTask(e.target.value as "instruct" | "embed")}>
             <option value="instruct">instruct (chat)</option>
             <option value="embed">embed (embeddings)</option>
           </select>
         </Field>}
-        {backend === "vllm" && <Field label="Checkpoint format" hint="Pre-quantized GPTQ/AWQ/FP8 checkpoints are auto-detected from model config.">
-          <select className={inputCls} value={quant.toLowerCase()} onChange={(e) => setQuant(e.target.value)}>
-            <option value="auto">Auto (recommended)</option>
-            <option value="fp16">FP16 / BF16</option>
-            <option value="fp8">FP8 runtime quantization</option>
-            <option value="gptq">GPTQ checkpoint</option>
-            <option value="awq">AWQ checkpoint</option>
-          </select>
-        </Field>}
-        {backend === "llamacpp" && (
-          <>
-            <Field label="llama.cpp Channel" hint="PrismML fork supports ternary formats (PQ2_0, PTQ1_0) and Hadamard transform.">
-              <select className={inputCls} value={llamaCppChannel} onChange={(e) => setLlamaCppChannel(e.target.value as "upstream" | "prism")}>
-                <option value="upstream">Upstream (ggml-org/llama.cpp)</option>
-                <option value="prism">PrismML (PrismML-Eng/llama.cpp@prism)</option>
-              </select>
-            </Field>
-            {llamaCppChannel === "prism" && (
-              <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-                <div className="text-sm font-medium text-indigo-200">Bonsai 2 / Ternary Preset</div>
-                <div className="text-xs text-slate-400 mb-2">Optimized for PrismML fork: all GPU layers, flash attention, Jinja tool calling, q8_0 KV cache.</div>
+      </div>
+
+      <Collapsible
+        title="Context & memory"
+        subtitle="Context length, KV cache precision, and swap / offload"
+        storageKey="llm_panel_server_form_context"
+        className="mt-3"
+        defaultOpen={isEditing || initialMaxLen !== undefined || initialSwapSpace !== undefined || initialCpuOffload !== undefined}
+      >
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {backend === "vllm" && (
+            <>
+              <Field
+                label="Max model len (blank = auto)"
+                hint={
+                  (vramContextLimit ?? 0) > 0
+                    ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit!)} tokens | RAM Swap: > ${fmtNum(vramContextLimit!)} tokens`
+                    : "Context ceiling in tokens. If exceeding VRAM, RAM swap space will be used."
+                }
+              >
+                <input
+                  className={inputCls}
+                  placeholder={
+                    (vramContextLimit ?? 0) > 0
+                      ? initialMaxLen && initialMaxLen > vramContextLimit!
+                        ? `auto (~${fmtNum(vramContextLimit!)} VRAM ➔ ~${fmtNum(initialMaxLen)} RAM)`
+                        : `auto (~${fmtNum(vramContextLimit!)} VRAM)`
+                      : "auto (context ∩ VRAM fit)"
+                  }
+                  value={maxLen}
+                  onChange={(e) => setMaxLen(e.target.value)}
+                />
+                {(vramContextLimit ?? 0) > 0 && (
+                  <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+                    <span className="inline-flex items-center gap-1 text-emerald-400">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                      VRAM: ≤{fmtNum(vramContextLimit!)}
+                    </span>
+                    <span className="text-slate-600">➔</span>
+                    <span className="inline-flex items-center gap-1 text-cyan-400">
+                      <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                      RAM Swap: {initialMaxLen && initialMaxLen > vramContextLimit! ? `up to ~${fmtNum(initialMaxLen)} tokens` : `>${fmtNum(vramContextLimit!)}`
+                      }
+                    </span>
+                    {maxLen && parseInt(maxLen, 10) > vramContextLimit! && (
+                      <span className="text-[11px] font-semibold text-cyan-300 ml-auto">(Uses RAM swap)</span>
+                    )}
+                  </div>
+                )}
+                {(vramContextLimit ?? 0) === 0 && (initialMaxLen ?? 0) > 0 && (
+                  <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+                    <span className="inline-flex items-center gap-1 text-amber-400">
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                      RAM Context: up to ~{fmtNum(initialMaxLen!)} tokens (CPU Offload)
+                    </span>
+                  </div>
+                )}
+              </Field>
+              <Field label="KV cache precision" hint="Blank inherits the global vLLM setting. FP8 reduces KV-cache VRAM; verify quality on long-context tasks.">
+                <select className={inputCls} value={kvCacheDtype} onChange={(e) => setKvCacheDtype(e.target.value)}>
+                  <option value="">Global / Auto</option>
+                  <option value="float16">FP16</option>
+                  <option value="bfloat16">BF16</option>
+                  <option value="fp8_e4m3">FP8 E4M3</option>
+                  <option value="fp8_e5m2">FP8 E5M2</option>
+                </select>
+              </Field>
+              <Field label="KV Cache CPU Offload (GB)" hint="Advanced vLLM V1 option (--kv-offloading-size). Leave at 0 for normal GPU KV caching.">
+                <input type="number" step="1" min="0" className={inputCls} placeholder="0" value={swapSpaceGb} onChange={(e) => setSwapSpaceGb(e.target.value)} />
+              </Field>
+              <Field label="CPU Weight Offload (GB)" hint="vLLM --cpu-offload-gb. Offloads model parameters to CPU RAM; use only when GPU-only placement cannot fit.">
+                <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 8)" value={cpuOffloadGb} onChange={(e) => setCpuOffloadGb(e.target.value)} />
+              </Field>
+            </>
+          )}
+          {backend === "llamacpp" && (
+            <>
+              <Field label="Context size">
+                <input className={inputCls} value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} />
+              </Field>
+              <Field label="Fit target (MiB)" hint="Memory margin per device when --fit is supported.">
+                <input className={inputCls} placeholder="1024" value={fitTarget} onChange={(e) => setFitTarget(e.target.value)} />
+              </Field>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={fit} onChange={(e) => setFit(e.target.checked)} /> Automatic memory fit (when supported)
+              </label>
+              <Field label="KV Cache Type K (--cache-type-k)" hint="Data type for the K cache. Lower precision saves VRAM at some quality cost.">
+                <select className={inputCls} value={cacheTypeK} onChange={(e) => setCacheTypeK(e.target.value)}>
+                  <option value="f16">f16 (default, highest quality)</option>
+                  <option value="bf16">bf16</option>
+                  <option value="q8_0">q8_0 (recommended)</option>
+                  <option value="q5_1">q5_1</option>
+                  <option value="q5_0">q5_0</option>
+                  <option value="q4_1">q4_1</option>
+                  <option value="q4_0">q4_0</option>
+                  <option value="iq4_nl">iq4_nl</option>
+                  <option value="f32">f32</option>
+                </select>
+              </Field>
+              <Field label="KV Cache Type V (--cache-type-v)" hint="Data type for the V cache. Can differ from K; q4_0/q5_0 saves the most VRAM.">
+                <select className={inputCls} value={cacheTypeV} onChange={(e) => setCacheTypeV(e.target.value)}>
+                  <option value="f16">f16 (default, highest quality)</option>
+                  <option value="bf16">bf16</option>
+                  <option value="q8_0">q8_0 (recommended)</option>
+                  <option value="q5_1">q5_1</option>
+                  <option value="q5_0">q5_0</option>
+                  <option value="q4_1">q4_1</option>
+                  <option value="q4_0">q4_0</option>
+                  <option value="iq4_nl">iq4_nl</option>
+                  <option value="f32">f32</option>
+                </select>
+              </Field>
+            </>
+          )}
+        </div>
+      </Collapsible>
+
+      <Collapsible
+        title={backend === "vllm" ? "Advanced vLLM options" : "Advanced llama.cpp options"}
+        subtitle="API naming, startup tuning, environment, and extra arguments"
+        storageKey="llm_panel_server_form_advanced"
+        className="mt-3"
+      >
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="API model name / alias" hint="Blank uses the model ID or GGUF filename. vLLM maps this to --served-model-name; llama.cpp maps it to --alias.">
+            <input className={inputCls} placeholder="blank = model identity" value={served} onChange={(e) => setServed(e.target.value)} />
+          </Field>
+          <Field label="Per-server API key (optional)" hint="Overrides the global vLLM key for this server and is also passed to llama.cpp.">
+            <div className="flex gap-1.5">
+              <input
+                type="password"
+                className={inputCls}
+                value={apiKey}
+                placeholder={apiKeyConfigured ? "A key is stored; enter a replacement" : "Optional"}
+                onChange={(e) => { setApiKey(e.target.value); setApiKeyDirty(true); }}
+              />
+              <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => { setApiKey(crypto.randomUUID().replaceAll("-", "")); setApiKeyDirty(true); }}>Generate</Button>
+              {apiKey && <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => navigator.clipboard.writeText(apiKey)}>Copy</Button>}
+            </div>
+          </Field>
+          {backend === "vllm" && <Field label="Checkpoint format" hint="Pre-quantized GPTQ/AWQ/FP8 checkpoints are auto-detected from model config.">
+            <select className={inputCls} value={quant.toLowerCase()} onChange={(e) => setQuant(e.target.value)}>
+              <option value="auto">Auto (recommended)</option>
+              <option value="fp16">FP16 / BF16</option>
+              <option value="fp8">FP8 runtime quantization</option>
+              <option value="gptq">GPTQ checkpoint</option>
+              <option value="awq">AWQ checkpoint</option>
+            </select>
+          </Field>}
+          {backend === "vllm" && (
+            <>
+              <Field label="Startup / performance mode" hint="Eager mode starts fastest and uses less VRAM. CUDA graphs improve steady-state throughput but add compile/capture time.">
+                <select className={inputCls} value={enforceEager ? "eager" : "graphs"} onChange={(e) => setEnforceEager(e.target.value === "eager")}>
+                  <option value="eager">Eager (recommended for 12 GB GPUs)</option>
+                  <option value="graphs">CUDA graphs (higher throughput)</option>
+                </select>
+              </Field>
+              <div className="sm:col-span-2 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-xs text-slate-400">
+                <span className="font-semibold text-indigo-200">vLLM 0.30+ defaults:</span> attention backend Auto, prefix caching enabled, and chunked prefill managed by vLLM. KV precision can be inherited globally or overridden per server above.
+              </div>
+              <EnvironmentVarsEditor initialEnv={env} onChange={setEnv} />
+              <Field label="GPU memory utilization" hint="Fraction of GPU memory vLLM may reserve (0–1). Default 0.85.">
+                <input type="number" step="0.05" min="0.1" max="0.95" className={inputCls} value={gpuUtil} onChange={(e) => setGpuUtil(e.target.value)} />
+              </Field>
+            </>
+          )}
+          {backend === "llamacpp" && (
+            <>
+              <Field label="llama.cpp Channel" hint="PrismML fork supports ternary formats (PQ2_0, PTQ1_0) and Hadamard transform.">
+                <select className={inputCls} value={llamaCppChannel} onChange={(e) => setLlamaCppChannel(e.target.value as "upstream" | "prism")}>
+                  <option value="upstream">Upstream (ggml-org/llama.cpp)</option>
+                  <option value="prism">PrismML (PrismML-Eng/llama.cpp@prism)</option>
+                </select>
+              </Field>
+              {llamaCppChannel === "prism" && (
+                <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+                  <div className="text-sm font-medium text-indigo-200">Bonsai 2 / Ternary Preset</div>
+                  <div className="text-xs text-slate-400 mb-2">Optimized for PrismML fork: all GPU layers, flash attention, Jinja tool calling, q8_0 KV cache.</div>
+                  <Button
+                    variant="subtle"
+                    onClick={() => {
+                      setNGpuLayers("99");
+                      setNCpuMoe("");
+                      setCtxSize("32768");
+                      setFit(true);
+                      setFitTarget("1024");
+                      setFlashAttn(true);
+                      setJinja(true);
+                      setCacheTypeK("q8_0");
+                      setCacheTypeV("q8_0");
+                      setMoePresetApplied(true);
+                    }}
+                  >
+                    Apply Bonsai 2 Preset
+                  </Button>
+                </div>
+              )}
+              <Field label="GGUF quantization label" hint="Metadata inferred from the filename; llama.cpp reads it from the GGUF itself.">
+                <input className={inputCls} placeholder="e.g. PQ2_0, PTQ1_0, Q2_0_g64" value={quant} onChange={(e) => setQuant(e.target.value)} />
+              </Field>
+              {nGpuLayers.trim() && fit && (
+                <div className="sm:col-span-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  Explicit <code>-ngl</code> disables llama.cpp automatic fitting. Clear GPU layers to let fit choose automatically.
+                </div>
+              )}
+              {!moePresetApplied && (
+                <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+                <div>
+                  <div className="text-sm font-medium text-indigo-200">MoE presets</div>
+                  <div className="text-xs text-slate-400">Choose automatic fitting or tune manual CPU expert offload.</div>
+                </div>
+                <div className="flex gap-2">
                 <Button
                   variant="subtle"
                   onClick={() => {
-                    setNGpuLayers("99");
+                    setNGpuLayers("");
                     setNCpuMoe("");
                     setCtxSize("32768");
                     setFit(true);
                     setFitTarget("1024");
                     setFlashAttn(true);
                     setJinja(true);
-                    setCacheTypeK("q8_0");
-                    setCacheTypeV("q8_0");
                     setMoePresetApplied(true);
                   }}
                 >
-                  Apply Bonsai 2 Preset
+                  MoE auto-fit
                 </Button>
-              </div>
-            )}
-            <Field label="GGUF quantization label" hint="Metadata inferred from the filename; llama.cpp reads it from the GGUF itself.">
-              <input className={inputCls} placeholder="e.g. PQ2_0, PTQ1_0, Q2_0_g64" value={quant} onChange={(e) => setQuant(e.target.value)} />
-            </Field>
-            {nGpuLayers.trim() && fit && (
-              <div className="sm:col-span-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                Explicit <code>-ngl</code> disables llama.cpp automatic fitting. Clear GPU layers to let fit choose automatically.
-              </div>
-            )}
-            {!moePresetApplied && (
-              <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-              <div>
-                <div className="text-sm font-medium text-indigo-200">MoE presets</div>
-                <div className="text-xs text-slate-400">Choose automatic fitting or tune manual CPU expert offload.</div>
-              </div>
-              <div className="flex gap-2">
-              <Button
-                variant="subtle"
-                onClick={() => {
-                  setNGpuLayers("");
-                  setNCpuMoe("");
-                  setCtxSize("32768");
-                  setFit(true);
-                  setFitTarget("1024");
-                  setFlashAttn(true);
-                  setJinja(true);
-                  setMoePresetApplied(true);
-                }}
-              >
-                MoE auto-fit
-              </Button>
-              <Button
-                variant="subtle"
-                onClick={() => {
-                  setNGpuLayers("99");
-                  setNCpuMoe("24");
-                  setCtxSize("32768");
-                  setFlashAttn(true);
-                  setJinja(true);
-                  setMoePresetApplied(true);
-                }}
-              >
-                MoE manual offload
-              </Button>
-                </div>
-              </div>
-            )}
-            <Field label="Context size">
-              <input className={inputCls} value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} />
-            </Field>
-            <Field label="GPU layers (-ngl)">
-              <input className={inputCls} placeholder="auto" value={nGpuLayers} onChange={(e) => setNGpuLayers(e.target.value)} />
-            </Field>
-            <Field label="CPU MoE layers">
-              <input className={inputCls} value={nCpuMoe} onChange={(e) => setNCpuMoe(e.target.value)} />
-            </Field>
-            <Field label="Device(s)" hint="Optional llama.cpp device ids, e.g. CUDA0 or CUDA0,CUDA1.">
-              <input className={inputCls} list="llamacpp-devices" placeholder="auto" value={device} onChange={(e) => setDevice(e.target.value)} />
-              <datalist id="llamacpp-devices">
-                {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </datalist>
-            </Field>
-            <Field label="Fit target (MiB)" hint="Memory margin per device when --fit is supported.">
-              <input className={inputCls} placeholder="1024" value={fitTarget} onChange={(e) => setFitTarget(e.target.value)} />
-            </Field>
-            <label className="flex items-center gap-2 text-sm text-slate-300">
-              <input type="checkbox" checked={fit} onChange={(e) => setFit(e.target.checked)} /> Automatic memory fit (when supported)
-            </label>
-            <Field label="Log verbosity (0–5)" hint="llama.cpp: 0 generic, 1 error, 2 warning, 3 info, 4 trace, 5 debug.">
-              <input className={inputCls} placeholder="3" value={logVerbosity} onChange={(e) => setLogVerbosity(e.target.value)} />
-            </Field>
-            <Field label="mmproj path (optional)">
-              <input className={inputCls} value={mmprojPath} onChange={(e) => setMmprojPath(e.target.value)} />
-            </Field>
-            <label className="flex items-center gap-2 text-sm text-slate-300">
-              <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} /> Flash attention
-            </label>
-            <Field label="KV Cache Type K (--cache-type-k)" hint="Data type for the K cache. Lower precision saves VRAM at some quality cost.">
-              <select className={inputCls} value={cacheTypeK} onChange={(e) => setCacheTypeK(e.target.value)}>
-                <option value="f16">f16 (default, highest quality)</option>
-                <option value="bf16">bf16</option>
-                <option value="q8_0">q8_0 (recommended)</option>
-                <option value="q5_1">q5_1</option>
-                <option value="q5_0">q5_0</option>
-                <option value="q4_1">q4_1</option>
-                <option value="q4_0">q4_0</option>
-                <option value="iq4_nl">iq4_nl</option>
-                <option value="f32">f32</option>
-              </select>
-            </Field>
-            <Field label="KV Cache Type V (--cache-type-v)" hint="Data type for the V cache. Can differ from K; q4_0/q5_0 saves the most VRAM.">
-              <select className={inputCls} value={cacheTypeV} onChange={(e) => setCacheTypeV(e.target.value)}>
-                <option value="f16">f16 (default, highest quality)</option>
-                <option value="bf16">bf16</option>
-                <option value="q8_0">q8_0 (recommended)</option>
-                <option value="q5_1">q5_1</option>
-                <option value="q5_0">q5_0</option>
-                <option value="q4_1">q4_1</option>
-                <option value="q4_0">q4_0</option>
-                <option value="iq4_nl">iq4_nl</option>
-                <option value="f32">f32</option>
-              </select>
-            </Field>
-            <label className="flex items-center gap-2 text-sm text-slate-300">
-              <input type="checkbox" checked={jinja} onChange={(e) => setJinja(e.target.checked)} /> Jinja tool-calling templates
-            </label>
-            <label className="flex items-center gap-2 text-sm text-slate-300">
-              <input type="checkbox" checked={noKvOffload} onChange={(e) => setNoKvOffload(e.target.checked)} /> Disable KV-cache offload
-            </label>
-            <Field label="CPU threads" hint="Blank uses llama.cpp auto-detection.">
-              <input type="number" min="1" className={inputCls} placeholder="auto" value={threads} onChange={(e) => setThreads(e.target.value)} />
-            </Field>
-            <Field label="Logical batch size">
-              <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
-            </Field>
-            <Field label="Physical micro-batch size">
-              <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={ubatchSize} onChange={(e) => setUbatchSize(e.target.value)} />
-            </Field>
-            <Field label="Parallel request slots" hint="0 uses llama.cpp automatic selection.">
-              <input type="number" min="0" className={inputCls} placeholder="auto" value={parallel} onChange={(e) => setParallel(e.target.value)} />
-            </Field>
-            <Field label="Extra llama.cpp arguments" hint="One argument per line. Structured settings above take precedence.">
-              <textarea className={`${inputCls} min-h-20 font-mono text-xs`} placeholder={"--jinja\n--override-kv key=value"} value={extraArgs} onChange={(e) => setExtraArgs(e.target.value)} />
-            </Field>
-          </>
-        )}
-        {backend === "vllm" && (
-          <>
-            <Field
-              label="Max model len (blank = auto)"
-              hint={
-                (vramContextLimit ?? 0) > 0
-                  ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit!)} tokens | RAM Swap: > ${fmtNum(vramContextLimit!)} tokens`
-                  : "Context ceiling in tokens. If exceeding VRAM, RAM swap space will be used."
-              }
-            >
-              <input
-                className={inputCls}
-                placeholder={
-                  (vramContextLimit ?? 0) > 0
-                    ? initialMaxLen && initialMaxLen > vramContextLimit!
-                      ? `auto (~${fmtNum(vramContextLimit!)} VRAM ➔ ~${fmtNum(initialMaxLen)} RAM)`
-                      : `auto (~${fmtNum(vramContextLimit!)} VRAM)`
-                    : "auto (context ∩ VRAM fit)"
-                }
-                value={maxLen}
-                onChange={(e) => setMaxLen(e.target.value)}
-              />
-              {(vramContextLimit ?? 0) > 0 && (
-                <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-                  <span className="inline-flex items-center gap-1 text-emerald-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    VRAM: ≤{fmtNum(vramContextLimit!)}
-                  </span>
-                  <span className="text-slate-600">➔</span>
-                  <span className="inline-flex items-center gap-1 text-cyan-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-                    RAM Swap: {initialMaxLen && initialMaxLen > vramContextLimit! ? `up to ~${fmtNum(initialMaxLen)} tokens` : `>${fmtNum(vramContextLimit!)}`
-                    }
-                  </span>
-                  {maxLen && parseInt(maxLen, 10) > vramContextLimit! && (
-                    <span className="text-[11px] font-semibold text-cyan-300 ml-auto">(Uses RAM swap)</span>
-                  )}
+                <Button
+                  variant="subtle"
+                  onClick={() => {
+                    setNGpuLayers("99");
+                    setNCpuMoe("24");
+                    setCtxSize("32768");
+                    setFlashAttn(true);
+                    setJinja(true);
+                    setMoePresetApplied(true);
+                  }}
+                >
+                  MoE manual offload
+                </Button>
+                  </div>
                 </div>
               )}
-              {(vramContextLimit ?? 0) === 0 && (initialMaxLen ?? 0) > 0 && (
-                <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-                  <span className="inline-flex items-center gap-1 text-amber-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                    RAM Context: up to ~{fmtNum(initialMaxLen!)} tokens (CPU Offload)
-                  </span>
-                </div>
-              )}
-            </Field>
-            <Field label="KV cache precision" hint="Blank inherits the global vLLM setting. FP8 reduces KV-cache VRAM; verify quality on long-context tasks.">
-              <select className={inputCls} value={kvCacheDtype} onChange={(e) => setKvCacheDtype(e.target.value)}>
-                <option value="">Global / Auto</option>
-                <option value="float16">FP16</option>
-                <option value="bfloat16">BF16</option>
-                <option value="fp8_e4m3">FP8 E4M3</option>
-                <option value="fp8_e5m2">FP8 E5M2</option>
-              </select>
-            </Field>
-            <Field label="KV Cache CPU Offload (GB)" hint="Advanced vLLM V1 option (--kv-offloading-size). Leave at 0 for normal GPU KV caching.">
-              <input type="number" step="1" min="0" className={inputCls} placeholder="0" value={swapSpaceGb} onChange={(e) => setSwapSpaceGb(e.target.value)} />
-            </Field>
-            <Field label="CPU Weight Offload (GB)" hint="vLLM --cpu-offload-gb. Offloads model parameters to CPU RAM; use only when GPU-only placement cannot fit.">
-              <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 8)" value={cpuOffloadGb} onChange={(e) => setCpuOffloadGb(e.target.value)} />
-            </Field>
-            <Field label="Startup / performance mode" hint="Eager mode starts fastest and uses less VRAM. CUDA graphs improve steady-state throughput but add compile/capture time.">
-              <select className={inputCls} value={enforceEager ? "eager" : "graphs"} onChange={(e) => setEnforceEager(e.target.value === "eager")}>
-                <option value="eager">Eager (recommended for 12 GB GPUs)</option>
-                <option value="graphs">CUDA graphs (higher throughput)</option>
-              </select>
-            </Field>
-            <div className="sm:col-span-2 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-xs text-slate-400">
-              <span className="font-semibold text-indigo-200">vLLM 0.30+ defaults:</span> attention backend Auto, prefix caching enabled, and chunked prefill managed by vLLM. KV precision can be inherited globally or overridden per server above.
-            </div>
-            <EnvironmentVarsEditor initialEnv={env} onChange={setEnv} />
-          </>
-        )}
-        <label className="flex items-center gap-2 text-sm text-slate-300 sm:col-span-2">
-          <input type="checkbox" checked={metrics} onChange={(e) => setMetrics(e.target.checked)} /> Collect runtime metrics from this server
-        </label>
-      </div>
+              <Field label="GPU layers (-ngl)">
+                <input className={inputCls} placeholder="auto" value={nGpuLayers} onChange={(e) => setNGpuLayers(e.target.value)} />
+              </Field>
+              <Field label="CPU MoE layers">
+                <input className={inputCls} value={nCpuMoe} onChange={(e) => setNCpuMoe(e.target.value)} />
+              </Field>
+              <Field label="Device(s)" hint="Optional llama.cpp device ids, e.g. CUDA0 or CUDA0,CUDA1.">
+                <input className={inputCls} list="llamacpp-devices" placeholder="auto" value={device} onChange={(e) => setDevice(e.target.value)} />
+                <datalist id="llamacpp-devices">
+                  {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </datalist>
+              </Field>
+              <Field label="Log verbosity (0–5)" hint="llama.cpp: 0 generic, 1 error, 2 warning, 3 info, 4 trace, 5 debug.">
+                <input className={inputCls} placeholder="3" value={logVerbosity} onChange={(e) => setLogVerbosity(e.target.value)} />
+              </Field>
+              <Field label="mmproj path (optional)">
+                <input className={inputCls} value={mmprojPath} onChange={(e) => setMmprojPath(e.target.value)} />
+              </Field>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} /> Flash attention
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={jinja} onChange={(e) => setJinja(e.target.checked)} /> Jinja tool-calling templates
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={noKvOffload} onChange={(e) => setNoKvOffload(e.target.checked)} /> Disable KV-cache offload
+              </label>
+              <Field label="CPU threads" hint="Blank uses llama.cpp auto-detection.">
+                <input type="number" min="1" className={inputCls} placeholder="auto" value={threads} onChange={(e) => setThreads(e.target.value)} />
+              </Field>
+              <Field label="Logical batch size">
+                <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
+              </Field>
+              <Field label="Physical micro-batch size">
+                <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={ubatchSize} onChange={(e) => setUbatchSize(e.target.value)} />
+              </Field>
+              <Field label="Parallel request slots" hint="0 uses llama.cpp automatic selection.">
+                <input type="number" min="0" className={inputCls} placeholder="auto" value={parallel} onChange={(e) => setParallel(e.target.value)} />
+              </Field>
+              <Field label="Extra llama.cpp arguments" hint="One argument per line. Structured settings above take precedence.">
+                <textarea className={`${inputCls} min-h-20 font-mono text-xs`} placeholder={"--jinja\n--override-kv key=value"} value={extraArgs} onChange={(e) => setExtraArgs(e.target.value)} />
+              </Field>
+            </>
+          )}
+          <label className="flex items-center gap-2 text-sm text-slate-300 sm:col-span-2">
+            <input type="checkbox" checked={metrics} onChange={(e) => setMetrics(e.target.checked)} /> Collect runtime metrics from this server
+          </label>
+        </div>
+      </Collapsible>
+
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-edge bg-surface-2/60 p-3">
         <div>
           <div className="text-sm font-semibold text-slate-200">Context fit test</div>

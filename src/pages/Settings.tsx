@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, fmtNum } from "../api";
-import { Badge, Button, Card, CardTitle, Field, inputCls } from "../ui";
+import { Badge, Button, Card, CardTitle, Collapsible, Field, inputCls } from "../ui";
 import type {
   AdvancedSettings,
   GatewayStatus,
@@ -9,6 +9,15 @@ import type {
   SystemMemoryInfo,
   WslConfigInfo,
 } from "../types";
+
+const ADV_TABS = [
+  { id: "general", label: "General" },
+  { id: "storage", label: "Storage" },
+  { id: "engine", label: "Engine" },
+  { id: "network", label: "Network" },
+  { id: "memory", label: "Memory" },
+  { id: "environment", label: "Environment" },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Shared Settings Field Components
@@ -116,6 +125,15 @@ export default function Settings() {
   const toggleMode = (newMode: "simple" | "advanced") => {
     setMode(newMode);
     localStorage.setItem("llm_panel_settings_mode", newMode);
+  };
+
+  // Advanced-mode tab with localStorage persistence
+  const [advTab, setAdvTab] = useState<string>(
+    () => localStorage.getItem("llm_panel_settings_adv_tab") || "general"
+  );
+  const selectAdvTab = (tab: string) => {
+    setAdvTab(tab);
+    localStorage.setItem("llm_panel_settings_adv_tab", tab);
   };
 
   const handleExportConfig = async () => {
@@ -525,16 +543,22 @@ export default function Settings() {
                 value={s.hf_token}
                 onChange={(value) => { setS({ ...s, hf_token: value }); setHfTokenDirty(true); }}
               />
-              <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
-                <div className="space-y-1.5">
-                  <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => { setS({ ...s, github_token: e.target.value }); setGithubTokenDirty(true); }} />
-                  <div className="flex gap-2">
-                    <Button variant="ghost" onClick={async () => { setGithubMsg("Testing…"); try { const r = await api.githubAccess(); setGithubMsg(`${r.message} Token used: ${r.token_used ? "yes" : "no"}.`); } catch (e) { setGithubMsg(String(e)); } }}>Test GitHub access</Button>
-                    <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubTokenDirty(false); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
+              <Collapsible
+                title="GitHub token (optional)"
+                subtitle="Only needed if GitHub search hits anonymous rate limits"
+                className="mt-3"
+              >
+                <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
+                  <div className="space-y-1.5">
+                    <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => { setS({ ...s, github_token: e.target.value }); setGithubTokenDirty(true); }} />
+                    <div className="flex gap-2">
+                      <Button variant="ghost" onClick={async () => { setGithubMsg("Testing…"); try { const r = await api.githubAccess(); setGithubMsg(`${r.message} Token used: ${r.token_used ? "yes" : "no"}.`); } catch (e) { setGithubMsg(String(e)); } }}>Test GitHub access</Button>
+                      <Button variant="ghost" onClick={async () => { const updated = await api.clearGithubToken(); setS(updated); setGithubTokenDirty(false); setGithubMsg("GitHub token cleared."); }}>Clear GitHub token</Button>
+                    </div>
+                    {githubMsg && <div className="text-xs text-slate-400">{githubMsg}</div>}
                   </div>
-                  {githubMsg && <div className="text-xs text-slate-400">{githubMsg}</div>}
-                </div>
-              </Field>
+                </Field>
+              </Collapsible>
             </div>
             </div>
 
@@ -644,7 +668,33 @@ export default function Settings() {
       {/* ADVANCED DEVELOPER MODE VIEW                                          */}
       {/* ===================================================================== */}
       {mode === "advanced" && (
-        <div className="space-y-6">
+        <div className="space-y-5">
+          {/* Section tabs */}
+          <div className="flex flex-wrap items-center gap-1 rounded-lg border border-edge bg-surface-2 p-1 w-fit">
+            {ADV_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => selectAdvTab(tab.id)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                  advTab === tab.id
+                    ? "bg-indigo-600 text-white shadow-sm font-semibold"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {advTab === "general" && (
+            <div className="space-y-6">
+              {renderApplianceCard()}
+              {renderConfigBackupCard()}
+            </div>
+          )}
+          {advTab === "storage" && (
+            <div className="space-y-6">
           {/* Section 1: WSL & Storage Management */}
           <Card>
             <CardTitle right={saved ? <Badge color="emerald">saved</Badge> : undefined}>
@@ -805,7 +855,10 @@ export default function Settings() {
               <Button onClick={save}>Save Storage Settings</Button>
             </div>
           </Card>
-
+            </div>
+          )}
+          {advTab === "engine" && (
+            <div className="space-y-6">
           {/* Section 2: vLLM Engine & Optimization Flags */}
           <Card>
             <CardTitle right={saved ? <Badge color="emerald">saved</Badge> : undefined}>
@@ -922,6 +975,32 @@ export default function Settings() {
             </div>
           </Card>
 
+          {/* Section 7: Measured Stats (Live Runs) */}
+          <Card>
+            <CardTitle>Measured Model Benchmarks</CardTitle>
+            <div className="space-y-2 text-sm">
+              {Object.keys(s.measured).length === 0 ? (
+                <div className="text-slate-500">No measured data yet — start a server and send requests to measure live tok/s.</div>
+              ) : (
+                Object.entries(s.measured).map(([model, m]) => (
+                  <div
+                    key={model}
+                    className="flex flex-wrap items-center gap-2 rounded-md border border-edge bg-surface px-3 py-2"
+                  >
+                    <span className="flex-1 truncate text-slate-200 font-medium">{model}</span>
+                    <span className="font-mono text-xs text-cyan-300">
+                      {m.tokens_per_sec != null ? `${m.tokens_per_sec.toFixed(1)} tok/s` : "—"}
+                    </span>
+                    <span className="text-xs text-slate-500">{fmtNum(m.total_generation_tokens)} tokens</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </Card>
+            </div>
+          )}
+          {advTab === "network" && (
+            <div className="space-y-6">
           {/* Section 3: Networking & API Security */}
           <Card>
             <CardTitle right={saved ? <Badge color="emerald">saved</Badge> : undefined}>
@@ -1092,7 +1171,10 @@ export default function Settings() {
               <Button onClick={save}>Save Network Settings</Button>
             </div>
           </Card>
-
+            </div>
+          )}
+          {advTab === "memory" && (
+            <div className="space-y-6">
           {/* Section 4: Hardware & Deep Memory Tuning */}
           <Card>
             <CardTitle right={memSaved ? <Badge color="emerald">saved</Badge> : undefined}>
@@ -1341,6 +1423,33 @@ export default function Settings() {
             </div>
           </Card>
 
+          {/* Section 8: .wslconfig Viewer */}
+          <Card>
+            <CardTitle
+              right={
+                <Button
+                  variant="ghost"
+                  onClick={() => navigator.clipboard?.writeText(wsl?.content ?? "")}
+                  disabled={!wsl?.content}
+                >
+                  Copy
+                </Button>
+              }
+            >
+              .wslconfig <span className="text-xs font-normal text-slate-500">(Windows-side WSL2 configuration)</span>
+            </CardTitle>
+            <div className="text-xs text-slate-500">
+              {wsl?.path ?? "no path found"} — recommended:{" "}
+              <code>memory=24GB</code> for 7B+ models, <code>nestedVirtualization=true</code>.
+            </div>
+            <pre className="mt-2 rounded-md bg-black/30 p-3 font-mono text-xs text-slate-300 overflow-x-auto">
+              {wsl?.content ?? "(no .wslconfig yet — create one at %USERPROFILE%\\.wslconfig)"}
+            </pre>
+          </Card>
+            </div>
+          )}
+          {advTab === "environment" && (
+            <div className="space-y-6">
           {/* Section 5: Environment & Logging */}
           <Card>
             <CardTitle right={saved ? <Badge color="emerald">saved</Badge> : undefined}>
@@ -1386,59 +1495,8 @@ export default function Settings() {
               <Button onClick={save}>Save Environment Settings</Button>
             </div>
           </Card>
-
-          {/* Section 6: Appliance & Startup Behavior */}
-          {renderApplianceCard()}
-
-          {/* Section 7: Configuration Portability & Backup */}
-          {renderConfigBackupCard()}
-
-          {/* Section 8: .wslconfig Viewer */}
-          <Card>
-            <CardTitle
-              right={
-                <Button
-                  variant="ghost"
-                  onClick={() => navigator.clipboard?.writeText(wsl?.content ?? "")}
-                  disabled={!wsl?.content}
-                >
-                  Copy
-                </Button>
-              }
-            >
-              .wslconfig <span className="text-xs font-normal text-slate-500">(Windows-side WSL2 configuration)</span>
-            </CardTitle>
-            <div className="text-xs text-slate-500">
-              {wsl?.path ?? "no path found"} — recommended:{" "}
-              <code>memory=24GB</code> for 7B+ models, <code>nestedVirtualization=true</code>.
             </div>
-            <pre className="mt-2 rounded-md bg-black/30 p-3 font-mono text-xs text-slate-300 overflow-x-auto">
-              {wsl?.content ?? "(no .wslconfig yet — create one at %USERPROFILE%\\.wslconfig)"}
-            </pre>
-          </Card>
-
-          {/* Section 7: Measured Stats (Live Runs) */}
-          <Card>
-            <CardTitle>Measured Model Benchmarks</CardTitle>
-            <div className="space-y-2 text-sm">
-              {Object.keys(s.measured).length === 0 ? (
-                <div className="text-slate-500">No measured data yet — start a server and send requests to measure live tok/s.</div>
-              ) : (
-                Object.entries(s.measured).map(([model, m]) => (
-                  <div
-                    key={model}
-                    className="flex flex-wrap items-center gap-2 rounded-md border border-edge bg-surface px-3 py-2"
-                  >
-                    <span className="flex-1 truncate text-slate-200 font-medium">{model}</span>
-                    <span className="font-mono text-xs text-cyan-300">
-                      {m.tokens_per_sec != null ? `${m.tokens_per_sec.toFixed(1)} tok/s` : "—"}
-                    </span>
-                    <span className="text-xs text-slate-500">{fmtNum(m.total_generation_tokens)} tokens</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </Card>
+          )}
         </div>
       )}
     </div>

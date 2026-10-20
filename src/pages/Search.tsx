@@ -1367,30 +1367,17 @@ function ModelCard({
           </div>
         )}
 
-        {/* llmfit 4-dimensional score breakdown */}
+        {/* llmfit score — full Q/S/F/C breakdown lives in the expanded detail panel */}
         {(model.score_components || fit?.score_components) && (
-          <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400 bg-surface-3/40 px-2 py-1 rounded border border-edge/40">
-            <div className="flex items-center gap-1">
-              <span className="text-amber-400 font-bold">★</span>
-              <span className="font-semibold text-slate-200">
-                {(model.score ?? fit?.score ?? 0).toFixed(0)}
-              </span>
-              <span className="text-slate-500 text-[10px]">/100</span>
-            </div>
-            <div className="flex items-center gap-2.5 font-mono text-[10px]">
-              <span title="Quality Score (benchmark capability)">
-                Q: <strong className="text-slate-200">{(model.score_components ?? fit?.score_components)?.quality.toFixed(0)}</strong>
-              </span>
-              <span title="Speed Score (tok/s)">
-                S: <strong className="text-cyan-300">{(model.score_components ?? fit?.score_components)?.speed.toFixed(0)}</strong>
-              </span>
-              <span title="Fit Score (VRAM efficiency)">
-                F: <strong className="text-emerald-300">{(model.score_components ?? fit?.score_components)?.fit.toFixed(0)}</strong>
-              </span>
-              <span title="Context Score (usable context window)">
-                C: <strong className="text-indigo-300">{(model.score_components ?? fit?.score_components)?.context.toFixed(0)}</strong>
-              </span>
-            </div>
+          <div
+            className="flex items-center gap-1 text-[10px] text-slate-400 bg-surface-3/40 px-2 py-1 rounded border border-edge/40 w-fit"
+            title={`Quality ${((model.score_components ?? fit?.score_components)?.quality ?? 0).toFixed(0)} · Speed ${((model.score_components ?? fit?.score_components)?.speed ?? 0).toFixed(0)} · Fit ${((model.score_components ?? fit?.score_components)?.fit ?? 0).toFixed(0)} · Context ${((model.score_components ?? fit?.score_components)?.context ?? 0).toFixed(0)} — open for details`}
+          >
+            <span className="text-amber-400 font-bold">★</span>
+            <span className="font-semibold text-slate-200">
+              {(model.score ?? fit?.score ?? 0).toFixed(0)}
+            </span>
+            <span className="text-slate-500 text-[10px]">/100</span>
           </div>
         )}
 

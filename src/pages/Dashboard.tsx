@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, events, fmtGB, fmtNum } from "../api";
-import { Button, Card, CardTitle, Gauge, Spinner } from "../ui";
+import { Button, Card, CardTitle, Collapsible, Gauge, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import type { EnvStatus, ProvisionReport, SystemMetricPoint, WslLogEvent, FlashInferReady } from "../types";
 
@@ -130,12 +130,9 @@ export default function Dashboard() {
           <Button variant="ghost" onClick={() => setRefreshKey((k) => k + 1)}>
             ↻ Refresh
           </Button>
-          <Button onClick={runProvision} disabled={provisioning}>
-            {provisioning ? <Spinner label="Provisioning…" /> : "⚡ Provision WSL"}
-          </Button>
-          {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
-            <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
-              {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
+          {(!env || !env.provisioned) && (
+            <Button onClick={runProvision} disabled={provisioning}>
+              {provisioning ? <Spinner label="Provisioning…" /> : "⚡ Provision WSL"}
             </Button>
           )}
         </div>
@@ -174,7 +171,7 @@ export default function Dashboard() {
       )}
 
       {/* Health row */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Card>
           <CardTitle>llama.cpp</CardTitle>
           <div className="space-y-1.5 text-sm">
@@ -267,65 +264,6 @@ export default function Dashboard() {
         </Card>
 
         <Card>
-          <CardTitle>
-            FlashInfer JIT Ready
-            <div className="flex items-center gap-1 ml-2">
-              <Button variant="ghost" className="text-[11px]" onClick={checkFlashInfer} disabled={checkingFlashInfer}>
-                {checkingFlashInfer ? <Spinner label="checking…" /> : "Check"}
-              </Button>
-              {!flashInferReady?.nvcc || !flashInferReady?.gcc || !flashInferReady?.ninja || !flashInferReady?.python_dev ? (
-                <Button variant="subtle" className="text-[11px]" onClick={installCudaTools} disabled={checkingFlashInfer}>
-                  Install CUDA Build Tools
-                </Button>
-              ) : null}
-            </div>
-          </CardTitle>
-          {flashInferReady ? (
-            <div className="space-y-1.5 text-sm">
-              {[
-                ["nvcc", "nvcc", "bg-emerald-400", "bg-red-400"],
-                ["gcc", "gcc", "bg-emerald-400", "bg-red-400"],
-                ["ninja", "ninja", "bg-emerald-400", "bg-red-400"],
-                ["python3.12-dev", "python_dev", "bg-emerald-400", "bg-red-400"],
-              ].map(([label, key, foundColor, missingColor]) => (
-                <div key={key} className="flex items-center gap-2 text-xs">
-                  <span className={`h-2 w-2 rounded-full ${flashInferReady[key as keyof typeof flashInferReady] ? foundColor : missingColor}`} />
-                  <span className="font-mono">{label}</span>
-                  <span className={flashInferReady[key as keyof typeof flashInferReady] ? "text-emerald-300" : "text-red-300"}>
-                    {flashInferReady[key as keyof typeof flashInferReady] ? "found" : "missing"}
-                  </span>
-                </div>
-              ))}
-              {flashInferReady.cuda_home && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="h-2 w-2 rounded-full bg-cyan-400" />
-                  <span className="font-mono">CUDA_HOME</span>
-                  <span className="text-cyan-300 font-mono text-[10px] truncate max-w-[200px]">{flashInferReady.cuda_home}</span>
-                </div>
-              )}
-              {flashInferReady.torch_cuda_version && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="h-2 w-2 rounded-full bg-indigo-400" />
-                  <span className="font-mono">PyTorch CUDA</span>
-                  <span className="text-indigo-300">{flashInferReady.torch_cuda_version}</span>
-                </div>
-              )}
-              {!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev ? (
-                <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
-                  Missing build tools. Install in WSL: <code className="bg-black/40 px-1 py-0.5 rounded">sudo apt update && sudo apt install -y gcc ninja-build python3.12-dev</code> + CUDA toolkit from NVIDIA WSL repo.
-                </div>
-              ) : (
-                <div className="mt-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
-                  All FlashInfer JIT build tools present. First compilation will be slow (~30-60s), subsequent runs cached.
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="text-sm text-slate-500">Click "Check" to verify nvcc, gcc, ninja, and python3.12-dev in WSL.</div>
-          )}
-        </Card>
-
-        <Card>
           <CardTitle>System & Memory</CardTitle>
           {env ? (
             <div className="space-y-1.5 text-sm">
@@ -377,66 +315,148 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* VRAM gauge + Time-series Sparklines + log */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card className="flex flex-col justify-between p-4 gap-4">
-          <CardTitle>GPU & VRAM History (last 5 min)</CardTitle>
-          <div className="flex flex-col sm:flex-row items-center justify-around gap-6 my-auto">
-            <Gauge pct={vramPct} label={gpu ? `${vramPct}%` : "?"} sub={gpu ? `${fmtNum(freeGb, 1)} GB free / ${fmtNum(totalGb, 0)} GB` : "no GPU"} />
-            <div className="flex-1 w-full space-y-3">
-              <Sparkline
-                label="VRAM Used"
-                data={systemSeries.map((p) => p.vram_used_mb / 1024)}
-                unit="GB"
-                min={0}
-                max={totalGb || 24}
-                color="#38bdf8"
-                currentValue={gpu ? `${((gpu.vram_total_mb - gpu.vram_free_mb) / 1024).toFixed(1)} GB` : undefined}
-                formatValue={(v) => `${v.toFixed(1)}`}
-              />
-              <Sparkline
-                label="GPU Core Utilization"
-                data={systemSeries.map((p) => p.gpu_util_pct)}
-                unit="%"
-                min={0}
-                max={100}
-                color="#34d399"
-                currentValue={gpu ? `${gpu.util_percent}%` : undefined}
-                formatValue={(v) => `${Math.round(v)}`}
-              />
-            </div>
+      {/* VRAM gauge + Time-series Sparklines */}
+      <Card className="flex flex-col justify-between p-4 gap-4">
+        <CardTitle>GPU & VRAM History (last 5 min)</CardTitle>
+        <div className="flex flex-col sm:flex-row items-center justify-around gap-6 my-auto">
+          <Gauge pct={vramPct} label={gpu ? `${vramPct}%` : "?"} sub={gpu ? `${fmtNum(freeGb, 1)} GB free / ${fmtNum(totalGb, 0)} GB` : "no GPU"} />
+          <div className="flex-1 w-full space-y-3">
+            <Sparkline
+              label="VRAM Used"
+              data={systemSeries.map((p) => p.vram_used_mb / 1024)}
+              unit="GB"
+              min={0}
+              max={totalGb || 24}
+              color="#38bdf8"
+              currentValue={gpu ? `${((gpu.vram_total_mb - gpu.vram_free_mb) / 1024).toFixed(1)} GB` : undefined}
+              formatValue={(v) => `${v.toFixed(1)}`}
+            />
+            <Sparkline
+              label="GPU Core Utilization"
+              data={systemSeries.map((p) => p.gpu_util_pct)}
+              unit="%"
+              min={0}
+              max={100}
+              color="#34d399"
+              currentValue={gpu ? `${gpu.util_percent}%` : undefined}
+              formatValue={(v) => `${Math.round(v)}`}
+            />
           </div>
-        </Card>
+        </div>
+      </Card>
 
-        <Card>
-          <CardTitle
-            right={
-              provisioning ? <Spinner label="running…" /> : <span className="text-[11px] text-slate-600">{logs.length} lines</span>
-            }
-          >
-            Provisioning log
-          </CardTitle>
-          <div className="h-64 overflow-y-auto rounded-md bg-black/30 p-3 font-mono text-[11px] leading-relaxed">
-            {logs.length === 0 ? (
-              <span className="text-slate-600">
-                {provisioning
-                  ? "waiting for output…"
-                  : env?.provisioned
-                    ? "Provisioned ✓ — re-run to upgrade vLLM or repair."
-                    : "Run “Provision WSL” — first run installs apt basics, a uv venv (CPython 3.12) and vLLM CUDA wheels."}
-              </span>
-            ) : (
-              logs.map((l, i) => (
-                <div key={i}>
-                  <span className="text-indigo-400/70">[{l.phase}]</span>{" "}
-                  <span className="text-slate-300">{l.line}</span>
-                </div>
-              ))
+      {/* Setup & diagnostics — advanced, folded away for everyday use. Forced open while provisioning. */}
+      <Collapsible
+        key={provisioning ? "diag-open" : "diag-closed"}
+        defaultOpen={provisioning || !!provisionErr}
+        title="Setup & diagnostics"
+        subtitle="Provisioning log, FlashInfer JIT build tools, and repair actions"
+      >
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card>
+            <CardTitle
+              right={
+                provisioning ? <Spinner label="running…" /> : <span className="text-[11px] text-slate-600">{logs.length} lines</span>
+              }
+            >
+              Provisioning log
+            </CardTitle>
+            <div className="h-64 overflow-y-auto rounded-md bg-black/30 p-3 font-mono text-[11px] leading-relaxed">
+              {logs.length === 0 ? (
+                <span className="text-slate-600">
+                  {provisioning
+                    ? "waiting for output…"
+                    : env?.provisioned
+                      ? "Provisioned ✓ — re-run to upgrade vLLM or repair."
+                      : "Run “Provision WSL” — first run installs apt basics, a uv venv (CPython 3.12) and vLLM CUDA wheels."}
+                </span>
+              ) : (
+                logs.map((l, i) => (
+                  <div key={i}>
+                    <span className="text-indigo-400/70">[{l.phase}]</span>{" "}
+                    <span className="text-slate-300">{l.line}</span>
+                  </div>
+                ))
+              )}
+              <div ref={logEndRef} />
+            </div>
+            {env?.provisioned && !provisioning && (
+              <div className="mt-3 flex gap-2">
+                <Button variant="subtle" onClick={runProvision}>
+                  Re-run setup (upgrade / repair)
+                </Button>
+                {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
+                  <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
+                    {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
+                  </Button>
+                )}
+              </div>
             )}
-            <div ref={logEndRef} />
-          </div>
-        </Card>
-      </div>
+          </Card>
+
+          <Card>
+            <CardTitle
+              right={
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" className="text-[11px]" onClick={checkFlashInfer} disabled={checkingFlashInfer}>
+                    {checkingFlashInfer ? <Spinner label="checking…" /> : "Check"}
+                  </Button>
+                  {flashInferReady && (!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev) ? (
+                    <Button variant="subtle" className="text-[11px]" onClick={installCudaTools} disabled={checkingFlashInfer}>
+                      Install CUDA Build Tools
+                    </Button>
+                  ) : null}
+                </div>
+              }
+            >
+              FlashInfer JIT build tools
+            </CardTitle>
+            {flashInferReady ? (
+              <div className="space-y-1.5 text-sm">
+                {[
+                  ["nvcc", "nvcc", "bg-emerald-400", "bg-red-400"],
+                  ["gcc", "gcc", "bg-emerald-400", "bg-red-400"],
+                  ["ninja", "ninja", "bg-emerald-400", "bg-red-400"],
+                  ["python3.12-dev", "python_dev", "bg-emerald-400", "bg-red-400"],
+                ].map(([label, key, foundColor, missingColor]) => (
+                  <div key={key} className="flex items-center gap-2 text-xs">
+                    <span className={`h-2 w-2 rounded-full ${flashInferReady[key as keyof typeof flashInferReady] ? foundColor : missingColor}`} />
+                    <span className="font-mono">{label}</span>
+                    <span className={flashInferReady[key as keyof typeof flashInferReady] ? "text-emerald-300" : "text-red-300"}>
+                      {flashInferReady[key as keyof typeof flashInferReady] ? "found" : "missing"}
+                    </span>
+                  </div>
+                ))}
+                {flashInferReady.cuda_home && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="h-2 w-2 rounded-full bg-cyan-400" />
+                    <span className="font-mono">CUDA_HOME</span>
+                    <span className="text-cyan-300 font-mono text-[10px] truncate max-w-[200px]">{flashInferReady.cuda_home}</span>
+                  </div>
+                )}
+                {flashInferReady.torch_cuda_version && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                    <span className="font-mono">PyTorch CUDA</span>
+                    <span className="text-indigo-300">{flashInferReady.torch_cuda_version}</span>
+                  </div>
+                )}
+                {!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev ? (
+                  <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+                    Missing build tools. Install in WSL: <code className="bg-black/40 px-1 py-0.5 rounded">sudo apt update && sudo apt install -y gcc ninja-build python3.12-dev</code> + CUDA toolkit from NVIDIA WSL repo.
+                  </div>
+                ) : (
+                  <div className="mt-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                    All FlashInfer JIT build tools present. First compilation will be slow (~30-60s), subsequent runs cached.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500">Click "Check" to verify nvcc, gcc, ninja, and python3.12-dev in WSL.</div>
+            )}
+          </Card>
+        </div>
+      </Collapsible>
     </div>
   );
 }

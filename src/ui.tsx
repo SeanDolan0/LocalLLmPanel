@@ -1,8 +1,165 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <div className={`rounded-xl border border-edge bg-surface-2 p-4 ${className}`}>{children}</div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Collapsible section — progressive disclosure for advanced controls.
+// ---------------------------------------------------------------------------
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={`h-3.5 w-3.5 shrink-0 text-slate-500 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 5l7 7-7 7" />
+    </svg>
+  );
+}
+
+export function Collapsible({
+  title,
+  subtitle,
+  right,
+  defaultOpen = false,
+  storageKey,
+  open: openProp,
+  onOpenChange,
+  children,
+  className = "",
+  compact = false,
+}: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  /** Rendered on the header row (e.g. a badge or action). Kept clickable. */
+  right?: ReactNode;
+  defaultOpen?: boolean;
+  /** When set, open/closed state persists across sessions in localStorage. */
+  storageKey?: string;
+  /** Controlled mode: pass the open state and a change handler. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: ReactNode;
+  className?: string;
+  compact?: boolean;
+}) {
+  const [internalOpen, setInternalOpen] = useState(() => {
+    if (storageKey) {
+      const v = localStorage.getItem(storageKey);
+      if (v !== null) return v === "1";
+    }
+    return defaultOpen;
+  });
+  const open = openProp ?? internalOpen;
+  const toggle = () => {
+    const next = !open;
+    setInternalOpen(next);
+    onOpenChange?.(next);
+  };
+
+  useEffect(() => {
+    if (storageKey) localStorage.setItem(storageKey, open ? "1" : "0");
+  }, [open, storageKey]);
+
+  return (
+    <div className={`rounded-xl border border-edge bg-surface-2 ${className}`}>
+      <div className={`flex items-center gap-2.5 ${compact ? "px-3 py-2" : "px-4 py-3"}`}>
+        <button
+          type="button"
+          onClick={toggle}
+          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+          aria-expanded={open}
+        >
+          <Chevron open={open} />
+          <span className="min-w-0">
+            <span className={`block font-semibold text-slate-200 ${compact ? "text-xs" : "text-sm"}`}>{title}</span>
+            {subtitle && (
+              <span className={`block truncate text-slate-500 ${compact ? "text-[10px]" : "text-xs"}`}>{subtitle}</span>
+            )}
+          </span>
+        </button>
+        {right && <div className="flex shrink-0 items-center gap-2">{right}</div>}
+      </div>
+      {open && <div className={`${compact ? "px-3 pb-3" : "px-4 pb-4"} border-t border-edge/50 pt-3`}>{children}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Overflow (⋯) menu — keeps low-frequency actions reachable without clutter.
+// ---------------------------------------------------------------------------
+export type MenuItem = {
+  label: string;
+  onClick?: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+  hint?: string;
+};
+
+export function Menu({
+  items,
+  label = "⋯",
+  title = "More actions",
+  className = "",
+}: {
+  items: MenuItem[];
+  label?: string;
+  title?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const visible = items.filter((i) => !i.disabled);
+  if (visible.length === 0) return null;
+
+  return (
+    <div className={`relative ${className}`}>
+      <button
+        type="button"
+        title={title}
+        aria-label={title}
+        onClick={() => setOpen((o) => !o)}
+        className={`flex h-7 w-7 items-center justify-center rounded-md border text-sm leading-none transition-colors ${
+          open
+            ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-300"
+            : "border-edge bg-surface-3 text-slate-400 hover:text-slate-200"
+        }`}
+      >
+        {label}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-50 mt-1 min-w-52 rounded-lg border border-edge bg-surface-3 py-1 shadow-xl shadow-black/40">
+            {visible.map((item, i) => (
+              <button
+                key={`${item.label}-${i}`}
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  item.onClick?.();
+                }}
+                className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-xs transition-colors ${
+                  item.danger
+                    ? "text-red-300 hover:bg-red-500/10"
+                    : "text-slate-300 hover:bg-surface-2 hover:text-slate-100"
+                }`}
+              >
+                <span>{item.label}</span>
+                {item.hint && <span className="text-[10px] text-slate-500">{item.hint}</span>}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
