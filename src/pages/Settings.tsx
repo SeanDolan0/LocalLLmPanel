@@ -256,6 +256,7 @@ export default function Settings() {
         minimize_to_tray: s.minimize_to_tray,
         auto_restart_crashed: s.auto_restart_crashed,
         launch_at_login: s.launch_at_login,
+        auto_shutdown_wsl: s.auto_shutdown_wsl,
       };
       if (hfTokenDirty) patch.hf_token = s.hf_token;
       if (githubTokenDirty) patch.github_token = s.github_token;
@@ -377,6 +378,20 @@ export default function Settings() {
             </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               Monitors background server processes and restarts them with backoff if they crash.
+            </div>
+          </div>
+        </label>
+        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors sm:col-span-2">
+          <input
+            type="checkbox"
+            checked={s.auto_shutdown_wsl !== false}
+            onChange={(e) => setS({ ...s, auto_shutdown_wsl: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-200">Auto-shutdown WSL when idle</div>
+            <div className="text-xs text-slate-400 leading-relaxed">
+              Terminates the WSL distro when no servers, pulls, or provisioning are active and nothing has used WSL for at least 60 seconds. Keeps WSL shut down after closing/idle periods to free memory.
             </div>
           </div>
         </label>

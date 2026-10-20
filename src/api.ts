@@ -145,6 +145,7 @@ export const api = {
         | "minimize_to_tray"
         | "auto_restart_crashed"
         | "launch_at_login"
+        | "auto_shutdown_wsl"
       >
     > & {
       clear_hf_token?: boolean;

@@ -12,7 +12,8 @@ use crate::estimate;
 pub use crate::state::MetricsSnapshot;
 use crate::state::{AppState, LiveServer, ServerDef, ServerStatus, VecDequeLog};
 use crate::wsl;
-use tauri::Emitter;
+use std::sync::atomic::Ordering;
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Validate environment variable name: must match ^[A-Za-z_][A-Za-z0-9_]*$
 pub fn validate_env_name(name: &str) -> Result<(), String> {
@@ -1627,13 +1628,27 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
 
     // Remove the WSL pidfile after the process is gone; stale pidfiles can
     // otherwise make a later recovery attempt signal an unrelated process.
-    let pid_cleanup_script = format!(
-        "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\nrm -f -- \"$venv_dir/../run/$run_id.pid\"",
-        wsl::WSL_TILDE_EXPANSION_SNIPPET,
-        wsl::shell_quote_wsl(&cfg.venv_dir),
-        wsl::shell_quote_wsl(id),
-    );
-    let _ = wsl::run_script(&distro, &pid_cleanup_script);
+    let had_wsl_child_stop = wsl_child.is_some();
+    let backend_is_wsl = if had_wsl_child_stop {
+        true
+    } else {
+        state
+            .config()
+            .servers
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.backend == "vllm" || s.backend == "Vllm")
+            .unwrap_or(false)
+    };
+    if backend_is_wsl && crate::wsl::is_running(&distro) {
+        let pid_cleanup_script = format!(
+            "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\nrm -f -- \"$venv_dir/../run/$run_id.pid\"",
+            wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            wsl::shell_quote_wsl(&cfg.venv_dir),
+            wsl::shell_quote_wsl(id),
+        );
+        let _ = wsl::run_script(&distro, &pid_cleanup_script);
+    }
 
     // Mark stopped.
     {
@@ -2299,6 +2314,86 @@ pub fn server_logs(state: &Arc<AppState>, server_id: &str, since: usize) -> Stri
     }
 }
 
+#[derive(Debug)]
+pub struct IdleCheck {
+    pub auto_shutdown: bool,
+    pub test_distro: bool,
+    pub provisioning: bool,
+    pub active_pulls: bool,
+    pub starting: bool,
+    pub any_running: bool,
+    pub wsl_running: bool,
+    pub secs_since_exec: u64,
+    pub active_wsl_execs: u64,
+}
+
+pub fn should_terminate_wsl(input: &IdleCheck) -> bool {
+    if !input.auto_shutdown {
+        return false;
+    }
+    if input.test_distro {
+        return false;
+    }
+    if input.provisioning {
+        return false;
+    }
+    if input.active_pulls {
+        return false;
+    }
+    if input.starting {
+        return false;
+    }
+    if input.any_running {
+        return false;
+    }
+    if !input.wsl_running {
+        return false;
+    }
+    if input.active_wsl_execs > 0 {
+        return false;
+    }
+    if input.secs_since_exec < 60 {
+        return false;
+    }
+    true
+}
+
+pub fn spawn_wsl_idle_reaper(app: AppHandle) {
+    loop {
+        std::thread::sleep(Duration::from_secs(15));
+        let state = match app.try_state::<Arc<AppState>>() {
+            Some(s) => s.inner().clone(),
+            None => break,
+        };
+        let cfg = state.config();
+        let distro = state.resolve_distro();
+        let pulling = state.pulling.lock().unwrap();
+        let active_pulls = pulling.values().any(|v| *v);
+        drop(pulling);
+        let starting = !state.starting.lock().unwrap().is_empty();
+        let any_running = state
+            .servers
+            .lock()
+            .unwrap()
+            .values()
+            .any(|ls| matches!(ls.status, ServerStatus::Running | ServerStatus::Starting));
+        let input = IdleCheck {
+            auto_shutdown: cfg.auto_shutdown_wsl,
+            test_distro: distro.starts_with("__test_"),
+            provisioning: state.provisioning.load(Ordering::Relaxed),
+            active_pulls,
+            starting,
+            any_running,
+            wsl_running: wsl::is_running(&distro),
+            secs_since_exec: wsl::secs_since_last_exec(),
+            active_wsl_execs: wsl::active_wsl_execs(),
+        };
+        if should_terminate_wsl(&input) {
+            let _ = wsl::terminate_distro(&distro);
+        }
+    }
+}
+
 pub fn server_metrics(state: &Arc<AppState>, server_id: &str) -> Option<MetricsSnapshot> {
     let servers = state.servers.lock().unwrap();
     servers
@@ -2326,6 +2421,109 @@ mod tests {
         for path in ["/", "~", "$HOME", "/tmp/../"] {
             assert!(validate_venv_dir(path).is_err(), "accepted unsafe path {path}");
         }
+    }
+
+    #[test]
+    fn idle_reaper_respects_guards() {
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: false,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: true,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: true,
+            starting: false,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: true,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: true,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: false,
+            wsl_running: false,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 30,
+            active_wsl_execs: 0,
+        }));
+        assert!(!should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 1,
+        }));
+        assert!(should_terminate_wsl(&IdleCheck {
+            auto_shutdown: true,
+            test_distro: false,
+            provisioning: false,
+            active_pulls: false,
+            starting: false,
+            any_running: false,
+            wsl_running: true,
+            secs_since_exec: 120,
+            active_wsl_execs: 0,
+        }));
     }
 
     #[test]

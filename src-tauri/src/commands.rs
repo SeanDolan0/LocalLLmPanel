@@ -89,7 +89,7 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
         let running_weight_gb = server::running_weight_gb(&st);
         let apt_based = crate::wsl::is_apt_distro(&distro_detected);
 
-        let (provisioned, env_report) =
+        let (mut provisioned, mut env_report) =
             if let Ok(rep) = serde_json::from_str::<ProvisionReport>(&prov_out.stdout) {
                 (true, Some(rep))
             } else if prov_out.stdout.contains("\"provisioned\": true") {
@@ -123,6 +123,14 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             } else {
                 (false, None)
             };
+        if let Some(rep) = &env_report {
+            crate::state::save_provision_report_cache(rep);
+        } else if !wsl_running {
+            if let Some(cached) = crate::state::load_provision_report_cache() {
+                provisioned = true;
+                env_report = Some(cached);
+            }
+        }
 
         let llmfit_specs = crate::llmfit_adapter::get_system_specs();
         let cpu_name = Some(llmfit_specs.cpu_name.clone());
@@ -210,7 +218,8 @@ pub async fn provision(
     let cfg = st.config();
     let distro = st.resolve_distro();
     let venv = cfg.venv_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    st.provisioning.store(true, std::sync::atomic::Ordering::Relaxed);
+    let res = tauri::async_runtime::spawn_blocking(move || {
         let on_log = |phase: &str, line: &str| {
             let _ = app.emit(
                 "wsl-log",
@@ -221,7 +230,12 @@ pub async fn provision(
     })
     .await
     .map_err(|e| format!("provision task error: {e}"))?
-    .map_err(|e| format!("provision failed: {e}"))
+    .map_err(|e| format!("provision failed: {e}"));
+    st.provisioning.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(rep) = &res {
+        crate::state::save_provision_report_cache(rep);
+    }
+    res
 }
 
 #[tauri::command]
@@ -436,7 +450,11 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     } else {
         state.resolve_distro()
     };
-    let (ram_total_mb, ram_avail_mb) = crate::wsl::detect_wsl_memory(&distro);
+    let (ram_total_mb, ram_avail_mb) = if crate::wsl::is_running(&distro) {
+        crate::wsl::detect_wsl_memory(&distro)
+    } else {
+        (16_384, 12_288)
+    };
     let potential_ram = if let Some(manual) = mem.manual_ram_limit_mb {
         manual
     } else {
@@ -2224,6 +2242,7 @@ pub struct SettingsPatch {
     pub minimize_to_tray: Option<bool>,
     pub auto_restart_crashed: Option<bool>,
     pub launch_at_login: Option<bool>,
+    pub auto_shutdown_wsl: Option<bool>,
 }
 
 fn validate_imported_wsl_path(path: &str) -> Result<(), String> {
@@ -2409,6 +2428,9 @@ pub fn settings_set(
     }
     if let Some(a) = patch.auto_restart_crashed {
         next.auto_restart_crashed = a;
+    }
+    if let Some(s) = patch.auto_shutdown_wsl {
+        next.auto_shutdown_wsl = s;
     }
     if let Some(l) = patch.launch_at_login {
         next.launch_at_login = l;
@@ -2628,7 +2650,11 @@ pub fn get_system_memory_impl(st: &AppState) -> SystemMemoryInfo {
     } else {
         st.resolve_distro()
     };
-    let (wsl_total_mb, wsl_available_mb) = crate::wsl::detect_wsl_memory(&distro);
+    let (wsl_total_mb, wsl_available_mb) = if crate::wsl::is_running(&distro) {
+        crate::wsl::detect_wsl_memory(&distro)
+    } else {
+        (16_384, 12_288)
+    };
     let mem = &cfg.memory_settings;
     let usable_budget_mb = if !mem.enable_ram_overflow {
         0
@@ -3535,14 +3561,26 @@ pub async fn library_disk_usage(state: State<'_, Arc<AppState>>) -> Result<u64, 
 pub async fn gpu_status(state: State<'_, Arc<AppState>>) -> Result<Option<GpuSnapshot>, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let native_gpu = crate::llamacpp_install::windows_gpu_snapshot();
         let distro = st.resolve_distro();
+        if !crate::wsl::is_running(&distro) {
+            if let Some(g) = native_gpu.clone() {
+                *st.gpu.lock().unwrap() = Some(g.clone());
+                st.record_system_metric(&g);
+            }
+            return native_gpu;
+        }
         let snap = gpu_snapshot(&distro);
         if let Some(s) = snap.clone() {
             let mut gpu = st.gpu.lock().unwrap();
             *gpu = Some(s.clone());
             st.record_system_metric(&s);
+        } else if let Some(g) = native_gpu.clone() {
+            *st.gpu.lock().unwrap() = Some(g.clone());
+            st.record_system_metric(&g);
+            return native_gpu;
         }
-        snap
+        snap.or(native_gpu)
     })
     .await
     .map_err(|e| e.to_string())
@@ -3562,11 +3600,22 @@ pub async fn system_metrics_series(
             }
         };
         if should_sample {
+            let native_gpu = crate::llamacpp_install::windows_gpu_snapshot();
             let distro = st.resolve_distro();
-            if let Some(s) = gpu_snapshot(&distro) {
+            if crate::wsl::is_running(&distro) {
+                if let Some(s) = gpu_snapshot(&distro) {
+                    let mut gpu = st.gpu.lock().unwrap();
+                    *gpu = Some(s.clone());
+                    st.record_system_metric(&s);
+                } else if let Some(g) = &native_gpu {
+                    let mut gpu = st.gpu.lock().unwrap();
+                    *gpu = Some(g.clone());
+                    st.record_system_metric(g);
+                }
+            } else if let Some(g) = &native_gpu {
                 let mut gpu = st.gpu.lock().unwrap();
-                *gpu = Some(s.clone());
-                st.record_system_metric(&s);
+                *gpu = Some(g.clone());
+                st.record_system_metric(g);
             }
         }
         let sm = st.system_metrics.lock().unwrap();

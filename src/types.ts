@@ -279,6 +279,7 @@ export interface Settings {
   minimize_to_tray?: boolean;
   auto_restart_crashed?: boolean;
   launch_at_login?: boolean;
+  auto_shutdown_wsl?: boolean;
   default_env?: Record<string, string>;
   llamacpp_channels?: {
     upstream?: {

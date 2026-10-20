@@ -203,11 +203,11 @@ export default function Dashboard() {
           {env ? (
             <div className="space-y-1.5 text-sm">
               <div className="flex items-center gap-2">
-                <span className={`h-2 w-2 rounded-full ${env.wsl_ok ? "bg-emerald-400" : "bg-red-400"}`} />
+                <span className={`h-2 w-2 rounded-full ${env.wsl_ok ? "bg-emerald-400" : "bg-slate-400"}`} />
                 <span className="font-medium text-slate-200">{env.distro}</span>
               </div>
               <div className="text-xs text-slate-500">
-                {env.wsl_ok ? "responsive" : "unreachable"} ·{" "}
+                {env.wsl_ok ? "running" : "powered down (starts on demand)"} ·{" "}
                 {env.apt_based ? "apt-based" : "not apt-based"}
               </div>
               <div className="text-xs text-slate-500">

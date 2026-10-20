@@ -104,6 +104,10 @@ pub fn run() {
             }
 
             gateway::spawn_supervisor(app.handle().clone());
+            let app_handle_reaper = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::server::spawn_wsl_idle_reaper(app_handle_reaper);
+            });
 
             Ok(())
         })
@@ -169,6 +173,21 @@ pub fn run() {
             commands::check_flashinfer_ready,
             commands::install_cuda_build_tools,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            use tauri::RunEvent;
+            if let RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    let st = Arc::clone(state.inner());
+                    let cfg = st.config();
+                    if cfg.auto_shutdown_wsl {
+                        let distro = st.resolve_distro();
+                        if !distro.starts_with("__test_") {
+                            crate::wsl::terminate_distro(&distro);
+                        }
+                    }
+                }
+            }
+        });
 }

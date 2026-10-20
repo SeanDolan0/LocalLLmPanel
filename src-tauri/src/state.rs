@@ -3,8 +3,42 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProvisionReportCache {
+    pub report: crate::provision::ProvisionReport,
+    pub last_seen: u64,
+}
+
+pub fn provision_report_cache_path() -> PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| std::env::temp_dir())
+        .join(CONFIG_DIR_NAME);
+    dir.join("provision-report.json")
+}
+
+pub fn load_provision_report_cache() -> Option<crate::provision::ProvisionReport> {
+    let path = provision_report_cache_path();
+    std::fs::read(&path)
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .map(|c: ProvisionReportCache| c.report)
+}
+
+pub fn save_provision_report_cache(report: &crate::provision::ProvisionReport) {
+    let path = provision_report_cache_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let cache = ProvisionReportCache {
+        report: report.clone(),
+        last_seen: crate::state::now_ms(),
+    };
+    let _ = std::fs::write(&path, serde_json::to_vec_pretty(&cache).unwrap_or_default());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -627,6 +661,8 @@ pub struct PersistedConfig {
     pub auto_restart_crashed: bool,
     #[serde(default)]
     pub launch_at_login: bool,
+    #[serde(default = "default_true")]
+    pub auto_shutdown_wsl: bool,
     /// WSL paths of locally imported model folders (Task 9 local import).
     #[serde(default)]
     pub imported_local_models: Vec<String>,
@@ -693,6 +729,7 @@ impl Default for PersistedConfig {
             minimize_to_tray: true,
             auto_restart_crashed: true,
             launch_at_login: false,
+            auto_shutdown_wsl: true,
             imported_local_models: Vec::new(),
             default_env,
         }
@@ -793,6 +830,9 @@ impl PersistedConfig {
             channels.insert(LlamaCppChannel::Prism, LlamaCppChannelConfig::default());
             cfg.llamacpp_channels = channels;
         }
+        // Default true for existing configs that don't have the field
+        // (serde default covers this on deserialization, but be explicit for safety)
+        let _ = cfg.auto_shutdown_wsl;
         cfg
     }
 
@@ -1048,7 +1088,8 @@ pub struct AppState {
     pub benchmarks: Mutex<Vec<BenchmarkRun>>,
     pub benchmark_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub system_metrics: Mutex<VecDeque<SystemMetricPoint>>,
-    pub server_metrics: Mutex<HashMap<String, VecDeque<ServerMetricPoint>>>,
+    pub server_metrics: Mutex<BTreeMap<String, VecDeque<ServerMetricPoint>>>,
+    pub provisioning: AtomicBool,
 }
 
 pub const METRICS_SERIES_CAPACITY: usize = 60;
@@ -1116,7 +1157,8 @@ impl AppState {
             benchmarks: Mutex::new(BenchmarkRun::load_all()),
             benchmark_cancels: Mutex::new(HashMap::new()),
             system_metrics: Mutex::new(VecDeque::new()),
-            server_metrics: Mutex::new(HashMap::new()),
+            server_metrics: Mutex::new(BTreeMap::new()),
+            provisioning: AtomicBool::new(false),
         }
     }
 
@@ -1156,9 +1198,12 @@ impl AppState {
         if current.starts_with("__test_") {
             return current;
         }
-        // If configured distro exists and is responsive, use it
-        if !current.is_empty() && crate::wsl::run_script(&current, "echo ok").ok {
-            return current;
+        // If configured distro exists, use it (do not boot to validate)
+        if !current.is_empty() {
+            let installed = crate::wsl::installed_distros();
+            if installed.contains(&current) {
+                return current;
+            }
         }
         // Otherwise detect and save the best available (prefers dedicated distro)
         if let Some(detected) = crate::wsl::detect_default_distro() {
@@ -1626,6 +1671,7 @@ mod tests {
         let mut cfg = PersistedConfig::default();
         assert!(cfg.minimize_to_tray);
         assert!(cfg.auto_restart_crashed);
+        assert!(cfg.auto_shutdown_wsl);
         assert!(!cfg.launch_at_login);
 
         cfg.minimize_to_tray = false;

@@ -3,8 +3,81 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::state::GpuSnapshot;
+
+static LAST_WSL_EXEC: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_WSL_EXECS: AtomicU64 = AtomicU64::new(0);
+
+fn touch_exec() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    LAST_WSL_EXEC.store(now, Ordering::Relaxed);
+}
+
+fn exec_enter() {
+    ACTIVE_WSL_EXECS.fetch_add(1, Ordering::Relaxed);
+    touch_exec();
+}
+
+fn exec_exit() {
+    ACTIVE_WSL_EXECS.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Seconds since the last WSL exec started by this process. Returns a large value
+/// if no exec has been recorded.
+pub fn secs_since_last_exec() -> u64 {
+    let last = LAST_WSL_EXEC.load(Ordering::Relaxed);
+    if last == 0 {
+        return u64::MAX / 4;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.saturating_sub(last)
+}
+
+pub fn active_wsl_execs() -> u64 {
+    ACTIVE_WSL_EXECS.load(Ordering::Relaxed)
+}
+
+pub fn terminate_distro(distro: &str) -> bool {
+    let distro = distro.trim();
+    if distro.is_empty() || distro.starts_with("__test_") {
+        return false;
+    }
+    let mut cmd = wsl_command();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd.args(["--terminate", distro]);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if started.elapsed() >= Duration::from_secs(5) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return false,
+        }
+    }
+}
 
 /// Convert a Windows (or already-WSL) path to the WSL mount path.
 ///
@@ -148,7 +221,7 @@ pub fn detect_default_distro() -> Option<String> {
             if clean.starts_with('*') {
                 let name = clean.trim_start_matches('*').trim();
                 let name = name.split_whitespace().next().unwrap_or("").trim();
-                if !name.is_empty() && is_apt_distro(name) && run_script(name, "echo ok").ok {
+                if !name.is_empty() && is_apt_distro(name) && installed_distros().contains(&name.to_string()) {
                     return Some(name.to_string());
                 }
             }
@@ -158,20 +231,13 @@ pub fn detect_default_distro() -> Option<String> {
     let distros = installed_distros();
 
     // 2. Prefer our dedicated distro if present
-    if distros.contains(&APP_DISTRO_NAME.to_string()) && run_script(APP_DISTRO_NAME, "echo ok").ok {
+    if distros.contains(&APP_DISTRO_NAME.to_string()) {
         return Some(APP_DISTRO_NAME.to_string());
     }
 
-    // 3. Scan installed distros for an apt-based one that responds to echo ok
+    // 3. Scan installed distros for an apt-based one
     for d in &distros {
-        if is_apt_distro(d) && run_script(d, "echo ok").ok {
-            return Some(d.clone());
-        }
-    }
-
-    // 3. Fallback to any installed distro that responds to echo ok
-    for d in &distros {
-        if run_script(d, "echo ok").ok {
+        if is_apt_distro(d) {
             return Some(d.clone());
         }
     }
@@ -255,6 +321,7 @@ pub fn parse_meminfo(content: &str) -> (u64, u64) {
 /// the distro cannot be queried. Fit verification must not treat fallback
 /// values as measured hardware.
 pub fn try_detect_wsl_memory(distro: &str) -> Option<(u64, u64)> {
+    exec_enter();
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
@@ -262,7 +329,9 @@ pub fn try_detect_wsl_memory(distro: &str) -> Option<(u64, u64)> {
     } else {
         cmd.args(["-d", distro, "--exec", "cat", "/proc/meminfo"]);
     }
-    let output = cmd.output().ok()?;
+    let output = cmd.output().ok();
+    exec_exit();
+    let output = output?;
     if !output.status.success() {
         return None;
     }
@@ -294,6 +363,7 @@ impl RunOutput {
 
 /// Run a script synchronously in the given distro, waiting for completion.
 pub fn run_script(distro: &str, script: &str) -> RunOutput {
+    exec_enter();
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
@@ -301,7 +371,7 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
     } else {
         cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
     }
-    match cmd.output() {
+    let res = match cmd.output() {
         Ok(o) => RunOutput {
             ok: o.status.success(),
             code: o.status.code().unwrap_or(-1),
@@ -314,12 +384,15 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
             stdout: String::new(),
             stderr: format!("spawn error: {e}"),
         },
-    }
+    };
+    exec_exit();
+    res
 }
 
 /// Like [`run_script`] but as the distro's `root` user (no sudo password
 /// needed). Used to write sudoers rules and do other root-only setup.
 pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
+    exec_enter();
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
@@ -329,7 +402,7 @@ pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
             "-d", distro, "--user", "root", "--exec", "bash", "-lc", script,
         ]);
     }
-    match cmd.output() {
+    let res = match cmd.output() {
         Ok(o) => RunOutput {
             ok: o.status.success(),
             code: o.status.code().unwrap_or(-1),
@@ -342,7 +415,9 @@ pub fn run_script_root(distro: &str, script: &str) -> RunOutput {
             stdout: String::new(),
             stderr: format!("spawn error: {e}"),
         },
-    }
+    };
+    exec_exit();
+    res
 }
 
 /// Run a script synchronously, streaming each output line to `on_line`.
@@ -608,6 +683,8 @@ pub fn spawn_script_via_stdin(
 ) -> Result<WslChild, String> {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+
+    exec_enter();
 
     let script_path = gen_script_name(server_id);
 
