@@ -22,7 +22,7 @@ No cloud, no containers, no per-server port juggling. Estimates are estimates �
 - **Live logs and metrics** — streamed logs, request/queue/KV-cache/TTFT/tok-s metrics, per-server metrics panel, and VRAM/GPU sparklines on the Dashboard.
 - **Chat playground** — streaming responses, cancellation, saved conversations, markdown rendering, and an OpenAI tool-call smoke test.
 - **Benchmark suite** — standardized prompt set, prompt/decode tok-s, latency, and history across runs and quants.
-- **Appliance mode** — tray icon (open panel, stop all, quit), minimize-to-tray, start at login, automatic restart of crashed servers, and optional **WSL shutdown when idle**.
+- **Appliance mode** — tray icon (open panel, stop all, quit), minimize-to-tray, start at login, automatic restart of crashed servers, and optional **WSL shutdown when idle**. Fully quitting the app (tray → Quit, or closing the window when minimize-to-tray is off) always stops any servers it launched, including native llama.cpp processes, before the app exits.
 
 ### One endpoint for every client
 - **OpenAI-compatible gateway** on port `11434` by default:
@@ -151,6 +151,8 @@ curl http://127.0.0.1:11434/v1/chat/completions \
 
 - Routing is exact-first (served model name or HF id), then fuzzy suffix, so `Qwen2.5-7B-Instruct` finds `Qwen/Qwen2.5-7B-Instruct`.
 - `/v1/models` reports the effective context limit, quantization, task, and capability/thinking metadata for each running server, including hints when a capability needs a launch flag. The advertised `id` is the served model name or, for llama.cpp, the GGUF file stem rather than a full file path.
+- Model rows expose the same limits under every name harnesses read: `max_model_len`, `context_length`, `max_context_length`, `context_window`, `n_ctx`, `max_output_tokens`, `max_completion_tokens`, and `max_tokens`. Vision support is advertised both as `architecture.input_modalities` and as a top-level `input` array (`["text","image"]`), which is the only shape Pi's compat extension parses.
+- Pi's `pi-openai-compat` extension caches the catalog on first login and does not refresh automatically. After changing servers or model metadata, run `/compat-refresh` (or `/compat-logout` then `/compat-login`) so the new ids and limits appear; otherwise Pi keeps using the old `thinking=no` / 4096-token output caps.
 - Thinking metadata exposes a boolean `reasoning` plus a detailed `reasoning_config` (aliased as `thinking`) with standard `reasoning_effort` controls, levels, and OpenRouter/Pi metadata (`supported_efforts`, `mandatory`, `default_effort`, `thinkingLevelMap`). The gateway canonicalizes standard and extended effort labels across all model types.
 - Authentication uses the `Authorization: Bearer <key>` header only. `/health` stays open for liveness checks.
 - Requests that don't touch thinking or token-limit aliases are forwarded byte-for-byte — the gateway does not inject defaults.

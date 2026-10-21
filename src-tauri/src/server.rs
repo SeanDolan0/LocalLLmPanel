@@ -1704,6 +1704,159 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
     Ok(())
 }
 
+/// How long the app-exit path waits for an in-flight start to register its
+/// child before giving up. A quit must not hang on a wedged backend.
+const EXIT_START_WAIT: Duration = Duration::from_secs(8);
+
+/// Stop every server that still has a live child process. This is the app-exit
+/// path: unlike [`stop_server`] it skips venv validation, saves the config once,
+/// and bounds every wait so quitting cannot hang for 30 seconds per server.
+/// Returns the number of servers it attempted to stop.
+pub fn shutdown_all_servers(state: &Arc<AppState>) -> usize {
+    shutdown_all_servers_impl(state, true)
+}
+
+/// `persist` is false only in unit tests, which must not rewrite the real
+/// user config on disk.
+fn shutdown_all_servers_impl(state: &Arc<AppState>, persist: bool) -> usize {
+    let has_live = state
+        .servers
+        .lock()
+        .unwrap()
+        .values()
+        .any(|live| live.wsl_child.is_some() || live.native_child.is_some());
+    if !has_live && state.starting.lock().unwrap().is_empty() {
+        return 0;
+    }
+    let deadline = Instant::now() + EXIT_START_WAIT;
+    // A start request spawns its child before inserting it into `servers`.
+    // Wait for that hand-off so a quit racing a start cannot orphan it.
+    while !state.starting.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let has_live = state
+        .servers
+        .lock()
+        .unwrap()
+        .values()
+        .any(|live| live.wsl_child.is_some() || live.native_child.is_some());
+    if !has_live {
+        return 0;
+    }
+
+    // Clear the persisted auto-start hint first: the crash monitor reads
+    // `was_running` while backing off and would otherwise restart a server
+    // after we just stopped it.
+    {
+        let mut cfg = state.config.lock().unwrap();
+        for def in &mut cfg.servers {
+            def.was_running = false;
+        }
+        if persist {
+            if let Err(error) = cfg.save() {
+                eprintln!("[server] exit: persist stopped state: {error}");
+            }
+        }
+    }
+
+    let (distro, venv_dir) = {
+        let cfg = state.config();
+        (state.resolve_distro(), cfg.venv_dir.clone())
+    };
+
+    let mut stopped = 0usize;
+    for _ in 0..2 {
+        let batch: Vec<(String, Option<wsl::WslChild>, Option<wsl::NativeChild>)> = {
+            let mut servers = state.servers.lock().unwrap();
+            servers
+                .iter_mut()
+                .filter(|(_, live)| live.wsl_child.is_some() || live.native_child.is_some())
+                .map(|(id, live)| {
+                    // Suppress crash detection/auto-restart while we tear down.
+                    live.stopping = true;
+                    (id.clone(), live.wsl_child.take(), live.native_child.take())
+                })
+                .collect()
+        };
+        if batch.is_empty() {
+            break;
+        }
+        for (id, wsl_child, native_child) in batch {
+            stop_server_for_exit(&distro, &venv_dir, &id, wsl_child, native_child);
+            stopped += 1;
+        }
+        // Catch a start that finished registering during the first pass.
+        while !state.starting.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    // Leave the in-memory state consistent for anything still observing it
+    // while the process exits.
+    {
+        let mut servers = state.servers.lock().unwrap();
+        for live in servers.values_mut() {
+            live.status = ServerStatus::Stopped;
+            live.stopping = false;
+            live.wsl_child = None;
+            live.native_child = None;
+            live.wsl_pid = None;
+            live.error = None;
+            live.last_metrics = None;
+        }
+    }
+    stopped
+}
+
+/// Shell script used on exit: SIGTERM -> bounded wait -> SIGKILL -> pidfile
+/// removal. Kept separate so quoting can be unit-tested.
+fn exit_stop_script(venv_dir: &str, id: &str) -> String {
+    format!(
+        "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\n\
+         pid=$(cat \"$venv_dir/../run/$run_id.pid\" 2>/dev/null || true)\n\
+         if [ -n \"$pid\" ]; then\n\
+           kill -TERM \"$pid\" 2>/dev/null || true\n\
+           i=0\n\
+           while [ \"$i\" -lt 20 ] && kill -0 \"$pid\" 2>/dev/null; do sleep 0.1; i=$((i+1)); done\n\
+           kill -KILL \"$pid\" 2>/dev/null || true\n\
+         fi\n\
+         rm -f -- \"$venv_dir/../run/$run_id.pid\"\n",
+        wsl::WSL_TILDE_EXPANSION_SNIPPET,
+        wsl::shell_quote_wsl(venv_dir),
+        wsl::shell_quote_wsl(id),
+    )
+}
+
+/// Best-effort termination for one server during app exit.
+fn stop_server_for_exit(
+    distro: &str,
+    venv_dir: &str,
+    id: &str,
+    wsl_child: Option<wsl::WslChild>,
+    native_child: Option<wsl::NativeChild>,
+) {
+    if let Some(mut child) = wsl_child {
+        // SIGTERM the Python PID from the pidfile, then escalate to SIGKILL
+        // inside the same WSL invocation so quitting costs at most ~2s.
+        let script = exit_stop_script(venv_dir, id);
+        let _ = wsl::run_script(distro, &script);
+        // The wsl.exe launcher can outlive the Python process by a moment.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline && child.try_wait().ok().flatten().is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+        }
+        child.join();
+    }
+    if let Some(mut child) = native_child {
+        // llama.cpp on Windows has no graceful signal; taskkill the tree.
+        let _ = child.kill();
+        child.join();
+    }
+}
+
 /// Restart = tolerant stop then start.
 pub fn restart_server(
     state: &Arc<AppState>,
@@ -2761,6 +2914,76 @@ mod tests {
             secs_since_exec: 120,
             active_wsl_execs: 0,
         }));
+    }
+
+    #[test]
+    fn exit_stop_script_quotes_paths_and_escalates() {
+        let script = exit_stop_script("~/llm-lp/.venv", "s1");
+        assert!(script.contains("venv_dir=$(__llm_panel_expand_tilde '~/llm-lp/.venv')"));
+        assert!(script.contains("run_id='s1'"));
+        assert!(script.contains("kill -TERM \"$pid\""));
+        assert!(script.contains("kill -KILL \"$pid\""));
+        assert!(script.contains("rm -f -- \"$venv_dir/../run/$run_id.pid\""));
+    }
+
+    #[test]
+    fn shutdown_all_servers_noop_when_nothing_is_live() {
+        let state = Arc::new(AppState::new());
+        {
+            let mut cfg = state.config.lock().unwrap();
+            // Keep distro resolution from shelling out to `wsl --list`.
+            cfg.distro = "__test_shutdown".into();
+        }
+        assert_eq!(shutdown_all_servers_impl(&state, false), 0);
+    }
+
+    /// The quit path must kill native llama.cpp-style children, not just mark
+    /// them stopped. `ping.exe` stands in for a long-running backend.
+    #[cfg(windows)]
+    #[test]
+    fn shutdown_all_servers_kills_native_children() {
+        let state = Arc::new(AppState::new());
+        state.config.lock().unwrap().distro = "__test_shutdown".into();
+        let child = wsl::NativeChild::spawn(
+            std::path::Path::new(r"C:\Windows\System32\ping.exe"),
+            &["-n".into(), "60".into(), "127.0.0.1".into()],
+            |_| {},
+        )
+        .expect("spawn ping");
+        let pid = child.pid();
+        state.servers.lock().unwrap().insert(
+            "s1".into(),
+            LiveServer {
+                def: def("org/model", "instruct", 8123, "fp16", None),
+                status: ServerStatus::Running,
+                error: None,
+                wsl_child: None,
+                native_child: Some(child),
+                wsl_pid: None,
+                log_ring: std::sync::Mutex::new(VecDequeLog::new()),
+                last_metrics: None,
+                stopping: false,
+                crash_retry_count: 0,
+            },
+        );
+
+        assert_eq!(shutdown_all_servers_impl(&state, false), 1);
+
+        {
+            let servers = state.servers.lock().unwrap();
+            let live = servers.get("s1").unwrap();
+            assert_eq!(live.status, ServerStatus::Stopped);
+            assert!(live.native_child.is_none());
+        }
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .expect("tasklist");
+        let listing = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !listing.contains(&pid.to_string()),
+            "native child {pid} survived app exit:\n{listing}"
+        );
     }
 
     #[test]

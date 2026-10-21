@@ -180,6 +180,14 @@ pub fn run() {
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<Arc<AppState>>() {
                     let st = Arc::clone(state.inner());
+                    // Kill every backend process we launched (vLLM in WSL and
+                    // native llama.cpp) before the process disappears. This is
+                    // deliberately independent of `auto_shutdown_wsl`: keeping
+                    // the distro alive must not leave GPU-hogging servers behind.
+                    let stopped = crate::server::shutdown_all_servers(&st);
+                    if stopped > 0 {
+                        eprintln!("[app] stopped {stopped} server(s) on exit");
+                    }
                     let cfg = st.config();
                     if cfg.auto_shutdown_wsl {
                         let distro = st.resolve_distro();

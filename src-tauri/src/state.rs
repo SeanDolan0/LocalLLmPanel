@@ -423,7 +423,10 @@ fn gguf_display_name(raw: &str) -> Option<String> {
     if leaf.is_empty() {
         return None;
     }
-    let stem = if leaf.len() > 5 && leaf[leaf.len() - 5..].eq_ignore_ascii_case(".gguf") {
+    let has_gguf_suffix =
+        leaf.len() >= 5 && leaf.as_bytes()[leaf.len() - 5..].eq_ignore_ascii_case(b".gguf");
+    let stem = if has_gguf_suffix {
+        // The matched suffix is ASCII, so `len - 5` is a char boundary.
         &leaf[..leaf.len() - 5]
     } else {
         leaf
@@ -2051,5 +2054,37 @@ mod tests {
         // Raw deserialization of old config has empty default_env.
         // The load() method adds the default VLLM_USE_FLASHINFER_SAMPLER=0.
         assert!(cfg.default_env.is_empty());
+    }
+
+    #[test]
+    fn gguf_display_name_strips_extension_and_split_suffix() {
+        assert_eq!(
+            gguf_display_name("C:\\models\\Ternary-Bonsai-2-27B-PQ2_0.gguf").as_deref(),
+            Some("Ternary-Bonsai-2-27B-PQ2_0")
+        );
+        assert_eq!(
+            gguf_display_name("/models/Model.GGUF").as_deref(),
+            Some("Model")
+        );
+        assert_eq!(
+            gguf_display_name("/models/model.gguf.bak").as_deref(),
+            Some("model.gguf.bak")
+        );
+        assert_eq!(
+            gguf_display_name("/models/model.gguf").as_deref(),
+            Some("model")
+        );
+        assert_eq!(
+            gguf_display_name("/models/model-00001-of-00003.gguf").as_deref(),
+            Some("model")
+        );
+        // Multi-byte file names must not panic on the extension slice; the
+        // byte length is not aligned with the character boundary.
+        assert_eq!(
+            gguf_display_name("C:\\模型\\bonsai-🧠.gguf").as_deref(),
+            Some("bonsai-🧠")
+        );
+        assert_eq!(gguf_display_name("/models/nal").as_deref(), Some("nal"));
+        assert_eq!(gguf_display_name("   ").as_deref(), None);
     }
 }

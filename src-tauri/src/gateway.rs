@@ -628,6 +628,14 @@ fn model_row(
         row["parameters_billions"] = serde_json::json!(params);
         row["parameter_count"] = serde_json::json!((params * 1_000_000_000.0).round() as u64);
     }
+    // Aliases are added after the macro: the json! expansion is already close
+    // to the default recursion limit, and Pi's compat extension reads
+    // `max_tokens` (not max_output_tokens/max_completion_tokens) from the
+    // catalog, falling back to 4096 when absent. It also discovers image
+    // support only from a top-level `input` array, not
+    // architecture.input_modalities.
+    row["max_tokens"] = serde_json::json!(if is_instruct { context } else { None });
+    row["input"] = serde_json::json!(input_modalities);
     if !hints.is_empty() {
         row["configuration_hints"] = serde_json::json!(hints);
     }
@@ -816,7 +824,11 @@ fn model_id_from_path(path: &str) -> Option<String> {
     if raw.is_empty() {
         None
     } else {
-        decode_path_component(raw)
+        // Decode first: an encoded `%3Alatest` suffix must be stripped too, so
+        // a client that refreshes ids from `/v1/models` can address them.
+        decode_path_component(raw).map(|id| {
+            id.strip_suffix(":latest").unwrap_or(&id).to_string()
+        })
     }
 }
 
@@ -2274,9 +2286,14 @@ mod tests {
             "n_ctx",
             "max_output_tokens",
             "max_completion_tokens",
+            "max_tokens",
         ] {
             assert_eq!(row[key], serde_json::json!(32_768));
         }
+        // Pi's compat extension reads the top-level `input` array, not
+        // architecture.input_modalities, when discovering image support.
+        assert_eq!(row["input"], serde_json::json!(["text"]));
+        assert_eq!(row["architecture"]["input_modalities"], row["input"]);
         assert_eq!(row["context_source"], "configured");
         assert_eq!(row["max_output_tokens_source"], "context_window");
         assert_eq!(row["backend"], "vllm");
@@ -2643,6 +2660,23 @@ mod tests {
         assert_eq!(
             model_id_from_path("/v1/models/Qwen%2FQwen2.5-7B-Instruct"),
             Some("Qwen/Qwen2.5-7B-Instruct".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_path_strips_latest_tag() {
+        assert_eq!(
+            model_id_from_path("/v1/models/llama3.2:latest"),
+            Some("llama3.2".to_string())
+        );
+        assert_eq!(
+            model_id_from_path("/v1/models/llama3.2%3Alatest?x=1"),
+            Some("llama3.2".to_string())
+        );
+        // A name that merely contains the tag text must be preserved.
+        assert_eq!(
+            model_id_from_path("/v1/models/latest-model"),
+            Some("latest-model".to_string())
         );
     }
 
