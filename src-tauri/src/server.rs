@@ -2298,7 +2298,7 @@ pub async fn chat(
         "stream": false,
     });
     let api_key = server_api_key(&state, &def);
-    let req = state.http.post(&url).json(&body);
+    let req = state.chat_http.post(&url).json(&body);
     let resp = apply_vllm_auth(req, api_key.as_deref())
         .send()
         .await
@@ -2400,7 +2400,7 @@ pub async fn chat_stream(
         }
 
         let api_key = server_api_key(&state, &def);
-        let req = state.http.post(&url).json(&body);
+        let req = state.chat_http.post(&url).json(&body);
         let mut resp = apply_vllm_auth(req, api_key.as_deref())
             .send()
             .await
@@ -2573,7 +2573,7 @@ pub async fn run_benchmark(app: Option<tauri::AppHandle>, state: Arc<AppState>, 
 
             let t0 = Instant::now();
             let api_key = server_api_key(&state, &def);
-            let req = state.http.post(&url).json(&body);
+            let req = state.chat_http.post(&url).json(&body);
             let send_future = apply_vllm_auth(req, api_key.as_deref()).send();
 
             let resp = tokio::select! {

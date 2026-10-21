@@ -1156,6 +1156,12 @@ pub struct AppState {
     /// between two start requests for the same server.
     pub starting: Mutex<HashSet<String>>,
     pub http: reqwest::Client,
+    /// Client for long-running chat/completion requests. `http` carries a
+    /// total 120 s deadline that also covers reading the response body, so a
+    /// streaming generation is cut mid-stream once prompt prefill plus output
+    /// exceed two minutes (harnesses then report "stream ended without
+    /// finish reason"). This client only bounds connection setup.
+    pub chat_http: reqwest::Client,
     /// In-flight model pulls: model_id → running flag.
     pub pulling: Arc<Mutex<HashMap<String, bool>>>,
     /// Latest GPU snapshot (polled by the monitor task, read by dashboard).
@@ -1228,6 +1234,11 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_default();
+        let chat_http = reqwest::Client::builder()
+            .user_agent("local-llm-panel/0.1")
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         let mut config = PersistedConfig::load();
         // Only resolve an empty distro at startup; never boot WSL just to validate it.
         if config.distro.is_empty() && !config.distro.starts_with("__test_") {
@@ -1241,6 +1252,7 @@ impl AppState {
             servers: Mutex::new(BTreeMap::new()),
             starting: Mutex::new(HashSet::new()),
             http,
+            chat_http,
             pulling: Arc::new(Mutex::new(HashMap::new())),
             gpu: Mutex::new(None),
             enrichment_cache: Mutex::new(HashMap::new()),

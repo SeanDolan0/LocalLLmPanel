@@ -2085,7 +2085,7 @@ async fn proxy_post(
         .find(|server| server.port == port)
         .and_then(|server| crate::server::server_api_key(state, server));
     let req = state
-        .http
+        .chat_http
         .post(&url)
         .header("Content-Type", "application/json")
         .body(body.to_vec());
@@ -2108,31 +2108,48 @@ async fn proxy_post(
             .map_err(|e| e.to_string())?;
         let mut upstream = resp;
         let mut line_buf = Vec::new();
-        while let Ok(Some(chunk)) = upstream.chunk().await {
-            line_buf.extend_from_slice(&chunk);
-            while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
-                let line_bytes: Vec<u8> = line_buf.drain(..=pos).collect();
-                if let Ok(line_str) = std::str::from_utf8(&line_bytes) {
-                    let normalized = normalize_sse_line(line_str);
-                    let size = format!("{:x}\r\n", normalized.len());
-                    stream
-                        .write_all(size.as_bytes())
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    stream.write_all(normalized.as_bytes()).await.map_err(|e| e.to_string())?;
-                    stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
-                } else {
-                    let size = format!("{:x}\r\n", line_bytes.len());
-                    stream
-                        .write_all(size.as_bytes())
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    stream.write_all(&line_bytes).await.map_err(|e| e.to_string())?;
-                    stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+        loop {
+            match upstream.chunk().await {
+                Ok(Some(chunk)) => {
+                    line_buf.extend_from_slice(&chunk);
+                    while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
+                        let line_bytes: Vec<u8> = line_buf.drain(..=pos).collect();
+                        if let Ok(line_str) = std::str::from_utf8(&line_bytes) {
+                            let normalized = normalize_sse_line(line_str);
+                            let size = format!("{:x}\r\n", normalized.len());
+                            stream
+                                .write_all(size.as_bytes())
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            stream.write_all(normalized.as_bytes()).await.map_err(|e| e.to_string())?;
+                            stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+                        } else {
+                            let size = format!("{:x}\r\n", line_bytes.len());
+                            stream
+                                .write_all(size.as_bytes())
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            stream.write_all(&line_bytes).await.map_err(|e| e.to_string())?;
+                            stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    // Headers are already on the wire, so the status cannot be
+                    // changed. Log the real cause instead of silently turning a
+                    // broken upstream stream into a clean EOF.
+                    eprintln!("[gateway] upstream stream error on port {port}: {e}");
+                    break;
                 }
             }
         }
         if !line_buf.is_empty() {
+            // Forward a final event that did not end in a newline as a proper
+            // SSE line, otherwise the client never parses it.
+            if !line_buf.ends_with(b"\n") {
+                line_buf.push(b'\n');
+            }
             let size = format!("{:x}\r\n", line_buf.len());
             stream
                 .write_all(size.as_bytes())
