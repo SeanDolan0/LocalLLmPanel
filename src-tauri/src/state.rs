@@ -1169,6 +1169,10 @@ pub struct AppState {
     pub benchmark_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub system_metrics: Mutex<VecDeque<SystemMetricPoint>>,
     pub server_metrics: Mutex<BTreeMap<String, VecDeque<ServerMetricPoint>>>,
+    /// Effort labels each llama.cpp chat template accepts, keyed by port.
+    /// Fetched from `/props`; a template such as Qwen3.8 only knows
+    /// `xhigh`/`medium`/`low` and raises on the standard `high` label.
+    pub template_effort_cache: Mutex<HashMap<u16, (u64, Option<Vec<String>>)>>,
     pub provisioning: AtomicBool,
 }
 
@@ -1248,6 +1252,7 @@ impl AppState {
             benchmark_cancels: Mutex::new(HashMap::new()),
             system_metrics: Mutex::new(VecDeque::new()),
             server_metrics: Mutex::new(BTreeMap::new()),
+            template_effort_cache: Mutex::new(HashMap::new()),
             provisioning: AtomicBool::new(false),
         }
     }

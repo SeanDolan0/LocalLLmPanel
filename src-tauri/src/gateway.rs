@@ -14,7 +14,7 @@
 use crate::server::apply_vllm_auth;
 use crate::state::{AppState, ServerDef, ServerStatus};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tauri::Manager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -381,6 +381,17 @@ fn model_row(
     context_source: &str,
     launch_args: &[String],
 ) -> serde_json::Value {
+    model_row_with_ladder(def, context, context_source, launch_args, None)
+}
+
+fn model_row_with_ladder(
+    def: &ServerDef,
+    context: Option<usize>,
+    context_source: &str,
+    launch_args: &[String],
+    effort_ladder: Option<&[String]>,
+) -> serde_json::Value {
+    let effort_ladder = effort_ladder.filter(|ladder| ladder.len() >= 2);
     let context = context.filter(|value| *value > 0);
     let is_instruct = def.task == "instruct";
     let is_embed = def.task == "embed";
@@ -491,11 +502,49 @@ fn model_row(
         }
     }
 
-    let supported_efforts: &[&str] = match traits.reasoning_mode {
-        ReasoningMode::None => &[],
-        ReasoningMode::Effort => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-        ReasoningMode::AlwaysOn => &["low", "medium", "high"],
+    let supported_efforts: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
+        (ReasoningMode::None, _) => Vec::new(),
+        (ReasoningMode::Effort, Some(ladder)) => std::iter::once("none")
+            .chain(ladder.iter().map(String::as_str))
+            .collect(),
+        (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
+        (ReasoningMode::Effort, None) => {
+            vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        }
+        (ReasoningMode::AlwaysOn, None) => vec!["low", "medium", "high"],
     };
+    let levels: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
+        (ReasoningMode::None, _) => Vec::new(),
+        (ReasoningMode::Effort, Some(ladder)) => std::iter::once("none")
+            .chain(ladder.iter().map(String::as_str))
+            .collect(),
+        (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
+        (mode, None) => mode.levels().to_vec(),
+    };
+    let default_level: Option<String> = match traits.reasoning_mode {
+        ReasoningMode::None => None,
+        mode => {
+            let base = mode.default_level().unwrap_or("medium").to_string();
+            Some(match effort_ladder {
+                Some(ladder) => clamp_effort_to_ladder(&base, ladder).unwrap_or(base),
+                None => base,
+            })
+        }
+    };
+    let level_map = |level: &str, fallback: &str| -> String {
+        effort_ladder
+            .and_then(|ladder| clamp_effort_to_ladder(level, ladder))
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let thinking_level_map = serde_json::json!({
+        "off": "none",
+        "minimal": level_map("minimal", "low"),
+        "low": level_map("low", "low"),
+        "medium": level_map("medium", "medium"),
+        "high": level_map("high", "high"),
+        "xhigh": level_map("xhigh", "high"),
+        "max": level_map("max", "high"),
+    });
 
     let reasoning = serde_json::json!({
         "supported": traits.reasoning,
@@ -511,28 +560,12 @@ fn model_row(
         "output_overridable": def.backend == "llamacpp"
             && traits.reasoning_mode != ReasoningMode::None,
         "mode": traits.reasoning_mode.as_str(),
-        "levels": traits.reasoning_mode.levels(),
-        "default_level": traits.reasoning_mode.default_level(),
+        "levels": levels,
+        "default_level": default_level,
         "supported_efforts": supported_efforts,
-        "default_effort": traits.reasoning_mode.default_level(),
-        "thinking_level_map": serde_json::json!({
-            "off": "none",
-            "minimal": "low",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "high",
-            "max": "high",
-        }),
-        "thinkingLevelMap": serde_json::json!({
-            "off": "none",
-            "minimal": "low",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "high",
-            "max": "high",
-        }),
+        "default_effort": default_level.clone(),
+        "thinking_level_map": thinking_level_map,
+        "thinkingLevelMap": thinking_level_map.clone(),
         "control": control,
         "controls": reasoning_controls,
         // Request values are made explicit by the gateway and win over panel
@@ -759,6 +792,57 @@ async fn fetch_runtime_context(state: &Arc<AppState>, def: &ServerDef) -> Option
     None
 }
 
+/// How long a template's effort vocabulary is trusted before re-reading
+/// `/props`. Long enough to avoid a probe per completion, short enough that a
+/// restart with a different model on the same port is picked up quickly.
+const EFFORT_LADDER_TTL_MS: u64 = 30_000;
+
+async fn fetch_effort_ladder(state: &Arc<AppState>, def: &ServerDef) -> Option<Vec<String>> {
+    let api_key = crate::server::server_api_key(state, def);
+    let url = format!("http://127.0.0.1:{}/props", def.port);
+    let request = apply_vllm_auth(state.http.get(&url), api_key.as_deref());
+    let response = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        request.send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        response.json::<serde_json::Value>(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    template_effort_ladder(value.get("chat_template")?.as_str()?)
+}
+
+async fn effort_ladder_for(state: &Arc<AppState>, def: &ServerDef) -> Option<Vec<String>> {
+    if def.backend != "llamacpp" {
+        return None;
+    }
+    let now = crate::state::now_ms();
+    {
+        let cache = state.template_effort_cache.lock().unwrap();
+        if let Some((fetched_at, ladder)) = cache.get(&def.port) {
+            if now.saturating_sub(*fetched_at) < EFFORT_LADDER_TTL_MS {
+                return ladder.clone();
+            }
+        }
+    }
+    let ladder = fetch_effort_ladder(state, def).await;
+    state
+        .template_effort_cache
+        .lock()
+        .unwrap()
+        .insert(def.port, (now, ladder.clone()));
+    ladder
+}
+
 async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     let vllm_args = state
         .config()
@@ -790,7 +874,14 @@ async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
             (None, "unknown")
         };
         let args = effective_launch_args(&def, &vllm_args);
-        rows.push(model_row(&def, context, source, args));
+        let ladder = effort_ladder_for(state, &def).await;
+        rows.push(model_row_with_ladder(
+            &def,
+            context,
+            source,
+            args,
+            ladder.as_deref(),
+        ));
     }
     rows
 }
@@ -910,6 +1001,85 @@ fn normalize_effort_label(effort: &str, backend: &str) -> Option<String> {
         }
         _ if backend == "llamacpp" => Some(value),
         _ => None,
+    }
+}
+
+/// Standard effort ladder in ascending order.
+const EFFORT_LADDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn effort_rank(effort: &str) -> Option<usize> {
+    EFFORT_LADDER
+        .iter()
+        .position(|level| effort.trim().eq_ignore_ascii_case(level))
+}
+
+/// Round a standard effort label onto the subset a chat template accepts.
+/// Higher labels fall forward (Qwen3.8's official template aliases `high` to
+/// `xhigh`) while lower labels fall back to the lowest accepted level.
+fn clamp_effort_to_ladder(effort: &str, ladder: &[String]) -> Option<String> {
+    let requested = effort_rank(effort)?;
+    if requested == 0 {
+        return Some("none".to_string());
+    }
+    let mut ranks: Vec<(usize, &str)> = ladder
+        .iter()
+        .filter_map(|level| effort_rank(level).map(|rank| (rank, level.as_str())))
+        .collect();
+    ranks.sort_by_key(|(rank, _)| *rank);
+    ranks
+        .iter()
+        .find(|(rank, _)| *rank >= requested)
+        .or_else(|| ranks.last())
+        .map(|(_, level)| level.to_string())
+}
+
+/// Some chat templates validate `reasoning_effort` and raise a Jinja error for
+/// anything outside a small set (Qwen3.8: `xhigh`, `medium`, `low`). Extract
+/// that set from the template source so the gateway can round a standard
+/// harness label (`high`) instead of forwarding a value the template rejects.
+fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
+    static CHECK_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"(?i)reasoning_effort[^\n]{0,120}?not\s+in\s*[\(\[]([^\)\]]{0,240})[\)\]]",
+        )
+        .expect("valid reasoning effort validation regex")
+    });
+    let labels = CHECK_RE.captures(template)?.get(1)?.as_str();
+    let mut levels: Vec<String> = Vec::new();
+    // `split` alternates outside/inside quoted segments.
+    for (index, part) in labels
+        .split(|character| character == '\'' || character == '"')
+        .enumerate()
+    {
+        if index % 2 == 0 {
+            continue;
+        }
+        let value = part.trim().to_ascii_lowercase();
+        if value == "none"
+            || effort_rank(&value).is_none()
+            || levels.iter().any(|level| level == &value)
+        {
+            continue;
+        }
+        levels.push(value);
+    }
+    levels.sort_by_key(|level| effort_rank(level).unwrap_or(usize::MAX));
+    (levels.len() >= 2).then_some(levels)
+}
+
+/// Normalize an effort label for the target backend, then round it onto the
+/// template's accepted vocabulary when one is known.
+fn normalize_effort_for_ladder(
+    effort: &str,
+    backend: &str,
+    ladder: Option<&[String]>,
+) -> Option<String> {
+    let canonical = normalize_effort_label(effort, backend)?;
+    match ladder {
+        Some(ladder) if backend == "llamacpp" && canonical != "none" => {
+            Some(clamp_effort_to_ladder(&canonical, ladder).unwrap_or(canonical))
+        }
+        _ => Some(canonical),
     }
 }
 
@@ -1045,15 +1215,16 @@ fn harness_budget(object: &serde_json::Map<String, serde_json::Value>) -> Option
 /// `enable_thinking=true` on toggle-style templates.  Canonicalizing here
 /// closes that gap.  Nothing is injected when the harness does not ask for
 /// thinking, so panel settings remain the default for other clients.
-fn apply_harness_precedence(
+fn apply_harness_precedence_with_ladder(
     object: &mut serde_json::Map<String, serde_json::Value>,
     backend: &str,
     context_tokens: Option<usize>,
+    effort_ladder: Option<&[String]>,
 ) {
     let raw_effort = harness_effort(object);
     let effort = raw_effort
         .as_deref()
-        .and_then(|effort| normalize_effort_label(effort, backend));
+        .and_then(|effort| normalize_effort_for_ladder(effort, backend, effort_ladder));
 
     // Canonicalize an effort the harness already sent.  vLLM rejects
     // toggle-only labels such as "on"/"auto" in its reasoning_effort enum, so
@@ -1063,7 +1234,7 @@ fn apply_harness_precedence(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
     {
-        match normalize_effort_label(&current, backend) {
+        match normalize_effort_for_ladder(&current, backend, effort_ladder) {
             Some(canonical) if canonical != current => {
                 object.insert(
                     "reasoning_effort".to_string(),
@@ -1074,6 +1245,28 @@ fn apply_harness_precedence(
                 object.remove("reasoning_effort");
             }
             _ => {}
+        }
+    }
+    // Some harnesses put the level inside `chat_template_kwargs`, which both
+    // backends forward to the template. Round that copy too so it cannot
+    // reintroduce a label the template rejects.
+    if let Some(kwargs) = object
+        .get_mut("chat_template_kwargs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(current) = kwargs
+            .get("reasoning_effort")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        {
+            if let Some(canonical) = normalize_effort_for_ladder(&current, backend, effort_ladder) {
+                if canonical != current {
+                    kwargs.insert(
+                        "reasoning_effort".to_string(),
+                        serde_json::Value::String(canonical),
+                    );
+                }
+            }
         }
     }
     if object
@@ -1231,10 +1424,20 @@ fn apply_harness_precedence(
 /// the default for clients that do not care.  When the harness did ask, the
 /// returned body contains explicit request-level controls that both vLLM and
 /// llama.cpp rank above server defaults.
+#[cfg(test)]
 fn normalize_chat_request(
     body: &[u8],
     backend: &str,
     context_tokens: Option<usize>,
+) -> Vec<u8> {
+    normalize_chat_request_with_ladder(body, backend, context_tokens, None)
+}
+
+fn normalize_chat_request_with_ladder(
+    body: &[u8],
+    backend: &str,
+    context_tokens: Option<usize>,
+    effort_ladder: Option<&[String]>,
 ) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
@@ -1243,7 +1446,7 @@ fn normalize_chat_request(
         return body.to_vec();
     };
     let original = object.clone();
-    apply_harness_precedence(object, backend, context_tokens);
+    apply_harness_precedence_with_ladder(object, backend, context_tokens, effort_ladder);
     if *object == original {
         return body.to_vec();
     }
@@ -1836,20 +2039,26 @@ async fn proxy_chat(
     body: &[u8],
     origin: Option<&str>,
 ) -> Result<(), String> {
-    let (backend, context) = {
+    let server_def = {
         let servers = state.servers.lock().unwrap();
         servers
             .values()
             .find(|server| server.def.port == port)
-            .map(|server| {
-                (
-                    server.def.backend.clone(),
-                    configured_context_tokens(&server.def),
-                )
-            })
-            .unwrap_or_else(|| ("vllm".to_string(), None))
+            .map(|server| server.def.clone())
     };
-    let body = normalize_chat_request(body, &backend, context);
+    let backend = server_def
+        .as_ref()
+        .map(|def| def.backend.clone())
+        .unwrap_or_else(|| "vllm".to_string());
+    let context = server_def.as_ref().and_then(configured_context_tokens);
+    // llama.cpp forwards the effort label to the model's Jinja template, and
+    // a template may only accept a subset of the standard ladder. Round the
+    // harness value onto that subset instead of letting the template raise.
+    let ladder = match server_def.as_ref() {
+        Some(def) => effort_ladder_for(state, def).await,
+        None => None,
+    };
+    let body = normalize_chat_request_with_ladder(body, &backend, context, ladder.as_deref());
     proxy_post(stream, state, port, "/v1/chat/completions", &body, origin).await
 }
 
@@ -2791,6 +3000,21 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn normalized_with_ladder(
+        body: &str,
+        backend: &str,
+        context: Option<usize>,
+        ladder: &[String],
+    ) -> serde_json::Value {
+        let bytes = normalize_chat_request_with_ladder(
+            body.as_bytes(),
+            backend,
+            context,
+            Some(ladder),
+        );
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     #[test]
     fn test_normalize_chat_request_untouched_without_harness_controls() {
         let body = r#"{
@@ -2960,6 +3184,120 @@ mod tests {
         );
         assert!(value.get("reasoning_effort").is_none());
         assert!(value.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn test_template_effort_ladder_reads_validation_set() {
+        let qwen38 = r#"{%- if enable_thinking is undefined or enable_thinking is true %}
+    {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+    {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+        {{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), medium, and low.') }}
+    {%- endif %}
+{%- endif %}"#;
+        assert_eq!(
+            template_effort_ladder(qwen38),
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "xhigh".to_string()
+            ])
+        );
+
+        assert_eq!(
+            template_effort_ladder("{% if reasoning_effort not in ['low', 'medium', 'high'] %}"),
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
+
+        // Templates that do not validate the label keep the full ladder.
+        assert_eq!(
+            template_effort_ladder("{% if reasoning_effort == 'high' %}"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_llamacpp_clamps_effort_to_template_ladder() {
+        let ladder = vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "xhigh".to_string(),
+        ];
+
+        // `high` is the standard OpenAI default and the value Pi/Claude Code
+        // send; it must never reach a Qwen3.8-style template that rejects it.
+        let value = normalized_with_ladder(
+            r#"{"model":"m","messages":[],"reasoning_effort":"high"}"#,
+            "llamacpp",
+            Some(131_072),
+            &ladder,
+        );
+        assert_eq!(value["reasoning_effort"], "xhigh");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        // The copy inside chat_template_kwargs is rounded too.
+        let value = normalized_with_ladder(
+            r#"{"model":"m","messages":[],"chat_template_kwargs":{"reasoning_effort":"high","custom":true}}"#,
+            "llamacpp",
+            Some(131_072),
+            &ladder,
+        );
+        assert_eq!(value["chat_template_kwargs"]["reasoning_effort"], "xhigh");
+        assert_eq!(value["chat_template_kwargs"]["custom"], true);
+
+        // Levels below the accepted set round up to the lowest one.
+        let value = normalized_with_ladder(
+            r#"{"model":"m","messages":[],"reasoning_effort":"minimal"}"#,
+            "llamacpp",
+            Some(131_072),
+            &ladder,
+        );
+        assert_eq!(value["reasoning_effort"], "low");
+
+        // vLLM keeps its native mapping.
+        let value = normalized_with_ladder(
+            r#"{"model":"m","messages":[],"reasoning_effort":"high"}"#,
+            "vllm",
+            Some(131_072),
+            &ladder,
+        );
+        assert_eq!(value["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_model_row_reports_template_effort_vocabulary() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.model_id = "Ternary-Bonsai-2-27B".into();
+        def.backend = "llamacpp".into();
+        def.jinja = true;
+        def.ctx_size = Some(131_072);
+        let ladder = vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "xhigh".to_string(),
+        ];
+        let row = model_row_with_ladder(
+            &def,
+            Some(131_072),
+            "configured",
+            &[],
+            Some(&ladder),
+        );
+        assert_eq!(
+            row["reasoning_config"]["supported_efforts"],
+            serde_json::json!(["none", "low", "medium", "xhigh"])
+        );
+        assert_eq!(
+            row["reasoning_config"]["levels"],
+            serde_json::json!(["none", "low", "medium", "xhigh"])
+        );
+        assert_eq!(
+            row["reasoning_config"]["thinking_level_map"]["high"],
+            "xhigh"
+        );
     }
 
     #[test]
