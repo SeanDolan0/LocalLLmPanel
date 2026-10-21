@@ -31,7 +31,7 @@ No cloud, no containers, no per-server port juggling. Estimates are estimates �
   - `GET /health` — gateway liveness (no authentication).
   - SSE streaming, CORS handling, and mandatory `Authorization: Bearer <key>` authentication on all `/v1/*` routes.
 - Works with Cursor, Continue.dev, LibreChat, and any OpenAI-compatible client.
-- **Harness-controlled thinking** — the gateway normalizes `reasoning_effort`, `thinking`, Ollama `think`, and `chat_template_kwargs` variants so the client's request wins over launch defaults.
+- **Harness-controlled thinking** — the gateway normalizes `reasoning_effort`, `thinking`, Ollama `think`, and `chat_template_kwargs` variants so the client's request wins over launch defaults, mapping standard effort labels onto the target backend generically across all model types.
 - **LAN opt-in** — localhost-only by default; exposing servers or the gateway on `0.0.0.0` requires an explicit consent toggle.
 
 ### Security & portability
@@ -150,7 +150,8 @@ curl http://127.0.0.1:11434/v1/chat/completions \
 ```
 
 - Routing is exact-first (served model name or HF id), then fuzzy suffix, so `Qwen2.5-7B-Instruct` finds `Qwen/Qwen2.5-7B-Instruct`.
-- `/v1/models` reports the effective context limit, quantization, task, and capability/thinking metadata for each running server, including hints when a capability needs a launch flag.
+- `/v1/models` reports the effective context limit, quantization, task, and capability/thinking metadata for each running server, including hints when a capability needs a launch flag. The advertised `id` is the served model name or, for llama.cpp, the GGUF file stem rather than a full file path.
+- Thinking metadata exposes a boolean `reasoning` plus a detailed `reasoning_config` (aliased as `thinking`) with standard `reasoning_effort` controls, levels, and OpenRouter/Pi metadata (`supported_efforts`, `mandatory`, `default_effort`, `thinkingLevelMap`). The gateway canonicalizes standard and extended effort labels across all model types.
 - Authentication uses the `Authorization: Bearer <key>` header only. `/health` stays open for liveness checks.
 - Requests that don't touch thinking or token-limit aliases are forwarded byte-for-byte — the gateway does not inject defaults.
 

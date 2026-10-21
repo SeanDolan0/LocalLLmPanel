@@ -2020,7 +2020,7 @@ pub async fn chat_with_tools(
             .ok_or_else(|| anyhow!("unknown server {server_id}"))?;
         (
             ls.def.port,
-            ls.def.effective_model_name(),
+            ls.def.backend_model_name(),
             server_api_key(state, &ls.def),
         )
     };
@@ -2140,7 +2140,7 @@ pub async fn chat(
     }
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", def.port);
     let body = serde_json::json!({
-        "model": def.effective_model_name(),
+        "model": def.backend_model_name(),
         "messages": messages,
         "stream": false,
     });
@@ -2235,7 +2235,7 @@ pub async fn chat_stream(
         }
         let url = format!("http://127.0.0.1:{}/v1/chat/completions", def.port);
         let mut body = serde_json::json!({
-            "model": def.effective_model_name(),
+            "model": def.backend_model_name(),
             "messages": messages
                 .iter()
                 .map(|m| m.payload_body())
@@ -2408,7 +2408,7 @@ pub async fn run_benchmark(app: Option<tauri::AppHandle>, state: Arc<AppState>, 
         for (idx, prompt) in prompts.iter().enumerate() {
             let step = idx + 1;
             let body = serde_json::json!({
-                "model": def.effective_model_name(),
+                "model": def.backend_model_name(),
                 "messages": [
                     {"role": "system", "content": "You are a concise, accurate benchmark runner."},
                     {"role": "user", "content": prompt}

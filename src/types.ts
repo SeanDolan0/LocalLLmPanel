@@ -148,7 +148,19 @@ export interface ServerDef {
 }
 
 export function effectiveModelName(def: ServerDef): string {
-  return def.served_model_name ?? def.model_id;
+  const served = def.served_model_name?.trim();
+  if (served) return served;
+  // llama.cpp stores the GGUF path in model_id/model_path. Advertise the file
+  // stem (without extension or split-shard suffix) instead of the full path.
+  if (def.backend === "llamacpp") {
+    const raw = def.model_path?.trim() || def.model_id;
+    const leaf = raw.split(/[\\/]/).pop() ?? raw;
+    const stem = leaf
+      .replace(/\.gguf$/i, "")
+      .replace(/-\d+-of-\d+$/i, "");
+    if (stem) return stem;
+  }
+  return def.model_id;
 }
 
 export type ContextFitStatus =

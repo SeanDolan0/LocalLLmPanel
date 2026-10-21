@@ -374,10 +374,77 @@ impl ServerDef {
         Ok(())
     }
 
+    /// The model name advertised to clients and shown in the UI. llama.cpp
+    /// GGUF paths collapse to the file stem so a filesystem path never leaks.
     pub fn effective_model_name(&self) -> String {
+        if let Some(served) = self
+            .served_model_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return served.to_string();
+        }
+        // A native llama.cpp model is often stored as a full Windows or UNC
+        // path. Harnesses treat the advertised id as the model name, so expose
+        // the GGUF file stem instead of leaking the filesystem layout.
+        if self.backend == "llamacpp" {
+            let source = self
+                .model_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .unwrap_or(&self.model_id);
+            if let Some(name) = gguf_display_name(source) {
+                return name;
+            }
+        }
+        self.model_id.clone()
+    }
+
+    /// The name the backend process itself expects in a `"model"` field: the
+    /// served alias when configured, otherwise the raw model id. For llama.cpp
+    /// without an alias that is the GGUF path the process was launched with,
+    /// so internal panel calls must not use the display name.
+    pub fn backend_model_name(&self) -> String {
         self.served_model_name
-            .clone()
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| self.model_id.clone())
+    }
+}
+
+/// Turn a GGUF path into the short name clients should display: the last path
+/// component without the `.gguf` extension or split-shard suffix.
+fn gguf_display_name(raw: &str) -> Option<String> {
+    let leaf = raw.rsplit(['\\', '/']).next()?.trim();
+    if leaf.is_empty() {
+        return None;
+    }
+    let stem = if leaf.len() > 5 && leaf[leaf.len() - 5..].eq_ignore_ascii_case(".gguf") {
+        &leaf[..leaf.len() - 5]
+    } else {
+        leaf
+    };
+    let stem = strip_split_suffix(stem);
+    (!stem.is_empty()).then(|| stem.to_string())
+}
+
+fn strip_split_suffix(stem: &str) -> &str {
+    let Some(index) = stem.rfind("-of-") else {
+        return stem;
+    };
+    let (head, tail) = (&stem[..index], &stem[index + 4..]);
+    if tail.len() != 5 || !tail.chars().all(|c| c.is_ascii_digit()) || head.len() < 6 {
+        return stem;
+    }
+    let (base, shard) = head.split_at(head.len() - 6);
+    if shard.starts_with('-') && shard[1..].chars().all(|c| c.is_ascii_digit()) {
+        base
+    } else {
+        stem
     }
 }
 
@@ -1449,6 +1516,44 @@ mod tests {
         assert_eq!(native.effective_model_name(), "alias");
         assert_eq!(native.api_key.as_deref(), Some("server-key"));
         assert!(native.kv_cache_dtype.is_none());
+    }
+
+    #[test]
+    fn llamacpp_effective_model_name_uses_gguf_stem() {
+        let mut server: ServerDef = serde_json::from_str(
+            r#"{"backend":"llamacpp","id":"s","name":"s","model_id":"D:\\models\\Ternary-Bonsai-2-27B-PQ2_0.gguf","task":"instruct","port":8000,"gpu_mem_util":0.0,"quant":"GGUF"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            server.effective_model_name(),
+            "Ternary-Bonsai-2-27B-PQ2_0"
+        );
+
+        // Split-shard files collapse onto the shared stem.
+        server.model_id = "D:\\models\\Model-00001-of-00002.gguf".into();
+        assert_eq!(server.effective_model_name(), "Model");
+        // The backend still needs the raw path it was launched with.
+        assert_eq!(
+            server.backend_model_name(),
+            "D:\\models\\Model-00001-of-00002.gguf"
+        );
+
+        // Forward slashes and an explicit model_path behave the same way.
+        server.model_id = "placeholder".into();
+        server.model_path = Some("/home/user/models/Plain.GGUF".into());
+        assert_eq!(server.effective_model_name(), "Plain");
+
+        // An explicit served name always wins.
+        server.served_model_name = Some("alias".into());
+        assert_eq!(server.effective_model_name(), "alias");
+
+        // vLLM Hugging Face ids keep their org prefix.
+        server.backend = "vllm".into();
+        server.served_model_name = None;
+        server.model_path = None;
+        server.model_id = "Qwen/Qwen3-8B".into();
+        assert_eq!(server.effective_model_name(), "Qwen/Qwen3-8B");
+        assert_eq!(server.backend_model_name(), "Qwen/Qwen3-8B");
     }
 
     #[test]
