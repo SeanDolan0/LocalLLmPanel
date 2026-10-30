@@ -208,6 +208,7 @@ fn looks_like_reasoning_model(name: &str) -> bool {
         "olmo-3-think",
         "ernie-4.5",
         "bonsai",
+        "spark",
     ];
     MARKERS.iter().any(|marker| name.contains(marker))
 }
@@ -260,11 +261,26 @@ fn looks_like_vision_model(name: &str) -> bool {
     MARKERS.iter().any(|marker| name.contains(marker))
 }
 
-fn model_traits(def: &ServerDef, launch_args: &[String]) -> ModelTraits {
+pub fn template_has_reasoning(template: &str) -> bool {
+    let lower = template.to_ascii_lowercase();
+    lower.contains("<think>")
+        || lower.contains("</think>")
+        || lower.contains("enable_thinking")
+        || lower.contains("reasoning_content")
+        || lower.contains("reasoning_effort")
+        || lower.contains("<thought>")
+        || lower.contains("thinking_effort")
+}
+
+fn model_traits(
+    def: &ServerDef,
+    launch_args: &[String],
+    template_reasoning: bool,
+) -> ModelTraits {
     let name = format!("{} {}", def.model_id, def.effective_model_name()).to_ascii_lowercase();
     let is_instruct = def.task == "instruct";
 
-    let family_reasoning = looks_like_reasoning_model(&name);
+    let family_reasoning = template_reasoning || looks_like_reasoning_model(&name);
     let family_always_on = reasoning_is_always_on(&name);
 
     let (reasoning, reasoning_output, configured, reasoning_enabled) = if def.backend == "llamacpp"
@@ -381,7 +397,7 @@ fn model_row(
     context_source: &str,
     launch_args: &[String],
 ) -> serde_json::Value {
-    model_row_with_ladder(def, context, context_source, launch_args, None)
+    model_row_with_ladder(def, context, context_source, launch_args, None, false)
 }
 
 fn model_row_with_ladder(
@@ -390,12 +406,13 @@ fn model_row_with_ladder(
     context_source: &str,
     launch_args: &[String],
     effort_ladder: Option<&[String]>,
+    template_reasoning: bool,
 ) -> serde_json::Value {
     let effort_ladder = effort_ladder.filter(|ladder| ladder.len() >= 2);
     let context = context.filter(|value| *value > 0);
     let is_instruct = def.task == "instruct";
     let is_embed = def.task == "embed";
-    let traits = model_traits(def, launch_args);
+    let traits = model_traits(def, launch_args, template_reasoning || effort_ladder.is_some());
     let hints = model_hints(def, &traits, launch_args);
     let model_name = def.effective_model_name();
 
@@ -669,6 +686,10 @@ fn model_row_with_ladder(
     // architecture.input_modalities.
     row["max_tokens"] = serde_json::json!(if is_instruct { context } else { None });
     row["input"] = serde_json::json!(input_modalities);
+    if traits.reasoning {
+        row["thinkingLevelMap"] = thinking_level_map.clone();
+        row["thinking_level_map"] = thinking_level_map;
+    }
     if !hints.is_empty() {
         row["configuration_hints"] = serde_json::json!(hints);
     }
@@ -797,50 +818,140 @@ async fn fetch_runtime_context(state: &Arc<AppState>, def: &ServerDef) -> Option
 /// restart with a different model on the same port is picked up quickly.
 const EFFORT_LADDER_TTL_MS: u64 = 30_000;
 
-async fn fetch_effort_ladder(state: &Arc<AppState>, def: &ServerDef) -> Option<Vec<String>> {
-    let api_key = crate::server::server_api_key(state, def);
-    let url = format!("http://127.0.0.1:{}/props", def.port);
-    let request = apply_vllm_auth(state.http.get(&url), api_key.as_deref());
-    let response = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        request.send(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
+fn read_symlink_or_file(path: &std::path::Path) -> Option<String> {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        return Some(content);
     }
-    let value = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        response.json::<serde_json::Value>(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    template_effort_ladder(value.get("chat_template")?.as_str()?)
+    if let Ok(target) = std::fs::read_link(path) {
+        let parent = path.parent()?;
+        let resolved = parent.join(target);
+        if let Ok(content) = std::fs::read_to_string(resolved) {
+            return Some(content);
+        }
+    }
+    None
 }
 
-async fn effort_ladder_for(state: &Arc<AppState>, def: &ServerDef) -> Option<Vec<String>> {
-    if def.backend != "llamacpp" {
-        return None;
+fn read_vllm_chat_template(distro: &str, def: &ServerDef) -> Option<String> {
+    if let Some(path) = &def.model_path {
+        let p = std::path::Path::new(path);
+        for file in ["tokenizer_config.json", "chat_template.json"] {
+            let candidate = p.join(file);
+            if let Some(content) = read_symlink_or_file(&candidate) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(tmpl) = val.get("chat_template").and_then(|v| v.as_str()) {
+                        return Some(tmpl.to_string());
+                    }
+                }
+            }
+        }
     }
+    if !distro.is_empty() {
+        let hf_folder = format!("models--{}", def.model_id.replace('/', "--"));
+        let wsl_base = format!(r"\\wsl.localhost\{distro}");
+        let mut hub_dirs = vec![
+            std::path::PathBuf::from(&wsl_base)
+                .join("root")
+                .join(".cache")
+                .join("huggingface")
+                .join("hub")
+                .join(&hf_folder),
+        ];
+        let home_dir = std::path::PathBuf::from(&wsl_base).join("home");
+        if let Ok(users) = std::fs::read_dir(home_dir) {
+            for user in users.flatten().filter(|e| e.path().is_dir()) {
+                hub_dirs.push(
+                    user.path()
+                        .join(".cache")
+                        .join("huggingface")
+                        .join("hub")
+                        .join(&hf_folder),
+                );
+            }
+        }
+        for hub_dir in hub_dirs {
+            let snapshots = hub_dir.join("snapshots");
+            if let Ok(snaps) = std::fs::read_dir(snapshots) {
+                for snap in snaps.flatten().filter(|e| e.path().is_dir()) {
+                    let snap_path = snap.path();
+                    for file in ["tokenizer_config.json", "chat_template.json"] {
+                        let candidate = snap_path.join(file);
+                        if let Some(content) = read_symlink_or_file(&candidate) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if let Some(tmpl) = val.get("chat_template").and_then(|v| v.as_str()) {
+                                    return Some(tmpl.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_template_info(
+    state: &Arc<AppState>,
+    def: &ServerDef,
+) -> (Option<Vec<String>>, bool) {
+    let template = if def.backend == "llamacpp" {
+        let api_key = crate::server::server_api_key(state, def);
+        let url = format!("http://127.0.0.1:{}/props", def.port);
+        let request = apply_vllm_auth(state.http.get(&url), api_key.as_deref());
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            request.send(),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+        if let Some(resp) = response.filter(|r| r.status().is_success()) {
+            let val = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                resp.json::<serde_json::Value>(),
+            )
+            .await
+            .ok()
+            .and_then(|v| v.ok());
+            val.and_then(|v| v.get("chat_template").and_then(|t| t.as_str()).map(str::to_string))
+        } else {
+            None
+        }
+    } else {
+        read_vllm_chat_template(&state.config().distro, def)
+    };
+
+    let template_reasoning = template.as_deref().map_or(false, template_has_reasoning);
+    let ladder = template.as_deref().and_then(template_effort_ladder);
+    (ladder, template_reasoning)
+}
+
+async fn template_info_for(
+    state: &Arc<AppState>,
+    def: &ServerDef,
+) -> (Option<Vec<String>>, bool) {
     let now = crate::state::now_ms();
     {
         let cache = state.template_effort_cache.lock().unwrap();
         if let Some((fetched_at, ladder)) = cache.get(&def.port) {
             if now.saturating_sub(*fetched_at) < EFFORT_LADDER_TTL_MS {
-                return ladder.clone();
+                let is_reasoning = ladder.is_some();
+                return (ladder.clone(), is_reasoning);
             }
         }
     }
-    let ladder = fetch_effort_ladder(state, def).await;
+    let (ladder, is_reasoning) = fetch_template_info(state, def).await;
     state
         .template_effort_cache
         .lock()
         .unwrap()
         .insert(def.port, (now, ladder.clone()));
-    ladder
+    (ladder, is_reasoning)
+}
+
+async fn effort_ladder_for(state: &Arc<AppState>, def: &ServerDef) -> Option<Vec<String>> {
+    template_info_for(state, def).await.0
 }
 
 async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
@@ -874,13 +985,14 @@ async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
             (None, "unknown")
         };
         let args = effective_launch_args(&def, &vllm_args);
-        let ladder = effort_ladder_for(state, &def).await;
+        let (ladder, template_reasoning) = template_info_for(state, &def).await;
         rows.push(model_row_with_ladder(
             &def,
             context,
             source,
             args,
             ladder.as_deref(),
+            template_reasoning,
         ));
     }
     rows
@@ -1076,7 +1188,7 @@ fn normalize_effort_for_ladder(
 ) -> Option<String> {
     let canonical = normalize_effort_label(effort, backend)?;
     match ladder {
-        Some(ladder) if backend == "llamacpp" && canonical != "none" => {
+        Some(ladder) if canonical != "none" => {
             Some(clamp_effort_to_ladder(&canonical, ladder).unwrap_or(canonical))
         }
         _ => Some(canonical),
@@ -3274,14 +3386,14 @@ mod tests {
         );
         assert_eq!(value["reasoning_effort"], "low");
 
-        // vLLM keeps its native mapping.
+        // vLLM also clamps to ladder when known.
         let value = normalized_with_ladder(
             r#"{"model":"m","messages":[],"reasoning_effort":"high"}"#,
             "vllm",
             Some(131_072),
             &ladder,
         );
-        assert_eq!(value["reasoning_effort"], "high");
+        assert_eq!(value["reasoning_effort"], "xhigh");
     }
 
     #[test]
@@ -3302,6 +3414,7 @@ mod tests {
             "configured",
             &[],
             Some(&ladder),
+            true,
         );
         assert_eq!(
             row["reasoning_config"]["supported_efforts"],
