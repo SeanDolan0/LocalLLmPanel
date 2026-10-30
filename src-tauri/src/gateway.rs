@@ -548,20 +548,38 @@ fn model_row_with_ladder(
             })
         }
     };
-    let level_map = |level: &str, fallback: &str| -> String {
-        effort_ladder
-            .and_then(|ladder| clamp_effort_to_ladder(level, ladder))
-            .unwrap_or_else(|| fallback.to_string())
+    let level_map_val = |level: &str| -> serde_json::Value {
+        let is_supported = match effort_ladder {
+            Some(ladder) => ladder.iter().any(|l| l.eq_ignore_ascii_case(level)),
+            None => matches!(level, "low" | "medium" | "high"),
+        };
+        if is_supported {
+            serde_json::json!(level)
+        } else {
+            serde_json::Value::Null
+        }
     };
-    let thinking_level_map = serde_json::json!({
-        "off": "none",
-        "minimal": level_map("minimal", "low"),
-        "low": level_map("low", "low"),
-        "medium": level_map("medium", "medium"),
-        "high": level_map("high", "high"),
-        "xhigh": level_map("xhigh", "high"),
-        "max": level_map("max", "high"),
-    });
+    let thinking_level_map = if traits.reasoning_mode == ReasoningMode::None {
+        serde_json::json!({
+            "off": "off",
+            "minimal": serde_json::Value::Null,
+            "low": serde_json::Value::Null,
+            "medium": serde_json::Value::Null,
+            "high": serde_json::Value::Null,
+            "xhigh": serde_json::Value::Null,
+            "max": serde_json::Value::Null,
+        })
+    } else {
+        serde_json::json!({
+            "off": if traits.reasoning_mode == ReasoningMode::AlwaysOn { serde_json::Value::Null } else { serde_json::json!("none") },
+            "minimal": level_map_val("minimal"),
+            "low": level_map_val("low"),
+            "medium": level_map_val("medium"),
+            "high": level_map_val("high"),
+            "xhigh": level_map_val("xhigh"),
+            "max": level_map_val("max"),
+        })
+    };
 
     let reasoning = serde_json::json!({
         "supported": traits.reasoning,
@@ -835,9 +853,12 @@ fn read_symlink_or_file(path: &std::path::Path) -> Option<String> {
 fn read_vllm_chat_template(distro: &str, def: &ServerDef) -> Option<String> {
     if let Some(path) = &def.model_path {
         let p = std::path::Path::new(path);
-        for file in ["tokenizer_config.json", "chat_template.json"] {
+        for file in ["tokenizer_config.json", "chat_template.json", "chat_template.jinja"] {
             let candidate = p.join(file);
             if let Some(content) = read_symlink_or_file(&candidate) {
+                if file.ends_with(".jinja") {
+                    return Some(content);
+                }
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(tmpl) = val.get("chat_template").and_then(|v| v.as_str()) {
                         return Some(tmpl.to_string());
@@ -847,45 +868,35 @@ fn read_vllm_chat_template(distro: &str, def: &ServerDef) -> Option<String> {
         }
     }
     if !distro.is_empty() {
-        let hf_folder = format!("models--{}", def.model_id.replace('/', "--"));
-        let wsl_base = format!(r"\\wsl.localhost\{distro}");
-        let mut hub_dirs = vec![
-            std::path::PathBuf::from(&wsl_base)
-                .join("root")
-                .join(".cache")
-                .join("huggingface")
-                .join("hub")
-                .join(&hf_folder),
-        ];
-        let home_dir = std::path::PathBuf::from(&wsl_base).join("home");
-        if let Ok(users) = std::fs::read_dir(home_dir) {
-            for user in users.flatten().filter(|e| e.path().is_dir()) {
-                hub_dirs.push(
-                    user.path()
-                        .join(".cache")
-                        .join("huggingface")
-                        .join("hub")
-                        .join(&hf_folder),
-                );
-            }
-        }
-        for hub_dir in hub_dirs {
-            let snapshots = hub_dir.join("snapshots");
-            if let Ok(snaps) = std::fs::read_dir(snapshots) {
-                for snap in snaps.flatten().filter(|e| e.path().is_dir()) {
-                    let snap_path = snap.path();
-                    for file in ["tokenizer_config.json", "chat_template.json"] {
-                        let candidate = snap_path.join(file);
-                        if let Some(content) = read_symlink_or_file(&candidate) {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                                if let Some(tmpl) = val.get("chat_template").and_then(|v| v.as_str()) {
-                                    return Some(tmpl.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        let hf_model = &def.model_id;
+        let script = format!(
+            r#"python3 -c "import glob, json, os, sys
+folder = 'models--' + '{hf_model}'.replace('/', '--')
+for pat in [f'/root/.cache/huggingface/hub/{{folder}}/snapshots/*', f'/home/*/.cache/huggingface/hub/{{folder}}/snapshots/*']:
+    for s in glob.glob(pat):
+        for f in ['tokenizer_config.json', 'chat_template.json', 'chat_template.jinja']:
+            p = os.path.join(s, f)
+            if os.path.isfile(p):
+                try:
+                    if f.endswith('.jinja'):
+                        with open(p, 'r', encoding='utf-8') as fh:
+                            sys.stdout.write(fh.read())
+                            sys.exit(0)
+                    else:
+                        with open(p, 'r', encoding='utf-8') as fh:
+                            d = json.load(fh)
+                            t = d.get('chat_template')
+                            if isinstance(t, str) and t.strip():
+                                sys.stdout.write(t)
+                                sys.exit(0)
+                except Exception:
+                    pass
+""#,
+            hf_model = hf_model.replace('\'', "")
+        );
+        let out = crate::wsl::run_script_root(distro, &script);
+        if out.ok && !out.stdout.trim().is_empty() {
+            return Some(out.stdout);
         }
     }
     None
@@ -3426,6 +3437,10 @@ mod tests {
         );
         assert_eq!(
             row["reasoning_config"]["thinking_level_map"]["high"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            row["reasoning_config"]["thinking_level_map"]["xhigh"],
             "xhigh"
         );
     }
@@ -3674,5 +3689,28 @@ mod tests {
         assert_eq!(value["messages"][0]["content"], "hi");
         assert_eq!(value["tools"][0]["function"]["name"], "f");
         assert_eq!(value["stop"][0], "\n\n");
+    }
+
+    #[test]
+    fn test_read_vllm_chat_template_spark() {
+        let distro = "local-llm-panel-ubuntu";
+        let model_id = "XHToken/Spark-X2.6-4B-INT4";
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.model_id = model_id.into();
+        def.backend = "vllm".into();
+        let tmpl = read_vllm_chat_template(distro, &def);
+        assert!(tmpl.is_some(), "tmpl should be extracted via WSL");
+        let ladder = template_effort_ladder(&tmpl.unwrap());
+        assert_eq!(ladder, Some(vec!["low".to_string(), "high".to_string()]));
+        let row = model_row_with_ladder(&def, Some(36126), "configured", &[], ladder.as_deref(), true);
+        assert_eq!(row["reasoning_config"]["levels"], serde_json::json!(["none", "low", "high"]));
+        assert_eq!(row["reasoning_config"]["supported_efforts"], serde_json::json!(["none", "low", "high"]));
+        assert_eq!(row["thinkingLevelMap"]["off"], "none");
+        assert_eq!(row["thinkingLevelMap"]["low"], "low");
+        assert_eq!(row["thinkingLevelMap"]["high"], "high");
+        assert_eq!(row["thinkingLevelMap"]["minimal"], serde_json::Value::Null);
+        assert_eq!(row["thinkingLevelMap"]["medium"], serde_json::Value::Null);
+        assert_eq!(row["thinkingLevelMap"]["xhigh"], serde_json::Value::Null);
+        assert_eq!(row["thinkingLevelMap"]["max"], serde_json::Value::Null);
     }
 }
