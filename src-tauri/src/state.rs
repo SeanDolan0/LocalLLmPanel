@@ -733,6 +733,8 @@ pub struct PersistedConfig {
     pub launch_at_login: bool,
     #[serde(default = "default_true")]
     pub auto_shutdown_wsl: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
     /// WSL paths of locally imported model folders (Task 9 local import).
     #[serde(default)]
     pub imported_local_models: Vec<String>,
@@ -800,6 +802,7 @@ impl Default for PersistedConfig {
             auto_restart_crashed: true,
             launch_at_login: false,
             auto_shutdown_wsl: true,
+            auto_check_updates: true,
             imported_local_models: Vec::new(),
             default_env,
         }
@@ -1006,6 +1009,8 @@ pub struct ConfigExportPackage {
     pub minimize_to_tray: bool,
     pub auto_restart_crashed: bool,
     pub launch_at_login: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
     /// True when the package was produced by the redacted exporter.  Import
     /// uses this marker to preserve local secrets rather than replacing them
     /// with placeholder values.
@@ -1032,6 +1037,7 @@ impl ConfigExportPackage {
             minimize_to_tray: cfg.minimize_to_tray,
             auto_restart_crashed: cfg.auto_restart_crashed,
             launch_at_login: cfg.launch_at_login,
+            auto_check_updates: cfg.auto_check_updates,
             secrets_omitted: true,
         }
     }
@@ -1168,6 +1174,10 @@ pub struct AppState {
     pub gpu: Mutex<Option<GpuSnapshot>>,
     pub enrichment_cache: Mutex<HashMap<String, CachedEnrichment>>,
     pub quant_cache: Mutex<HashMap<String, CachedQuants>>,
+    /// `(models, cached_at, input_fingerprint)`. The fingerprint covers the
+    /// hardware profile *and* every memory setting that feeds scoring, so
+    /// changing VRAM budget, overhead, context cap or offload policy
+    /// invalidates the list instead of serving staler-but-plausible numbers.
     pub rec_cache: Mutex<Option<(Vec<crate::commands::ModelWithFit>, Instant, u64)>>,
     pub conversations: Mutex<Vec<Conversation>>,
     pub chat_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
@@ -1179,6 +1189,7 @@ pub struct AppState {
     /// Fetched from `/props`; a template such as Qwen3.8 only knows
     /// `xhigh`/`medium`/`low` and raises on the standard `high` label.
     pub template_effort_cache: Mutex<HashMap<u16, (u64, Option<Vec<String>>)>>,
+    pub app_update_cache: Mutex<Option<(crate::updater::AppUpdateInfo, Instant)>>,
     pub provisioning: AtomicBool,
 }
 
@@ -1265,6 +1276,7 @@ impl AppState {
             system_metrics: Mutex::new(VecDeque::new()),
             server_metrics: Mutex::new(BTreeMap::new()),
             template_effort_cache: Mutex::new(HashMap::new()),
+            app_update_cache: Mutex::new(None),
             provisioning: AtomicBool::new(false),
         }
     }
@@ -1329,6 +1341,20 @@ impl AppState {
             Some(t)
         } else {
             std::env::var("HF_TOKEN")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        }
+    }
+
+    pub fn github_token(&self) -> Option<String> {
+        let cfg = self.config();
+        let t = cfg.github_token.trim().to_string();
+        if !t.is_empty() {
+            Some(t)
+        } else {
+            std::env::var("GITHUB_TOKEN")
+                .or_else(|_| std::env::var("GH_TOKEN"))
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

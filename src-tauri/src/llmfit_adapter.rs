@@ -9,15 +9,15 @@ use std::sync::OnceLock;
 
 use llmfit_core::analysis::{self, InstalledIndex};
 use llmfit_core::fit::{
-    rank_models_by_fit, FitLevel, InferenceRuntime, ModelFit, RunMode as LlmfitRunMode,
-    ScoreComponents,
+    rank_models_by_fit, CalcConfig, FitLevel, InferenceRuntime, ModelFit,
+    RunMode as LlmfitRunMode, ScoreComponents,
 };
 use llmfit_core::hardware::{GpuBackend, SystemSpecs};
-use llmfit_core::models::{LlmModel, ModelDatabase, UseCase, QUANT_HIERARCHY};
+use llmfit_core::models::{LlmModel, ModelDatabase, UseCase};
 
-use crate::fit::{FitResult, FitVerdict, FormatSupport, RunMode};
+use crate::fit::{FitResult, FitVerdict, FormatSupport, HardwareProfile, RunMode};
 use crate::hf::{QuantFormat, QuantVariant};
-use crate::state::LlamaCppChannel;
+use crate::state::{LlamaCppChannel, MemorySettings};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ScoreComponentsDto {
@@ -142,6 +142,111 @@ pub fn get_model_database() -> &'static ModelDatabase {
     MODEL_DB.get_or_init(ModelDatabase::new)
 }
 
+/// Map a GPU model name to the backend llmfit uses for speed estimation.
+fn backend_from_gpu_name(name: &str, fallback: GpuBackend) -> GpuBackend {
+    let n = name.to_ascii_lowercase();
+    if n.contains("nvidia")
+        || n.contains("geforce")
+        || n.contains("quadro")
+        || n.contains("tesla")
+        || n.contains("rtx")
+        || n.contains("gtx")
+        || n.contains("a100")
+        || n.contains("h100")
+        || n.contains("t4")
+    {
+        GpuBackend::Cuda
+    } else if n.contains("amd") || n.contains("radeon") || n.contains("instinct") {
+        GpuBackend::Rocm
+    } else if n.contains("intel") || n.contains("arc") {
+        GpuBackend::Vulkan
+    } else {
+        fallback
+    }
+}
+
+/// Build llmfit `SystemSpecs` from the app's *live* hardware profile and the
+/// user's memory settings.
+///
+/// Search scores with [`crate::fit::score_variant`] against
+/// `hardware_profile()` + `MemorySettings`, while recommendations used to score
+/// against a process-wide `SystemSpecs::detect()` snapshot. The two disagreed:
+/// editing the VRAM budget, overhead or offload policy changed one tab but not
+/// the other. Both paths now derive their pool from this function, so a model
+/// can no longer be "Comfortable" in one place and "Constrained" in another
+/// because of settings alone.
+pub fn specs_from_hardware(hw: &HardwareProfile, mem: &MemorySettings) -> SystemSpecs {
+    // CPU identity is stable for the process and expensive to probe.
+    let base = get_system_specs();
+
+    let util = if mem.default_gpu_mem_util.is_finite() {
+        mem.default_gpu_mem_util.clamp(0.05, 1.0)
+    } else {
+        0.85
+    };
+    let overhead_gb = mem.vram_overhead_mb.max(0.0) / 1024.0;
+    let usable_vram_gb = (hw.vram_total_mb as f64 / 1024.0 * util - overhead_gb).max(0.0);
+    let has_gpu = hw.vram_total_mb > 0 && usable_vram_gb > 0.0;
+    let backend = if has_gpu {
+        backend_from_gpu_name(&hw.gpu_name, base.backend)
+    } else {
+        base.backend
+    };
+
+    // "Allow Weight Offloading" off means weights must fit in VRAM. Reporting an
+    // empty system-RAM pool makes llmfit grade offload/CPU-only runs as Too
+    // Tight instead of recommending them.
+    let ram_pool_gb = if mem.offload_weights_allowed {
+        hw.potential_ram_mb() / 1024.0
+    } else {
+        0.0
+    };
+
+    let gpus = if has_gpu {
+        vec![llmfit_core::hardware::GpuInfo {
+            name: hw.gpu_name.clone(),
+            vram_gb: Some(usable_vram_gb),
+            backend,
+            count: 1,
+            unified_memory: false,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    SystemSpecs {
+        total_ram_gb: hw.ram_total_mb as f64 / 1024.0,
+        available_ram_gb: ram_pool_gb,
+        total_cpu_cores: base.total_cpu_cores,
+        cpu_name: base.cpu_name.clone(),
+        has_gpu,
+        gpu_vram_gb: has_gpu.then_some(usable_vram_gb),
+        total_gpu_vram_gb: has_gpu.then_some(usable_vram_gb),
+        gpu_available_gb: has_gpu.then_some(usable_vram_gb),
+        gpu_name: has_gpu.then(|| hw.gpu_name.clone()),
+        gpu_count: u32::from(has_gpu),
+        unified_memory: false,
+        backend,
+        gpus,
+        cluster_mode: false,
+        cluster_node_count: 0,
+    }
+}
+
+/// Calculation overrides derived from the user's memory settings, so llmfit's
+/// context cap and bandwidth assumptions match the ones search uses.
+pub fn config_from_memory(hw: &HardwareProfile, mem: &MemorySettings) -> CalcConfig {
+    let mut config = CalcConfig::default();
+    config.context_cap = mem
+        .max_context_cap
+        .map(|cap| cap.min(u32::MAX as usize) as u32);
+    if hw.bandwidth_known && hw.bandwidth_gbs > 0.0 {
+        config.gpu_bandwidth_gbps_override = Some(hw.bandwidth_gbs);
+    }
+    config.ddr_bandwidth_gbps = Some(hw.ram_bandwidth_gbs);
+    config
+}
+
 /// Convert llmfit `FitLevel` and `LlmfitRunMode` to our legacy-compatible `FitVerdict`
 pub fn fit_level_to_verdict(level: FitLevel) -> FitVerdict {
     match level {
@@ -174,7 +279,17 @@ pub fn use_case_to_category_name(uc: UseCase) -> (&'static str, &'static str) {
 }
 
 /// Transform an `LlmModel` + its `ModelFit` into the full `ModelWithFit` struct.
-pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
+///
+/// Only quants the catalog actually declares are emitted. This used to sweep the
+/// whole `QUANT_HIERARCHY`, which made every row advertise 8–10 downloads the
+/// repo may not publish. Callers that can verify against Hugging Face
+/// (`commands::hydrate_gguf_variants`) replace the single entry with the repo's
+/// real file list, sizes and llama.cpp channel.
+pub fn fit_to_model_with_fit(
+    fit: &ModelFit,
+    specs: &SystemSpecs,
+    config: &CalcConfig,
+) -> ModelWithFit {
     let m = &fit.model;
     let (cat_title, pipeline) = use_case_to_category_name(fit.use_case);
 
@@ -190,30 +305,27 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
     let mut variants: Vec<QuantVariantWithFit> = Vec::new();
 
     // Determine variant quant candidates
+    let declared = m.quantization.trim();
     let mut quant_candidates: Vec<String> = Vec::new();
     if fit.runtime == InferenceRuntime::Vllm {
-        if !m.quantization.is_empty() {
-            quant_candidates.push(m.quantization.clone());
-        }
-        for q in ["AWQ-4bit", "GPTQ-Int4", "FP8", "FP16"] {
-            if !quant_candidates.iter().any(|c| c.eq_ignore_ascii_case(q)) {
-                quant_candidates.push(q.to_string());
-            }
+        if !declared.is_empty() {
+            quant_candidates.push(declared.to_string());
         }
     } else {
         // GGUF / llama.cpp
-        if !fit.best_quant.is_empty() && !quant_candidates.contains(&fit.best_quant) {
-            quant_candidates.push(fit.best_quant.clone());
-        }
-        for q in QUANT_HIERARCHY {
-            let qs = q.to_string();
-            if !quant_candidates.contains(&qs) {
-                quant_candidates.push(qs);
-            }
+        let best = fit.best_quant.trim();
+        if !best.is_empty() {
+            quant_candidates.push(best.to_string());
+        } else if !declared.is_empty() {
+            quant_candidates.push(declared.to_string());
         }
     }
 
-    let specs = get_system_specs();
+    let result_repo = m
+        .gguf_sources
+        .first()
+        .map(|src| src.repo.clone())
+        .unwrap_or_else(|| m.name.clone());
 
     for q_str in &quant_candidates {
         let is_best = q_str.eq_ignore_ascii_case(&fit.best_quant);
@@ -230,14 +342,8 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
             QuantFormat::GGUF
         };
 
-        let variant_repo = if let Some(src) = m.gguf_sources.first() {
-            src.repo.clone()
-        } else {
-            m.name.clone()
-        };
-
         let quant_variant = QuantVariant {
-            repo_id: variant_repo,
+            repo_id: result_repo.clone(),
             format: format.clone(),
             label: q_str.clone(),
             weight_bytes: None,
@@ -250,7 +356,7 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
         // Score this specific quant variant
         let mut model_variant = m.clone();
         model_variant.quantization = q_str.clone();
-        let variant_fit = ModelFit::analyze(&model_variant, specs);
+        let variant_fit = ModelFit::analyze_with_config(&model_variant, specs, config.clone());
 
         let verdict = fit_level_to_verdict(variant_fit.fit_level);
         let run_mode = fit_run_mode_to_ui(variant_fit.run_mode);
@@ -384,12 +490,21 @@ pub fn fit_to_model_with_fit(fit: &ModelFit) -> ModelWithFit {
 }
 
 /// Fetch top model recommendations for current hardware using exact `llmfit` ranking.
-pub fn recommend_models(limit: usize) -> Vec<ModelWithFit> {
-    let specs = get_system_specs();
+pub fn recommend_models(
+    limit: usize,
+    specs: &SystemSpecs,
+    config: &CalcConfig,
+) -> Vec<ModelWithFit> {
     let db = get_model_database();
     let installed = InstalledIndex::detect_all();
 
-    let mut fits = analysis::build_model_fits(db, specs, &installed, None, None);
+    let mut fits = analysis::build_model_fits_with_config(
+        db,
+        specs,
+        &installed,
+        config.context_cap,
+        config.clone(),
+    );
 
     // Hide MLX-only models on non-Apple Silicon systems
     let is_apple_silicon = specs.backend == GpuBackend::Metal && specs.unified_memory;
@@ -405,13 +520,17 @@ pub fn recommend_models(limit: usize) -> Vec<ModelWithFit> {
 
     fits.into_iter()
         .take(limit)
-        .map(|f| fit_to_model_with_fit(&f))
+        .map(|f| fit_to_model_with_fit(&f, specs, config))
         .collect()
 }
 
 /// Search models using llmfit's embedded database and exact scoring.
-pub fn search_models_local(query: &str, limit: usize) -> Vec<ModelWithFit> {
-    let specs = get_system_specs();
+pub fn search_models_local(
+    query: &str,
+    limit: usize,
+    specs: &SystemSpecs,
+    config: &CalcConfig,
+) -> Vec<ModelWithFit> {
     let db = get_model_database();
     let q_clean = query.trim().to_lowercase();
 
@@ -455,8 +574,8 @@ pub fn search_models_local(query: &str, limit: usize) -> Vec<ModelWithFit> {
         .into_iter()
         .take(limit)
         .map(|m| {
-            let fit = ModelFit::analyze(m, specs);
-            fit_to_model_with_fit(&fit)
+            let fit = ModelFit::analyze_with_config(m, specs, config.clone());
+            fit_to_model_with_fit(&fit, specs, config)
         })
         .collect()
 }
@@ -487,7 +606,21 @@ mod tests {
 
     #[test]
     fn test_recommend_models() {
-        let recs = recommend_models(10);
+        let specs = specs_from_hardware(
+            &crate::fit::HardwareProfile {
+                gpu_name: "Fallback".into(),
+                vram_total_mb: 12_288,
+                bandwidth_gbs: 672.0,
+                bandwidth_known: true,
+                ram_total_mb: 24_576,
+                ram_usable_mb: 18_432,
+                ram_potential_mb: 18_432,
+                ram_bandwidth_gbs: 65.0,
+            },
+            &MemorySettings::default(),
+        );
+        let config = CalcConfig::default();
+        let recs = recommend_models(10, &specs, &config);
         assert!(!recs.is_empty(), "Recommendations should not be empty");
         assert!(recs.len() <= 10);
 
@@ -524,7 +657,21 @@ mod tests {
 
     #[test]
     fn test_search_models_local() {
-        let results = search_models_local("qwen", 5);
+        let specs = specs_from_hardware(
+            &crate::fit::HardwareProfile {
+                gpu_name: "Fallback".into(),
+                vram_total_mb: 12_288,
+                bandwidth_gbs: 672.0,
+                bandwidth_known: true,
+                ram_total_mb: 24_576,
+                ram_usable_mb: 18_432,
+                ram_potential_mb: 18_432,
+                ram_bandwidth_gbs: 65.0,
+            },
+            &MemorySettings::default(),
+        );
+        let config = CalcConfig::default();
+        let results = search_models_local("qwen", 5, &specs, &config);
         assert!(
             !results.is_empty(),
             "Search for 'qwen' should return results"

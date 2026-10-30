@@ -13,6 +13,7 @@ pub mod provision;
 pub mod security;
 pub mod server;
 pub mod state;
+pub mod updater;
 pub mod wsl;
 
 use state::AppState;
@@ -108,6 +109,11 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 crate::server::spawn_wsl_idle_reaper(app_handle_reaper);
             });
+            let app_handle_updater = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                crate::updater::background_check_update(app_handle_updater).await;
+            });
 
             Ok(())
         })
@@ -172,6 +178,8 @@ pub fn run() {
             commands::server_recipe_parse,
             commands::check_flashinfer_ready,
             commands::install_cuda_build_tools,
+            commands::check_app_update,
+            commands::download_and_install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

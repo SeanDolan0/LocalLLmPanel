@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { api, fmtNum } from "../api";
-import { Badge, Button, Card, CardTitle, Collapsible, Field, inputCls } from "../ui";
+import { Badge, Button, Card, CardTitle, Collapsible, Field, Spinner, inputCls } from "../ui";
+import UpdateModal from "../components/UpdateModal";
 import type {
   AdvancedSettings,
+  AppUpdateInfo,
   GatewayStatus,
   MemorySettings,
   Settings as SettingsT,
@@ -116,6 +118,9 @@ export default function Settings() {
   const [githubTokenDirty, setGithubTokenDirty] = useState(false);
   const [apiKeyDirty, setApiKeyDirty] = useState(false);
   const [customEnvDirty, setCustomEnvDirty] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -199,6 +204,7 @@ export default function Settings() {
       .catch((e) => setErr(String(e)));
     api.getSystemMemory().then(setSysMem).catch(() => {});
     api.llamacppStatus().then(setLlamacppStatus).catch(() => {});
+    api.checkAppUpdate(false).then((info) => setUpdateInfo(info)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -238,6 +244,22 @@ export default function Settings() {
     };
   }, []);
 
+  const handleCheckUpdates = async () => {
+    setCheckingUpdates(true);
+    setErr(null);
+    try {
+      const info = await api.checkAppUpdate(true);
+      setUpdateInfo(info);
+      if (info.available) {
+        setShowUpdateModal(true);
+      }
+    } catch (e) {
+      setErr(`Update check failed: ${e}`);
+    } finally {
+      setCheckingUpdates(false);
+    }
+  };
+
   const save = async () => {
     if (!s) return;
     setErr(null);
@@ -257,6 +279,7 @@ export default function Settings() {
         auto_restart_crashed: s.auto_restart_crashed,
         launch_at_login: s.launch_at_login,
         auto_shutdown_wsl: s.auto_shutdown_wsl,
+        auto_check_updates: s.auto_check_updates,
       };
       if (hfTokenDirty) patch.hf_token = s.hf_token;
       if (githubTokenDirty) patch.github_token = s.github_token;
@@ -423,6 +446,78 @@ export default function Settings() {
             className="hidden"
             onChange={handleImportConfig}
           />
+        </label>
+      </div>
+    </Card>
+  );
+
+  const renderAppUpdatesCard = () => (
+    <Card>
+      <CardTitle
+        right={
+          updateInfo?.available ? (
+            <Badge color="cyan">Update {updateInfo.latest_version} available</Badge>
+          ) : updateInfo && !updateInfo.error ? (
+            <Badge color="emerald">Up to date ({updateInfo.current_version})</Badge>
+          ) : undefined
+        }
+      >
+        Application Updates
+      </CardTitle>
+      <div className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-edge bg-surface/40 p-4">
+          <div>
+            <div className="text-sm font-medium text-slate-200 flex items-center gap-2">
+              Installed Version:{" "}
+              <span className="font-mono text-indigo-300 font-semibold">
+                {updateInfo?.current_version || "..."}
+              </span>
+            </div>
+            <div className="text-xs text-slate-400 mt-1">
+              Automatically checks GitHub Releases (SeanDolan0/LocalLLmPanel) for updates.
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="ghost"
+              onClick={handleCheckUpdates}
+              disabled={checkingUpdates}
+              className="text-xs"
+            >
+              {checkingUpdates ? <Spinner label="Checking..." /> : "Check for Updates"}
+            </Button>
+            {updateInfo?.available && (
+              <Button
+                variant="primary"
+                onClick={() => setShowUpdateModal(true)}
+                className="text-xs"
+              >
+                View & Install {updateInfo.latest_version}
+              </Button>
+            )}
+          </div>
+        </div>
+
+        <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">
+          <input
+            type="checkbox"
+            checked={s?.auto_check_updates !== false}
+            onChange={(e) => {
+              if (!s) return;
+              const updated = { ...s, auto_check_updates: e.target.checked };
+              setS(updated);
+              api.settingsSet({ auto_check_updates: e.target.checked }).catch(() => {});
+            }}
+            className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+          />
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-slate-200">
+              Automatically check for updates on startup
+            </div>
+            <div className="text-xs text-slate-400 leading-relaxed">
+              When enabled, Local LLM Panel quietly checks GitHub Releases on launch and alerts you in the sidebar when a new update is ready.
+            </div>
+          </div>
         </label>
       </div>
     </Card>
@@ -662,6 +757,8 @@ export default function Settings() {
             </div>
           </Card>
 
+          {renderAppUpdatesCard()}
+
           {renderApplianceCard()}
 
           {renderConfigBackupCard()}
@@ -704,6 +801,7 @@ export default function Settings() {
 
           {advTab === "general" && (
             <div className="space-y-6">
+              {renderAppUpdatesCard()}
               {renderApplianceCard()}
               {renderConfigBackupCard()}
             </div>
@@ -1513,6 +1611,15 @@ export default function Settings() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Update Modal */}
+      {updateInfo && (
+        <UpdateModal
+          info={updateInfo}
+          isOpen={showUpdateModal}
+          onClose={() => setShowUpdateModal(false)}
+        />
       )}
     </div>
   );

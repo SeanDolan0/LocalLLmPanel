@@ -430,6 +430,39 @@ fn launch_script(
     )
 }
 
+/// Collect `.gguf` files under `dir`, recursively.
+///
+/// Downloads keep the repo's relative layout (`BF16/model-BF16.gguf`), so a
+/// single-level `read_dir` would miss every model in a precision subfolder.
+pub(crate) fn collect_ggufs_recursive(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+        if depth > 8 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, depth + 1, out);
+            } else if path
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(dir, 0, &mut out);
+    out.sort();
+    out
+}
+
 /// Resolve a user-supplied model identifier or path to an existing GGUF file.
 /// Checks:
 /// 1. Direct file path on disk
@@ -455,21 +488,8 @@ pub fn resolve_gguf_model_path(
         let leaf_name = model_raw.rsplit('/').next().unwrap_or(model_raw);
         let repo_dir = gguf_root.join(leaf_name);
         if repo_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&repo_dir) {
-                let mut ggufs: Vec<_> = entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        p.extension()
-                            .and_then(|x| x.to_str())
-                            .map(|x| x.eq_ignore_ascii_case("gguf"))
-                            .unwrap_or(false)
-                    })
-                    .collect();
-                ggufs.sort();
-                if let Some(first) = ggufs.into_iter().next() {
-                    return Some(first);
-                }
+            if let Some(first) = collect_ggufs_recursive(&repo_dir).into_iter().next() {
+                return Some(first);
             }
         }
 
@@ -478,21 +498,8 @@ pub fn resolve_gguf_model_path(
                 let dir_name = entry.file_name().to_string_lossy().to_lowercase();
                 let leaf_lower = leaf_name.to_lowercase();
                 if dir_name.contains(&leaf_lower) || leaf_lower.contains(&dir_name) {
-                    if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
-                        let mut ggufs: Vec<_> = sub_entries
-                            .flatten()
-                            .map(|e| e.path())
-                            .filter(|p| {
-                                p.extension()
-                                    .and_then(|x| x.to_str())
-                                    .map(|x| x.eq_ignore_ascii_case("gguf"))
-                                    .unwrap_or(false)
-                            })
-                            .collect();
-                        ggufs.sort();
-                        if let Some(first) = ggufs.into_iter().next() {
-                            return Some(first);
-                        }
+                    if let Some(first) = collect_ggufs_recursive(&entry.path()).into_iter().next() {
+                        return Some(first);
                     }
                 }
             }

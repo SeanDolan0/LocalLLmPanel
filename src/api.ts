@@ -35,6 +35,9 @@ import type {
   LlamacppInstallStatus,
   LlamaCppChannel,
   GgufRepoFile,
+  AppUpdateInfo,
+  AppUpdateProgress,
+  UpdateLaunchResult,
 } from "./types";
 
 export type {
@@ -146,6 +149,7 @@ export const api = {
         | "auto_restart_crashed"
         | "launch_at_login"
         | "auto_shutdown_wsl"
+        | "auto_check_updates"
       >
     > & {
       clear_hf_token?: boolean;
@@ -177,6 +181,14 @@ export const api = {
     invoke<import("./types").ServerRecipe>("server_recipe_parse", { json }),
   checkFlashInferReady: () => invoke<import("./types").FlashInferReady>("check_flashinfer_ready"),
   installCudaBuildTools: () => invoke<import("./types").ProvisionReport>("install_cuda_build_tools"),
+  checkAppUpdate: (force?: boolean) =>
+    invoke<AppUpdateInfo>("check_app_update", { force: force ?? null }),
+  downloadAndInstallUpdate: () =>
+    invoke<UpdateLaunchResult>("download_and_install_update"),
+  onAppUpdateProgress: (cb: (progress: AppUpdateProgress) => void) =>
+    listen<AppUpdateProgress>("app-update-progress", (e) => cb(e.payload)),
+  onAppUpdateAvailable: (cb: (info: AppUpdateInfo) => void) =>
+    listen<AppUpdateInfo>("app-update-available", (e) => cb(e.payload)),
 };
 
 // ---------------------------------------------------------------------------
@@ -209,6 +221,10 @@ export const events = {
     listen<BenchmarkErrorPayload>("benchmark-error", (e) => cb(e.payload)),
   llamacppInstallProgress: (cb: (e: { file: string; done: number; total?: number }) => void) =>
     listen("llamacpp-install-progress", (e) => cb(e.payload as { file: string; done: number; total?: number })),
+  appUpdateProgress: (cb: (progress: AppUpdateProgress) => void) =>
+    listen<AppUpdateProgress>("app-update-progress", (e) => cb(e.payload)),
+  appUpdateAvailable: (cb: (info: AppUpdateInfo) => void) =>
+    listen<AppUpdateInfo>("app-update-available", (e) => cb(e.payload)),
 };
 
 // ---------------------------------------------------------------------------

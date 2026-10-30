@@ -212,7 +212,7 @@ function PullStateButton({
           color={
             pullState.state === "failed" ? "red" : "indigo"
           }
-          title={pullState.file || undefined}
+          title={pullState.error || pullState.file || undefined}
         >
           {pullState.state}
         </Badge>
@@ -1103,14 +1103,15 @@ export default function Search() {
       )}
 
       {/* Failed Pulls Indicator Banner */}
-      {Object.entries(pulls).filter(([, p]) => p.state === "failed" && p.file).length > 0 && (
+      {Object.entries(pulls).filter(([, p]) => p.state === "failed").length > 0 && (
         <div className="space-y-1 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
           {Object.entries(pulls)
-            .filter(([, p]) => p.state === "failed" && p.file)
+            .filter(([, p]) => p.state === "failed")
             .map(([m, p]) => (
               <div key={m} className="flex items-center justify-between gap-2">
                 <div className="truncate">
-                  <span className="text-rose-200 font-semibold">{m} failed</span>: {p.file}
+                  <span className="text-rose-200 font-semibold">{m} failed</span>:{" "}
+                  {p.error || p.file || "download error"}
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <Button

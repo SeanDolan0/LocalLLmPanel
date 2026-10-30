@@ -302,6 +302,7 @@ export interface Settings {
   auto_restart_crashed?: boolean;
   launch_at_login?: boolean;
   auto_shutdown_wsl?: boolean;
+  auto_check_updates?: boolean;
   default_env?: Record<string, string>;
   llamacpp_channels?: {
     upstream?: {
@@ -337,6 +338,7 @@ export interface PullStatus {
   eta_seconds?: number | null;
   bytes_downloaded?: number | null;
   bytes_total?: number | null;
+  error?: string | null;
 }
 
 export interface WslLogEvent {
@@ -654,4 +656,34 @@ export interface FlashInferReady {
   python_dev: boolean;
   cuda_home: string | null;
   torch_cuda_version: string | null;
+}
+
+export interface AppUpdateInfo {
+  available: boolean;
+  current_version: string;
+  latest_version: string;
+  release_name: string;
+  release_notes: string;
+  published_at?: string | null;
+  html_url: string;
+  download_url?: string | null;
+  asset_name?: string | null;
+  asset_size?: number | null;
+  sha256_url?: string | null;
+  is_installer: boolean;
+  error?: string | null;
+}
+
+export interface AppUpdateProgress {
+  percent: number;
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  speed_bps: number;
+  phase: "downloading" | "verifying" | "ready" | "error";
+  error?: string | null;
+}
+
+export interface UpdateLaunchResult {
+  success: boolean;
+  message: string;
 }

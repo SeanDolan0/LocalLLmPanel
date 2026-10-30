@@ -39,31 +39,66 @@ pub struct GgufRepoFile {
     pub quant: Option<String>,
 }
 
+/// Hard cap on tree-API pages so a malformed `Link` chain cannot loop forever.
+const MAX_TREE_PAGES: usize = 25;
+
+/// Extract the `rel="next"` URL from an RFC 8288 `Link` header.
+fn next_page_url(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let link = headers.get(reqwest::header::LINK)?.to_str().ok()?;
+    for part in link.split(',') {
+        if !part.contains("rel=\"next\"") {
+            continue;
+        }
+        if let (Some(start), Some(end)) = (part.find('<'), part.find('>')) {
+            if end > start {
+                return Some(part[start + 1..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// List every GGUF file in a repo.
+///
+/// Recursive on purpose: GGUF repos routinely organise quants into
+/// subdirectories (`BF16/model-BF16.gguf`, `Q4_K_M/...`), and a
+/// non-recursive listing reports those repos as empty, so the UI offers a
+/// download that can never be satisfied. The tree endpoint paginates large
+/// repos, so follow the `Link: rel="next"` chain.
 pub async fn list_gguf_repo_files(
     client: &reqwest::Client,
     repo_id: &str,
     token: Option<&str>,
 ) -> Result<Vec<GgufRepoFile>> {
-    let url = format!("{HF_API}/{repo_id}/tree/main?recursive=false");
-    let mut request = client.get(url);
-    if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
-        request = request.bearer_auth(token);
+    let mut next = Some(format!("{HF_API}/{repo_id}/tree/main?recursive=true"));
+    let mut values: Vec<Value> = Vec::new();
+    let mut pages = 0;
+
+    while let Some(url) = next.take() {
+        pages += 1;
+        if pages > MAX_TREE_PAGES {
+            bail!("GGUF file listing for {repo_id} exceeded {MAX_TREE_PAGES} pages");
+        }
+        let mut request = client.get(url);
+        if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?.error_for_status()?;
+        next = next_page_url(response.headers());
+        values.extend(response.json::<Vec<Value>>().await?);
     }
-    let values: Vec<Value> = request
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+
     Ok(values
         .into_iter()
         .filter_map(|v| {
             let path = v.get("path")?.as_str()?.to_string();
-            if !path.to_ascii_lowercase().ends_with(".gguf") {
+            let lower = path.to_ascii_lowercase();
+            if !lower.ends_with(".gguf") {
                 return None;
             }
+            let file_name = lower.rsplit('/').next().unwrap_or(&lower);
             Some(GgufRepoFile {
-                is_mmproj: path.to_ascii_lowercase().starts_with("mmproj"),
+                is_mmproj: file_name.starts_with("mmproj") || lower.contains("/mmproj"),
                 size_bytes: v.get("size").and_then(Value::as_u64).unwrap_or(0),
                 quant: parse_gguf_quant_label(&path),
                 path,
@@ -503,18 +538,26 @@ pub fn is_auxiliary_gguf_file(path: &str) -> bool {
 }
 
 /// Parse GGUF quant label from filename. Returns None for non-GGUF or auxiliary helper files.
+///
+/// The `.gguf` suffix check is case-insensitive (repo owners do ship `.GGUF`)
+/// and the label regex is retried against an upper-cased stem, because the
+/// quant naming convention is case-insensitive in practice (`q4_k_m`).
 pub fn parse_gguf_quant_label(filename: &str) -> Option<String> {
-    if !filename.ends_with(".gguf") || is_auxiliary_gguf_file(filename) {
+    let lower = filename.to_ascii_lowercase();
+    if !lower.ends_with(".gguf") || is_auxiliary_gguf_file(filename) {
         return None;
     }
-    let stem = filename.strip_suffix(".gguf").unwrap();
+    let stem = &filename[..filename.len() - ".gguf".len()];
     // Strip shard suffix like -00001-of-00003
     let stem = GGUF_SHARD_RE.replace(stem, "");
     // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*, BF16, F16, FP16, PQ2_0, PTQ1_0, Q2_0_g64, etc.
-    GGUF_QUANT_RE
-        .captures(&stem)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+    let capture = |text: &str| {
+        GGUF_QUANT_RE
+            .captures(text)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+    };
+    capture(&stem).or_else(|| capture(&stem.to_ascii_uppercase()))
 }
 
 /// Determine if a quant label requires the PrismML llama.cpp fork.
@@ -857,6 +900,49 @@ pub async fn check_gguf_repo(
     out
 }
 
+/// Verify which GGUF quants a repo actually publishes.
+///
+/// Results (including "this repo has no GGUF at all") are cached for an hour so
+/// repeated searches and recommendation refreshes don't re-hit the HF API. The
+/// returned variants carry real file names, sizes and llama.cpp channels, so
+/// callers can render a download list that actually exists instead of a
+/// fabricated quant ladder.
+pub async fn verified_gguf_variants(
+    client: &reqwest::Client,
+    repo_id: &str,
+    sem: &tokio::sync::Semaphore,
+    cache: Option<&std::sync::Mutex<std::collections::HashMap<String, crate::state::CachedQuants>>>,
+    token: Option<&str>,
+) -> Vec<QuantVariant> {
+    let key = format!("gguf-repo:{repo_id}");
+    if let Some(c) = cache {
+        if let Ok(guard) = c.lock() {
+            if let Some(entry) = guard.get(&key) {
+                if entry.fetched_at.elapsed() < std::time::Duration::from_secs(3600) {
+                    return entry.variants.clone();
+                }
+            }
+        }
+    }
+
+    let mut variants = check_gguf_repo(client, repo_id, sem, token).await;
+    // Stable, human-friendly ordering: larger (higher precision) first.
+    variants.sort_by(|a, b| b.weight_bytes.unwrap_or(0).cmp(&a.weight_bytes.unwrap_or(0)));
+
+    if let Some(c) = cache {
+        if let Ok(mut guard) = c.lock() {
+            guard.insert(
+                key,
+                crate::state::CachedQuants {
+                    variants: variants.clone(),
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+        }
+    }
+    variants
+}
+
 async fn check_gguf(
     client: &reqwest::Client,
     pub_org: &str,
@@ -1101,6 +1187,30 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_parse_gguf_quant_label_is_case_insensitive() {
+        assert_eq!(
+            parse_gguf_quant_label("model-Q4_K_M.gguf").as_deref(),
+            Some("Q4_K_M")
+        );
+        // Repo owners do publish upper-case extensions; a case-sensitive suffix
+        // check listed the file but silently dropped its quant label.
+        assert_eq!(
+            parse_gguf_quant_label("model-Q4_K_M.GGUF").as_deref(),
+            Some("Q4_K_M")
+        );
+        assert_eq!(
+            parse_gguf_quant_label("model-q4_k_m.gguf").as_deref(),
+            Some("Q4_K_M")
+        );
+        // Sharded files collapse to one label.
+        assert_eq!(
+            parse_gguf_quant_label("BF16/model-BF16-00001-of-00003.gguf").as_deref(),
+            Some("BF16")
+        );
+        assert!(parse_gguf_quant_label("mmproj-model-f16.gguf").is_none());
+    }
 
     #[test]
     fn test_validate_model_id_rejects_shell_metacharacters() {

@@ -477,15 +477,34 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     })
 }
 
-fn fallback_hardware_profile() -> HardwareProfile {
+/// Hardware profile used by every scoring path.
+///
+/// Prefers the live snapshot the dashboard poll maintains, and falls back to a
+/// one-shot detection when that snapshot is still empty (first call after
+/// launch) or when the machine genuinely has no GPU. The old fallback invented
+/// a 16 GB GPU, so a CPU-only box was scored as if it had one and a cold cache
+/// produced a profile that disagreed with every later call.
+fn search_hardware_profile(state: &AppState) -> HardwareProfile {
+    if let Some(hw) = hardware_profile(state) {
+        return hw;
+    }
+    let detected = crate::llmfit_adapter::get_system_specs();
+    let vram_gb = detected.total_gpu_vram_gb.unwrap_or(0.0);
+    let gpu_name = detected.gpu_name.clone().unwrap_or_default();
+    let (bandwidth, bandwidth_known) = if gpu_name.is_empty() {
+        (0.0, false)
+    } else {
+        estimate::gpu_bandwidth(&gpu_name)
+    };
+    let ram_gb = detected.available_ram_gb.max(0.0);
     HardwareProfile {
-        gpu_name: "Generic GPU".to_string(),
-        vram_total_mb: 16384,
-        bandwidth_gbs: 700.0,
-        bandwidth_known: false,
-        ram_total_mb: 16384,
-        ram_usable_mb: 12288,
-        ram_potential_mb: 12288,
+        gpu_name,
+        vram_total_mb: (vram_gb * 1024.0).round() as u64,
+        bandwidth_gbs: bandwidth,
+        bandwidth_known,
+        ram_total_mb: (detected.total_ram_gb * 1024.0).round() as u64,
+        ram_usable_mb: (ram_gb * 1024.0).round() as u64,
+        ram_potential_mb: (ram_gb * 1024.0).round() as u64,
         ram_bandwidth_gbs: 65.0,
     }
 }
@@ -542,10 +561,189 @@ fn join_all<'a, T: 'a>(
     }
 }
 
+/// Score a model's variants against the live hardware profile and the user's
+/// memory settings.
+///
+/// Shared by the Hugging Face search path and the verified-GGUF path so the same
+/// model cannot receive one verdict from `search_models_with_fit` and a
+/// different one from `recommended_models`.
+fn score_variants(
+    st: &AppState,
+    hw: &HardwareProfile,
+    mem: &MemorySettings,
+    arch: &ModelArchInfo,
+    variants: Vec<QuantVariant>,
+    preferred: &str,
+) -> (Vec<QuantVariantWithFit>, usize) {
+    let channels = st.config().llamacpp_channels;
+
+    let mut items: Vec<(QuantVariant, (VariantInput, FitResult))> = variants
+        .into_iter()
+        .map(|mut v| {
+            if v.params_b.is_none() {
+                v.params_b = arch.params_b;
+            }
+            let quant_str = match v.format {
+                QuantFormat::FP16 => "fp16".to_string(),
+                QuantFormat::FP8 => "fp8".to_string(),
+                QuantFormat::AWQ => "awq".to_string(),
+                QuantFormat::GPTQ => "gptq".to_string(),
+                QuantFormat::BNB => "bnb".to_string(),
+                QuantFormat::GGUF => {
+                    if v.label.is_empty() {
+                        "gguf".to_string()
+                    } else {
+                        v.label.to_lowercase()
+                    }
+                }
+            };
+            let is_gguf = v.format == QuantFormat::GGUF;
+            let required_channel = v.required_channel;
+            let vi = VariantInput {
+                quant_str,
+                weight_bytes: v.weight_bytes,
+                params_b: v.params_b,
+                is_gguf,
+                required_channel,
+            };
+            let channel_installed = channels
+                .get(&required_channel)
+                .and_then(|c| c.installed_tag.as_ref())
+                .map(|_| required_channel);
+            let fit = fit::score_variant(
+                hw,
+                &vi,
+                arch,
+                None,
+                mem.default_gpu_mem_util,
+                mem.vram_overhead_mb,
+                mem.offload_weights_allowed,
+                mem.max_context_cap,
+                channel_installed,
+            );
+            (v, (vi, fit))
+        })
+        .collect();
+
+    items.sort_by(|a, b| fit::compare_variant_fit((&a.1 .0, &a.1 .1), (&b.1 .0, &b.1 .1)));
+
+    let scored: Vec<(VariantInput, FitResult)> = items.iter().map(|(_, p)| p.clone()).collect();
+    let best_variant_idx = fit::best_variant(&scored, Some(preferred));
+
+    let final_variants: Vec<QuantVariantWithFit> = items
+        .into_iter()
+        .map(|(variant, (_, fit))| QuantVariantWithFit { variant, fit })
+        .collect();
+
+    (final_variants, best_variant_idx)
+}
+
+/// Copy the winning variant's numbers onto the model-level summary fields.
+fn apply_best_variant(model: &mut ModelWithFit) {
+    let best_fit = model.variants.get(model.best_variant_idx).map(|v| &v.fit);
+    model.score = best_fit.map(|f| f.score as f64).unwrap_or(0.0);
+    model.score_components = best_fit.and_then(|f| f.score_components);
+    model.best_quant = model
+        .variants
+        .get(model.best_variant_idx)
+        .map(|v| v.variant.label.clone());
+    model.runtime = best_fit.and_then(|f| f.runtime.clone());
+    model.run_mode = best_fit.map(|f| format!("{:?}", f.run_mode));
+    model.usable_context = best_fit.map(|f| f.usable_context);
+    model.effective_context_length = best_fit.map(|f| f.usable_context);
+    model.estimated_tps = best_fit.and_then(|f| f.est_tok_s);
+    model.memory_required_gb = best_fit.map(|f| f.weight_gb);
+    model.notes = best_fit.map(|f| f.notes.clone()).unwrap_or_default();
+}
+
+/// Replace catalog-guessed GGUF variants with the quants the repo actually
+/// publishes.
+///
+/// `llmfit_adapter` can only emit the quant the scorer likes best; the repo may
+/// not ship it. Verifying against Hugging Face (one cached request per repo)
+/// means the "N quants" count, sizes, file names and llama.cpp channel in the UI
+/// all describe real files. When a repo has no GGUF at all the catalog entry is
+/// left as-is rather than being silently dropped.
+async fn hydrate_gguf_variants(
+    st: &AppState,
+    models: &mut [ModelWithFit],
+    hw: &HardwareProfile,
+    mem: &MemorySettings,
+) {
+    let sem = Arc::new(Semaphore::new(8));
+    let preferred = st.config().default_quant;
+    let token = st.hf_token();
+
+    let jobs: Vec<(usize, String)> = models
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, model)| {
+            if !model.variants.iter().any(|v| v.variant.format == QuantFormat::GGUF) {
+                return None;
+            }
+            // Prefer the declared GGUF publisher; otherwise trust the id only
+            // when it actually looks like a GGUF repo. Probing arbitrary
+            // safetensors repos would spend a request per model for nothing.
+            let repo = model
+                .gguf_sources
+                .first()
+                .map(|s| s.repo.clone())
+                .or_else(|| {
+                    model
+                        .id
+                        .to_ascii_lowercase()
+                        .ends_with("-gguf")
+                        .then(|| model.id.clone())
+                })?;
+            Some((idx, repo))
+        })
+        .collect();
+
+    let futures = jobs.into_iter().map(|(idx, repo)| {
+        let sem = Arc::clone(&sem);
+        let token = token.clone();
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = (usize, Vec<QuantVariant>)> + Send>> =
+            Box::pin(async move {
+                let variants = hf::verified_gguf_variants(
+                    &st.http,
+                    &repo,
+                    &sem,
+                    Some(&st.quant_cache),
+                    token.as_deref(),
+                )
+                .await;
+                (idx, variants)
+            });
+        fut
+    });
+
+    for (idx, variants) in join_all(futures).await {
+        if variants.is_empty() {
+            continue;
+        }
+        let model = &models[idx];
+        let arch = ModelArchInfo {
+            params_b: model.params_b,
+            context: model.context.unwrap_or(4096),
+            n_layers: model.n_layers,
+            n_kv_heads: model.n_kv_heads,
+            head_dim: model.head_dim,
+        };
+        let (scored, best) = score_variants(st, hw, mem, &arch, variants, &preferred);
+        if scored.is_empty() {
+            continue;
+        }
+        let model = &mut models[idx];
+        model.variants = scored;
+        model.best_variant_idx = best;
+        apply_best_variant(model);
+    }
+}
+
 async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<ModelWithFit> {
     let enrich_sem = Arc::new(Semaphore::new(10));
     let disc_sem = Arc::new(Semaphore::new(6));
-    let hw = hardware_profile(st).unwrap_or_else(fallback_hardware_profile);
+    let hw = search_hardware_profile(st);
     let preferred = st.config().default_quant;
     let token = st.hf_token();
     let mem_settings = st.config().memory_settings;
@@ -607,78 +805,10 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
                     head_dim,
                 };
 
-                let mut items: Vec<(QuantVariant, (VariantInput, FitResult))> = variants
-                    .into_iter()
-                    .map(|mut v| {
-                        if v.params_b.is_none() {
-                            v.params_b = params_b;
-                        }
-                        let quant_str = match v.format {
-                            QuantFormat::FP16 => "fp16".to_string(),
-                            QuantFormat::FP8 => "fp8".to_string(),
-                            QuantFormat::AWQ => "awq".to_string(),
-                            QuantFormat::GPTQ => "gptq".to_string(),
-                            QuantFormat::BNB => "bnb".to_string(),
-                            QuantFormat::GGUF => {
-                                if v.label.is_empty() {
-                                    "gguf".to_string()
-                                } else {
-                                    v.label.to_lowercase()
-                                }
-                            }
-                        };
-                        let is_gguf = v.format == QuantFormat::GGUF;
-                        let required_channel = v.required_channel;
-                        let vi = VariantInput {
-                            quant_str,
-                            weight_bytes: v.weight_bytes,
-                            params_b: v.params_b,
-                            is_gguf,
-                            required_channel,
-                        };
-                        let channel_installed = st.config().llamacpp_channels.get(&required_channel).and_then(|c| c.installed_tag.as_ref()).map(|_| required_channel);
-                        let fit = fit::score_variant(
-                            &hw,
-                            &vi,
-                            &arch,
-                            None,
-                            mem_settings.default_gpu_mem_util,
-                            mem_settings.vram_overhead_mb,
-                            mem_settings.offload_weights_allowed,
-                            mem_settings.max_context_cap,
-                            channel_installed,
-                        );
-                        (v, (vi, fit))
-                    })
-                    .collect();
+                let (final_variants, best_variant_idx) =
+                    score_variants(st, &hw, &mem_settings, &arch, variants, &preferred);
 
-                items.sort_by(|a, b| {
-                    fit::compare_variant_fit((&a.1 .0, &a.1 .1), (&b.1 .0, &b.1 .1))
-                });
-
-                let scored: Vec<(VariantInput, FitResult)> =
-                    items.iter().map(|(_, p)| p.clone()).collect();
-                let best_variant_idx = fit::best_variant(&scored, Some(&preferred));
-
-                let final_variants: Vec<QuantVariantWithFit> = items
-                    .into_iter()
-                    .map(|(variant, (_, fit))| QuantVariantWithFit { variant, fit })
-                    .collect();
-
-                let best_fit = final_variants.get(best_variant_idx).map(|v| &v.fit);
-                let score = best_fit.map(|f| f.score as f64).unwrap_or(0.0);
-                let score_components = best_fit.and_then(|f| f.score_components);
-                let best_quant = final_variants
-                    .get(best_variant_idx)
-                    .map(|v| v.variant.label.clone());
-                let runtime = best_fit.and_then(|f| f.runtime.clone());
-                let run_mode = best_fit.map(|f| format!("{:?}", f.run_mode));
-                let usable_context = best_fit.map(|f| f.usable_context);
-                let est_tok_s = best_fit.and_then(|f| f.est_tok_s);
-                let memory_required_gb = best_fit.map(|f| f.weight_gb);
-                let notes = best_fit.map(|f| f.notes.clone()).unwrap_or_default();
-
-                ModelWithFit {
+                let mut model = ModelWithFit {
                     id: m.id,
                     provider: None,
                     downloads: m.downloads,
@@ -698,23 +828,10 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
                     release_date: None,
                     variants: final_variants,
                     best_variant_idx,
-                    score,
-                    score_components,
-                    best_quant,
-                    runtime,
-                    fit_level: None,
-                    run_mode,
-                    usable_context,
-                    effective_context_length: usable_context,
-                    estimated_tps: est_tok_s,
-                    memory_required_gb,
-                    memory_available_gb: None,
-                    utilization_pct: None,
-                    notes,
-                    capabilities: Vec::new(),
-                    gguf_sources: Vec::new(),
-                    installed: false,
-                }
+                    ..ModelWithFit::default()
+                };
+                apply_best_variant(&mut model);
+                model
             });
             fut
         })
@@ -741,6 +858,28 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
     out
 }
 
+/// Everything that feeds scoring, folded into one value so the recommendation
+/// cache is invalidated when any of it changes (not just VRAM size).
+fn scoring_fingerprint(hw: &HardwareProfile, mem: &MemorySettings) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hw.vram_total_mb.hash(&mut hasher);
+    hw.ram_total_mb.hash(&mut hasher);
+    hw.ram_usable_mb.hash(&mut hasher);
+    hw.ram_potential_mb.hash(&mut hasher);
+    hw.gpu_name.hash(&mut hasher);
+    hw.bandwidth_known.hash(&mut hasher);
+    hw.bandwidth_gbs.to_bits().hash(&mut hasher);
+    mem.default_gpu_mem_util.to_bits().hash(&mut hasher);
+    mem.vram_overhead_mb.to_bits().hash(&mut hasher);
+    mem.enable_ram_overflow.hash(&mut hasher);
+    mem.manual_ram_limit_mb.hash(&mut hasher);
+    mem.safety_reserve_mb.hash(&mut hasher);
+    mem.offload_weights_allowed.hash(&mut hasher);
+    mem.max_context_cap.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[tauri::command]
 pub async fn search_models_with_fit(
     state: State<'_, Arc<AppState>>,
@@ -751,12 +890,20 @@ pub async fn search_models_with_fit(
         return Ok(Vec::new());
     }
 
+    let st = (*state).clone();
+    let hw = search_hardware_profile(&st);
+    let mem = st.config().memory_settings;
+    let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
+    let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
+
     // 1. Search local llmfit curated database first (exact formulas, instant, zero rate limits)
-    let mut results = crate::llmfit_adapter::search_models_local(q, 30);
+    let mut results = crate::llmfit_adapter::search_models_local(q, 30, &specs, &config);
+    // Local results carry only the quant the scorer guessed; replace it with the
+    // quants the repo actually publishes.
+    hydrate_gguf_variants(&st, &mut results, &hw, &mem).await;
 
     // 2. Augment with Hugging Face API search if fewer than 15 local results
     if results.len() < 15 {
-        let st = (*state).clone();
         let token = st.hf_token();
         if let Ok(hf_results) = hf::search(&st.http, q, 12, token.as_deref()).await {
             let existing_ids: std::collections::HashSet<String> =
@@ -772,6 +919,15 @@ pub async fn search_models_with_fit(
         }
     }
 
+    // Local scores and live-HF scores come from the same hardware/settings now,
+    // so rank the merged list instead of leaving it in "local first" order.
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.downloads.cmp(&a.downloads))
+    });
+
     Ok(results)
 }
 
@@ -780,30 +936,44 @@ pub async fn recommended_models(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<ModelWithFit>, String> {
     let st = (*state).clone();
-    let hw = hardware_profile(&st).unwrap_or_else(fallback_hardware_profile);
+    let hw = search_hardware_profile(&st);
+    let mem = st.config().memory_settings;
+    let fingerprint = scoring_fingerprint(&hw, &mem);
 
-    // 1. Check cache (10 min TTL)
+    // 1. Check cache (10 min TTL). Keyed on every scoring input, so changing a
+    // memory setting invalidates it immediately instead of serving numbers that
+    // no longer match the Search tab.
     {
         let mut cache = st.rec_cache.lock().unwrap();
-        if let Some((ref cached_models, cached_at, cached_vram)) = *cache {
-            if cached_vram == hw.vram_total_mb
+        if let Some((ref cached_models, cached_at, cached_fingerprint)) = *cache {
+            if cached_fingerprint == fingerprint
                 && cached_at.elapsed() < std::time::Duration::from_secs(600)
             {
                 return Ok(cached_models.clone());
             }
-            if cached_vram != hw.vram_total_mb {
+            if cached_fingerprint != fingerprint {
                 *cache = None;
             }
         }
     }
 
-    // 2. Exact match to `llmfit recommend` on the local hardware
-    let out = crate::llmfit_adapter::recommend_models(50);
+    // 2. Exact match to `llmfit recommend` on the local hardware, then verify
+    //    the GGUF quants it suggests against the repos that actually host them.
+    // Catalog scanning + scoring is CPU/IO heavy; keep it off the async runtime.
+    let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
+    let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
+    let mut out = tokio::task::spawn_blocking(move || {
+        crate::llmfit_adapter::recommend_models(50, &specs, &config)
+    })
+    .await
+    .map_err(|e| format!("recommendation worker failed: {e}"))?;
+
+    hydrate_gguf_variants(&st, &mut out, &hw, &mem).await;
 
     // 3. Store in cache
     if !out.is_empty() {
         let mut cache = st.rec_cache.lock().unwrap();
-        *cache = Some((out.clone(), std::time::Instant::now(), hw.vram_total_mb));
+        *cache = Some((out.clone(), std::time::Instant::now(), fingerprint));
     }
 
     Ok(out)
@@ -899,9 +1069,14 @@ pub async fn model_stats(
 
     let (llmfit_score, score_components, usable_context, runtime, fit_level, run_mode, notes) = {
         let db = crate::llmfit_adapter::get_model_database();
-        let specs = crate::llmfit_adapter::get_system_specs();
+        // Same live profile + memory settings the search and recommendation
+        // paths use, so this card cannot disagree with them.
+        let hw = search_hardware_profile(&st);
+        let mem = st.config().memory_settings;
+        let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
+        let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
         if let Some(m) = db.find_model(&model_id).into_iter().next() {
-            let fit = llmfit_core::fit::ModelFit::analyze(m, specs);
+            let fit = llmfit_core::fit::ModelFit::analyze_with_config(m, &specs, config);
             (
                 Some((fit.score * 10.0).round() / 10.0),
                 Some(fit.score_components.into()),
@@ -1219,7 +1394,21 @@ fn compose_hf_cache_model_exists_script(hub_dir: &str, dir_name: &str) -> String
         r#"{WSL_TILDE_EXPANSION_SNIPPET}
 hub_dir=$(__llm_panel_expand_tilde {hub_dir})
 dir_name=$(__llm_panel_expand_tilde {dir_name})
-[ -d "$hub_dir/$dir_name" ] && echo exists
+model_dir="$hub_dir/$dir_name"
+# Only a fully materialised snapshot counts as "already downloaded".
+# `hf download` creates the model directory before transferring anything, so a
+# cancelled or failed pull leaves it behind. Testing mere existence used to
+# make such a model impossible to retry: the UI reported "already downloaded"
+# forever, with no way to clear it.
+[ -d "$model_dir" ] || exit 0
+# Leftover partial blobs mean the last transfer did not finish.
+if find "$model_dir" -name '*.incomplete' -print -quit 2>/dev/null | grep -q .; then
+  exit 0
+fi
+# And the snapshot must actually contain files, not just refs/locks.
+if find "$model_dir/snapshots" -type f -print -quit 2>/dev/null | grep -q .; then
+  echo exists
+fi
 "#,
         hub_dir = crate::wsl::shell_quote_wsl(hub_dir),
         dir_name = crate::wsl::shell_quote_wsl(dir_name),
@@ -2243,6 +2432,7 @@ pub struct SettingsPatch {
     pub auto_restart_crashed: Option<bool>,
     pub launch_at_login: Option<bool>,
     pub auto_shutdown_wsl: Option<bool>,
+    pub auto_check_updates: Option<bool>,
 }
 
 fn validate_imported_wsl_path(path: &str) -> Result<(), String> {
@@ -2431,6 +2621,9 @@ pub fn settings_set(
     }
     if let Some(s) = patch.auto_shutdown_wsl {
         next.auto_shutdown_wsl = s;
+    }
+    if let Some(u) = patch.auto_check_updates {
+        next.auto_check_updates = u;
     }
     if let Some(l) = patch.launch_at_login {
         next.launch_at_login = l;
@@ -2900,22 +3093,17 @@ fn scan_native_gguf_library(root: &str, running_servers: &[(String, String)]) ->
         return entries;
     };
     for repo in repos.flatten().filter(|e| e.path().is_dir()) {
-        let mut files: Vec<_> = std::fs::read_dir(repo.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("gguf"))
-            .collect();
+        // Recursive: GGUF downloads preserve the repo's subdirectories.
+        let files = crate::server::collect_ggufs_recursive(&repo.path());
         if files.is_empty() {
             continue;
         }
-        files.sort_by_key(|f| f.path());
         let main_file = files
             .first()
-            .map(|f| f.path().to_string_lossy().into_owned());
+            .map(|p| p.to_string_lossy().into_owned());
         let size_mb = files
             .iter()
-            .filter_map(|e| e.metadata().ok())
+            .filter_map(|p| p.metadata().ok())
             .map(|m| m.len())
             .sum::<u64>()
             / (1024 * 1024);
@@ -2946,10 +3134,40 @@ pub async fn gguf_files(
     state: State<'_, Arc<AppState>>,
     repo_id: String,
 ) -> Result<Vec<crate::hf::GgufRepoFile>, String> {
+    crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
     let token = state.hf_token();
     crate::hf::list_gguf_repo_files(&state.http, &repo_id, token.as_deref())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Normalise and validate a repo-relative GGUF path.
+///
+/// Rejecting anything but plain path components keeps the joined destination
+/// inside the GGUF directory on every platform (a leading `C:` or a `..`
+/// segment would otherwise escape it), while preserving the repo's directory
+/// layout so two quants with the same file name in different folders stay
+/// distinct files.
+fn safe_relative_gguf_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("GGUF file paths must not be empty".into());
+    }
+    let mut out = PathBuf::new();
+    for component in std::path::Path::new(trimmed).components() {
+        match component {
+            std::path::Component::Normal(part) => out.push(part),
+            _ => {
+                return Err(format!(
+                    "GGUF file path \"{raw}\" must be relative and cannot contain '.' or '..'"
+                ))
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err(format!("invalid GGUF file path \"{raw}\""));
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -2963,12 +3181,11 @@ pub async fn download_gguf(
         return Err("select at least one GGUF file".into());
     }
     crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
-    if files.iter().any(|file| {
-        let file = file.trim();
-        file.is_empty() || file.starts_with('/') || file.contains("..")
-    }) {
-        return Err("GGUF file paths must be relative and cannot contain '..'".into());
-    }
+    let relative_files: Vec<PathBuf> = files
+        .iter()
+        .map(|file| safe_relative_gguf_path(file))
+        .collect::<Result<_, _>>()?;
+
     let st = (*state).clone();
     let cfg = st.config();
     let token = st.hf_token();
@@ -3001,87 +3218,205 @@ pub async fn download_gguf(
         }
         pulling.insert(model.clone(), true);
     }
+
+    let fail_app = app.clone();
+    let fail_model = model.clone();
     let download_result = tokio::task::spawn_blocking(move || {
-        let started = std::time::Instant::now();
-        std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
-        let client = reqwest::blocking::Client::new();
-        'outer: for file_name in files {
-            let target = destination.join(
-                PathBuf::from(&file_name)
-                    .file_name()
-                    .ok_or_else(|| "invalid GGUF file name".to_string())?,
-            );
-            if !pulling_arc.lock().unwrap().contains_key(&model) {
-                return Ok::<(), String>(());
-            }
-            let offset = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-            let url = format!("https://huggingface.co/{model}/resolve/main/{file_name}");
-            let mut request = client.get(url);
-            if let Some(token) = token.as_deref().filter(|t| !t.trim().is_empty()) {
-                request = request.bearer_auth(token);
-            }
-            if offset > 0 {
-                request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-            }
-            let mut response = request.send().map_err(|e| e.to_string())?;
-            if offset > 0 && response.status() == reqwest::StatusCode::OK {
-                std::fs::File::create(&target).map_err(|e| e.to_string())?;
-            }
-            response.error_for_status_ref().map_err(|e| e.to_string())?;
-            let total = response.content_length().map(|n| n + offset);
-            let mut output = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&target)
-                .map_err(|e| e.to_string())?;
-            let mut done = offset;
-            loop {
+        let mut current_file: Option<String> = None;
+        let result = (|| -> Result<(), String> {
+            std::fs::create_dir_all(&destination)
+                .map_err(|e| format!("could not create GGUF directory: {e}"))?;
+            let client = reqwest::blocking::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("could not create HTTP client: {e}"))?;
+
+            'outer: for relative in relative_files {
+                let display = relative.to_string_lossy().replace('\\', "/");
+                current_file = Some(display.clone());
                 if !pulling_arc.lock().unwrap().contains_key(&model) {
-                    break 'outer;
+                    return Ok(());
                 }
-                let mut buf = [0u8; 1024 * 1024];
-                let n = std::io::Read::read(&mut response, &mut buf).map_err(|e| e.to_string())?;
-                if n == 0 {
-                    break;
+
+                let target = destination.join(&relative);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("{display}: could not create directory: {e}"))?;
                 }
-                std::io::Write::write_all(&mut output, &buf[..n]).map_err(|e| e.to_string())?;
-                done += n as u64;
-                let percent = total.map(|t| (done as f64 / t as f64 * 100.0) as f32);
-                let speed = done.saturating_sub(offset) as f64 / started.elapsed().as_secs_f64().max(0.001);
-                let eta_seconds = match (total, speed) {
-                    (Some(t), s) if s > 0.0 => Some(((t.saturating_sub(done)) as f64 / s) as f32),
-                    _ => None,
-                };
+
+                let url = format!("https://huggingface.co/{model}/resolve/main/{display}");
+
+                // Ask for the authoritative size first. Without it a read that
+                // simply hit EOF (dropped connection, proxy truncation) looks
+                // exactly like a finished download, and a leftover file from a
+                // different revision gets appended to instead of replaced.
+                let mut head = client.head(&url);
+                if let Some(token) = token.as_deref().filter(|t| !t.trim().is_empty()) {
+                    head = head.bearer_auth(token);
+                }
+                let head_response = head
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| format!("{display}: could not read remote size: {e}"))?;
+                let remote_size = head_response.content_length();
+
+                let mut offset = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+                if let Some(remote) = remote_size {
+                    if remote > 0 && offset == remote {
+                        // Already complete; report it and move on.
+                        let _ = app.emit(
+                            "pull-progress",
+                            serde_json::json!({
+                                "model": model,
+                                "state": "downloading",
+                                "file": display,
+                                "percent": 100.0,
+                                "bytes_downloaded": offset,
+                                "bytes_total": remote,
+                            }),
+                        );
+                        continue;
+                    }
+                    if offset > remote {
+                        // Larger than the remote file: stale or corrupt bytes.
+                        std::fs::remove_file(&target)
+                            .map_err(|e| format!("{display}: could not reset stale file: {e}"))?;
+                        offset = 0;
+                    }
+                }
+
+                let mut request = client.get(&url);
+                if let Some(token) = token.as_deref().filter(|t| !t.trim().is_empty()) {
+                    request = request.bearer_auth(token);
+                }
+                if offset > 0 {
+                    request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+                }
+                let response = request
+                    .send()
+                    .map_err(|e| format!("{display}: {e}"))?;
+
+                // 416 means the server considers the resume point past the end
+                // of the file; if the local copy already matches the remote
+                // size there is nothing left to fetch.
+                if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                    if remote_size.map(|remote| offset >= remote).unwrap_or(false) {
+                        continue;
+                    }
+                    return Err(format!(
+                        "{display}: resume rejected by server (HTTP 416) and local file does not match the remote size"
+                    ));
+                }
+
+                // A 200 answer to a ranged request means Range was ignored;
+                // restart from zero rather than appending a second copy.
+                let restart = offset > 0 && response.status() == reqwest::StatusCode::OK;
+                if restart {
+                    offset = 0;
+                }
+                let mut response = response
+                    .error_for_status()
+                    .map_err(|e| format!("{display}: {e}"))?;
+
+                let total = remote_size.or_else(|| response.content_length().map(|n| n + offset));
+                let mut output = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .append(offset > 0)
+                    .truncate(offset == 0)
+                    .open(&target)
+                    .map_err(|e| format!("{display}: {e}"))?;
+
+                let file_started = std::time::Instant::now();
+                let mut done = offset;
+                let mut buf = vec![0u8; 1024 * 1024];
+                loop {
+                    if !pulling_arc.lock().unwrap().contains_key(&model) {
+                        break 'outer;
+                    }
+                    let n = std::io::Read::read(&mut response, &mut buf)
+                        .map_err(|e| format!("{display}: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    std::io::Write::write_all(&mut output, &buf[..n])
+                        .map_err(|e| format!("{display}: {e}"))?;
+                    done += n as u64;
+                    let percent = total.map(|t| (done as f64 / t as f64 * 100.0) as f32);
+                    let speed = (done.saturating_sub(offset)) as f64
+                        / file_started.elapsed().as_secs_f64().max(0.001);
+                    let eta_seconds = match (total, speed) {
+                        (Some(t), s) if s > 0.0 => Some(((t.saturating_sub(done)) as f64 / s) as f32),
+                        _ => None,
+                    };
+                    let _ = app.emit(
+                        "pull-progress",
+                        serde_json::json!({
+                            "model": model,
+                            "state": "downloading",
+                            "file": display,
+                            "percent": percent,
+                            "speed_bps": speed,
+                            "eta_seconds": eta_seconds,
+                            "bytes_downloaded": done,
+                            "bytes_total": total,
+                        }),
+                    );
+                }
+                std::io::Write::flush(&mut output)
+                    .map_err(|e| format!("{display}: {e}"))?;
+
+                if let Some(total) = total {
+                    if done != total {
+                        return Err(format!(
+                            "{display}: incomplete download ({done} of {total} bytes); retry to resume"
+                        ));
+                    }
+                }
+            }
+
+            if !pulling_arc.lock().unwrap().contains_key(&model) {
+                // cancelled (frontend already removed the progress entry)
+                return Ok(());
+            }
+            let _ = app.emit(
+                "pull-progress",
+                serde_json::json!({"model": model, "state": "complete", "file": null, "percent": 100.0}),
+            );
+            Ok(())
+        })();
+
+        if let Err(err) = &result {
+            let cancelled = !pulling_arc.lock().unwrap().contains_key(&model);
+            if !cancelled {
                 let _ = app.emit(
                     "pull-progress",
                     serde_json::json!({
                         "model": model,
-                        "state": "downloading",
-                        "file": file_name,
-                        "percent": percent,
-                        "speed_bps": done.saturating_sub(offset) as f64 / started.elapsed().as_secs_f64().max(0.001),
-                        "eta_seconds": eta_seconds,
-                        "bytes_downloaded": done,
-                        "bytes_total": total,
+                        "state": "failed",
+                        "file": current_file,
+                        "error": err,
                     }),
                 );
             }
         }
-        if !pulling_arc.lock().unwrap().contains_key(&model) {
-            // cancelled (frontend already removed the progress entry)
-            return Ok::<(), String>(());
-        }
-        let _ = app.emit(
-            "pull-progress",
-            serde_json::json!({"model": model, "state": "complete", "file": null, "percent": 100.0}),
-        );
-        Ok::<(), String>(())
+        result
     });
     let download_result = match download_result.await {
         Ok(result) => result,
         Err(error) => {
             st.pulling.lock().unwrap().remove(&repo_id);
-            return Err(format!("download worker failed: {error}"));
+            let message = format!("download worker failed: {error}");
+            let _ = fail_app.emit(
+                "pull-progress",
+                serde_json::json!({
+                    "model": fail_model,
+                    "state": "failed",
+                    "file": null,
+                    "error": message,
+                }),
+            );
+            return Err(message);
         }
     };
     st.pulling.lock().unwrap().remove(&repo_id);
@@ -3428,7 +3763,18 @@ pub async fn library_remove(
                 {
                     return Err("Refusing to delete: path is outside the GGUF directory".into());
                 }
-                let pending_parent = parent_canonical.to_string_lossy().into_owned();
+                // Downloads preserve the repo's subdirectories, so the model
+                // folder is the *first* component under the GGUF root, not
+                // necessarily the direct parent of the .gguf file.
+                let Some(repo_dir) = parent_canonical
+                    .strip_prefix(&root_canonical)
+                    .ok()
+                    .and_then(|rel| rel.components().next())
+                    .map(|c| root_canonical.join(c))
+                else {
+                    return Err("Refusing to delete: path is outside the GGUF directory".into());
+                };
+                let pending_parent = repo_dir.to_string_lossy().into_owned();
                 let srvs = st.servers.lock().unwrap();
                 for ls in srvs.values() {
                     let running = ls.status == crate::state::ServerStatus::Running
@@ -3450,8 +3796,8 @@ pub async fn library_remove(
                     }
                 }
                 drop(srvs);
-                std::fs::remove_dir_all(&parent).map_err(|e| {
-                    format!("Failed to delete {}: {e}", parent.display())
+                std::fs::remove_dir_all(&repo_dir).map_err(|e| {
+                    format!("Failed to delete {}: {e}", repo_dir.display())
                 })?;
                 return Ok(());
             }
@@ -3796,10 +4142,55 @@ pub async fn install_cuda_build_tools(
     .map_err(|e| format!("CUDA build tools task error: {e}"))?
 }
 
+#[tauri::command]
+pub async fn check_app_update(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    force: Option<bool>,
+) -> Result<crate::updater::AppUpdateInfo, String> {
+    crate::updater::check_app_update(app, state, force).await
+}
+
+#[tauri::command]
+pub async fn download_and_install_update(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::updater::UpdateLaunchResult, String> {
+    crate::updater::download_and_install_update(app, state).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::LlamaCppChannel;
+
+    #[test]
+    fn safe_relative_gguf_path_keeps_layout_and_blocks_escapes() {
+        // Preserved subdirectories keep same-named quants in different folders
+        // from colliding on disk.
+        let nested = safe_relative_gguf_path("BF16/model-BF16.gguf").unwrap();
+        assert_eq!(
+            nested,
+            PathBuf::from("BF16").join("model-BF16.gguf"),
+            "subdirectory must be preserved"
+        );
+        assert_eq!(
+            safe_relative_gguf_path("model-Q4_K_M.gguf").unwrap(),
+            PathBuf::from("model-Q4_K_M.gguf")
+        );
+
+        for bad in ["../secret.gguf", "/etc/passwd", "a/../../b.gguf", "", "   "] {
+            assert!(
+                safe_relative_gguf_path(bad).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+        #[cfg(windows)]
+        assert!(
+            safe_relative_gguf_path("C:model.gguf").is_err(),
+            "drive-prefixed paths escape the destination"
+        );
+    }
 
     #[test]
     fn tool_call_response_length_is_not_reported_as_template_failure() {
@@ -4025,19 +4416,26 @@ mod tests {
     }
 
     #[test]
-    fn test_hardware_profile_none_and_fallback() {
+    fn test_hardware_profile_falls_back_to_detected_specs() {
         let st = AppState::new();
         assert!(st.gpu.lock().unwrap().is_none());
         assert!(hardware_profile(&st).is_none());
 
-        let fb = fallback_hardware_profile();
-        assert_eq!(fb.gpu_name, "Generic GPU");
-        assert_eq!(fb.vram_total_mb, 16384);
-        assert_eq!(fb.bandwidth_gbs, 700.0);
-        assert!(!fb.bandwidth_known);
-        assert_eq!(fb.ram_total_mb, 16384);
-        assert_eq!(fb.ram_usable_mb, 12288);
-        assert_eq!(fb.ram_bandwidth_gbs, 65.0);
+        // With no GPU snapshot the scoring profile must describe the real
+        // machine, not a fictitious 16 GB GPU: on a CPU-only box every score
+        // used to assume VRAM that does not exist.
+        let detected = crate::llmfit_adapter::get_system_specs();
+        let profile = search_hardware_profile(&st);
+        let expected_vram = (detected.total_gpu_vram_gb.unwrap_or(0.0) * 1024.0).round() as u64;
+        assert_eq!(profile.vram_total_mb, expected_vram);
+        assert_eq!(
+            profile.ram_total_mb,
+            (detected.total_ram_gb * 1024.0).round() as u64
+        );
+        if expected_vram == 0 {
+            assert!(!profile.bandwidth_known);
+            assert_eq!(profile.bandwidth_gbs, 0.0);
+        }
     }
 
     #[test]
@@ -4344,7 +4742,14 @@ mod tests {
             "models--Qwen--Qwen2.5-Coder-7B-Instruct",
         );
         assert!(exists_script.contains("hub_dir=$(__llm_panel_expand_tilde"));
-        assert!(exists_script.contains("[ -d \"$hub_dir/$dir_name\" ] && echo exists"));
+        // A bare directory is not proof of a completed pull: partial and
+        // cancelled downloads leave one behind, so existence alone must not
+        // block a retry.
+        assert!(!exists_script.contains("[ -d \"$hub_dir/$dir_name\" ] && echo exists"));
+        assert!(exists_script.contains("model_dir=\"$hub_dir/$dir_name\""));
+        assert!(exists_script.contains("-name '*.incomplete'"));
+        assert!(exists_script.contains("find \"$model_dir/snapshots\" -type f"));
+        assert!(exists_script.contains("echo exists"));
         assert!(!exists_script.contains("[ -d \"~/.cache/huggingface/hub/"));
     }
 
