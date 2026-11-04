@@ -73,6 +73,10 @@ fn llamacpp_it() {
         metrics: true,
         extra_args: Vec::new(),
         env: BTreeMap::new(),
+        speculative_model: None,
+        speculative_model_path: None,
+        speculative_num_tokens: None,
+        speculative_enabled: false,
     };
     let mut child = crate::wsl::NativeChild::spawn(
         std::path::Path::new(&exe),
@@ -239,6 +243,10 @@ fn wsl_it() {
             metrics: true,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
+            speculative_model: None,
+            speculative_model_path: None,
+            speculative_num_tokens: None,
+            speculative_enabled: false,
         });
         cfg.servers.push(ServerDef {
             backend: "vllm".into(),
@@ -280,6 +288,10 @@ fn wsl_it() {
             metrics: true,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
+            speculative_model: None,
+            speculative_model_path: None,
+            speculative_num_tokens: None,
+            speculative_enabled: false,
         });
         cfg.save().expect("save config");
     }

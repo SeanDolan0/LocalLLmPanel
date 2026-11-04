@@ -1250,6 +1250,14 @@ pub struct ContextFitRequest {
     pub fit_target: Option<usize>,
     #[serde(default)]
     pub no_kv_offload: Option<bool>,
+    #[serde(default)]
+    pub speculative_enabled: Option<bool>,
+    #[serde(default)]
+    pub speculative_model: Option<String>,
+    #[serde(default)]
+    pub speculative_model_path: Option<String>,
+    #[serde(default)]
+    pub speculative_num_tokens: Option<usize>,
 }
 
 fn inferred_vllm_quant(model_id: &str, requested: Option<&str>) -> String {
@@ -1334,7 +1342,7 @@ async fn analyze_context_fit_inner(
 
     let cfg = st.config();
     let backend = input.backend.parse::<ServerBackend>()?;
-    match backend {
+    let mut report = match backend {
         ServerBackend::Vllm => {
             let model_id = input.model_id.trim();
             if model_id.is_empty() {
@@ -1377,7 +1385,7 @@ async fn analyze_context_fit_inner(
                 .unwrap_or(cfg.advanced_settings.kv_cache_dtype.as_str())
                 .to_ascii_lowercase();
             let memory = &cfg.memory_settings;
-            Ok(analyze_vllm_context(&VllmFitInput {
+            analyze_vllm_context(&VllmFitInput {
                 model_id: model_id.to_string(),
                 requested_context: requested,
                 native_context: Some(stats.context),
@@ -1409,7 +1417,7 @@ async fn analyze_context_fit_inner(
                 safety_reserve_mb: memory.safety_reserve_mb as f64,
                 cpu_offload_gb: input.cpu_offload_gb.unwrap_or(0),
                 kv_offload_gb: input.kv_offload_gb.unwrap_or(0),
-            }))
+            })
         }
         ServerBackend::Llamacpp => {
             let raw_path = input
@@ -1442,7 +1450,7 @@ async fn analyze_context_fit_inner(
                     "A context length is required because the GGUF has no native context metadata."
                         .to_string()
                 })?;
-            Ok(analyze_llama_context(&LlamaFitInput {
+            analyze_llama_context(&LlamaFitInput {
                 model_id: path.to_string_lossy().into_owned(),
                 requested_context: requested,
                 native_context: metadata.context_length,
@@ -1470,9 +1478,92 @@ async fn analyze_context_fit_inner(
                 ram_total_mb: Some((specs.total_ram_gb * 1024.0).round() as u64),
                 ram_available_mb: Some((specs.available_ram_gb * 1024.0).round() as u64),
                 vram_overhead_mb: 1_024.0,
-            }))
+            })
+        }
+    };
+
+    if input.speculative_enabled.unwrap_or(false) {
+        let spec_tokens = input.speculative_num_tokens.unwrap_or(5);
+        match backend {
+            ServerBackend::Vllm => {
+                let draft_model = input
+                    .speculative_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty());
+                if let Some(draft) = draft_model {
+                    let draft_weight = cached_vllm_weight_gib(st, draft);
+                    if let Some(w) = draft_weight {
+                        report.warnings.push(format!(
+                            "Speculative decoding: Draft model '{draft}' ({spec_tokens} tokens) requires approx. {:.1} GiB weights (estimate) in addition to the main model. Ensure sufficient VRAM headroom.",
+                            w
+                        ));
+                    } else {
+                        report.warnings.push(format!(
+                            "Speculative decoding: Draft model '{draft}' ({spec_tokens} tokens) will consume additional memory (estimate) alongside the main model. Ensure sufficient VRAM headroom.",
+                        ));
+                    }
+                } else {
+                    report.warnings.push(
+                        "Speculative decoding is enabled, but no draft model ID was specified."
+                            .into(),
+                    );
+                }
+            }
+            ServerBackend::Llamacpp => {
+                let draft_raw = input
+                    .speculative_model_path
+                    .as_deref()
+                    .or(input.speculative_model.as_deref())
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty());
+                if let Some(draft) = draft_raw {
+                    let resolved = server::resolve_gguf_model_path(
+                        draft,
+                        &cfg.gguf_dir,
+                        &st.resolve_distro(),
+                    );
+                    if let Some(path) = resolved {
+                        let draft_size = std::fs::metadata(&path)
+                            .ok()
+                            .map(|m| m.len() as f64 / 1024.0 / 1024.0 / 1024.0);
+                        let file_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(draft);
+                        if let Some(size) = draft_size {
+                            report.warnings.push(format!(
+                                "Speculative decoding: Draft GGUF '{file_name}' ({spec_tokens} tokens) requires approx. {:.2} GiB weights (estimate) in addition to the main model.",
+                                size
+                            ));
+                        } else {
+                            report.warnings.push(format!(
+                                "Speculative decoding: Draft GGUF '{file_name}' ({spec_tokens} tokens) will consume additional memory (estimate) in addition to the main model.",
+                            ));
+                        }
+                    } else {
+                        report.warnings.push(format!(
+                            "Speculative decoding: Draft GGUF '{draft}' could not be resolved from local disk.",
+                        ));
+                    }
+                } else {
+                    report.warnings.push(
+                        "Speculative decoding is enabled, but no draft GGUF path was specified."
+                            .into(),
+                    );
+                }
+            }
+        }
+        if !report.fits || report.status == crate::context_fit::ContextFitStatus::DoesNotFit {
+            report.warnings.push(
+                "Main model already exceeds available memory budget; speculative decoding cannot run alongside the main model in this configuration."
+                    .into(),
+            );
+            report.fits = false;
         }
     }
+
+    Ok(report)
 }
 
 fn compose_hf_cache_model_exists_script(hub_dir: &str, dir_name: &str) -> String {
@@ -1680,6 +1771,13 @@ pub struct ServerInput {
     pub extra_args: OptionalField<Vec<String>>,
     #[serde(default)]
     pub env: OptionalField<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub speculative_model: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_model_path: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_num_tokens: OptionalField<usize>,
+    pub speculative_enabled: Option<bool>,
     pub restart: Option<bool>,
     pub llamacpp_channel: Option<crate::state::LlamaCppChannel>,
 }
@@ -1884,6 +1982,22 @@ pub async fn servers_create(
         llamacpp_channel: input
             .llamacpp_channel
             .unwrap_or(crate::state::LlamaCppChannel::Upstream),
+        speculative_model: input
+            .speculative_model
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        speculative_model_path: input
+            .speculative_model_path
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty()),
+        speculative_num_tokens: input
+            .speculative_num_tokens
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
+        speculative_enabled: input.speculative_enabled.unwrap_or(false),
     };
     for (name, value) in &def.env {
         server::validate_env_name(name)?;
@@ -2185,6 +2299,24 @@ pub fn servers_update(
         updated.params_b = None;
         updated.max_model_len = None;
     }
+    if let Some(enabled) = input.speculative_enabled {
+        updated.speculative_enabled = enabled;
+    }
+    updated.speculative_model = input
+        .speculative_model
+        .clone()
+        .into_inner()
+        .filter(|value| !value.trim().is_empty());
+    updated.speculative_model_path = input
+        .speculative_model_path
+        .clone()
+        .into_inner()
+        .filter(|value| !value.trim().is_empty());
+    updated.speculative_num_tokens = input
+        .speculative_num_tokens
+        .clone()
+        .into_inner()
+        .filter(|value| *value > 0);
     updated.normalize_for_backend()?;
 
     let mut next = cfg.clone();
@@ -4787,6 +4919,10 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
                 fit: None,
                 fit_target: None,
                 no_kv_offload: None,
+                speculative_model: None,
+                speculative_model_path: None,
+                speculative_num_tokens: None,
+                speculative_enabled: None,
             },
         )
         .await
@@ -4816,6 +4952,10 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
                 fit: Some(true),
                 fit_target: Some(1_024),
                 no_kv_offload: Some(false),
+                speculative_model: None,
+                speculative_model_path: None,
+                speculative_num_tokens: None,
+                speculative_enabled: None,
             },
         )
         .await

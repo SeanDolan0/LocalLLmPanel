@@ -145,6 +145,10 @@ export interface ServerDef {
   extra_args: string[];
   env?: Record<string, string>;
   llamacpp_channel?: LlamaCppChannel;
+  speculative_model?: string | null;
+  speculative_model_path?: string | null;
+  speculative_num_tokens?: number | null;
+  speculative_enabled?: boolean;
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -228,6 +232,10 @@ export interface ContextFitRequest {
   fit?: boolean | null;
   fit_target?: number | null;
   no_kv_offload?: boolean | null;
+  speculative_model?: string | null;
+  speculative_model_path?: string | null;
+  speculative_num_tokens?: number | null;
+  speculative_enabled?: boolean | null;
 }
 
 export interface MetricsSnapshot {
@@ -395,6 +403,10 @@ export interface CreateServerInput {
   extra_args?: string[] | null;
   env?: Record<string, string> | null;
   llamacpp_channel?: LlamaCppChannel;
+  speculative_model?: string | null;
+  speculative_model_path?: string | null;
+  speculative_num_tokens?: number | null;
+  speculative_enabled?: boolean;
 }
 
 export interface WslConfigInfo {
@@ -636,6 +648,10 @@ export interface ServerRecipe {
   enforce_eager: boolean;
   swap_space_gb?: number | null;
   cpu_offload_gb?: number | null;
+  speculative_model?: string | null;
+  speculative_model_path?: string | null;
+  speculative_num_tokens?: number | null;
+  speculative_enabled?: boolean;
 }
 
 export interface ConfigExportPackage {

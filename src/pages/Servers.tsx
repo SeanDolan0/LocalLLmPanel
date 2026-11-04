@@ -30,6 +30,10 @@ export default function Servers() {
   const [prefillKvDtype, setPrefillKvDtype] = useState<string | undefined>(undefined);
   const [prefillTask, setPrefillTask] = useState<"instruct" | "embed" | undefined>(undefined);
   const [prefillChannel, setPrefillChannel] = useState<"upstream" | "prism" | undefined>(undefined);
+  const [prefillSpeculativeEnabled, setPrefillSpeculativeEnabled] = useState<boolean | undefined>(undefined);
+  const [prefillSpeculativeModel, setPrefillSpeculativeModel] = useState<string | undefined>(undefined);
+  const [prefillSpeculativeModelPath, setPrefillSpeculativeModelPath] = useState<string | undefined>(undefined);
+  const [prefillSpeculativeNumTokens, setPrefillSpeculativeNumTokens] = useState<number | undefined>(undefined);
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
@@ -66,6 +70,10 @@ export default function Servers() {
     setPrefillKvDtype(undefined);
     setPrefillTask(undefined);
     setPrefillChannel(undefined);
+    setPrefillSpeculativeEnabled(undefined);
+    setPrefillSpeculativeModel(undefined);
+    setPrefillSpeculativeModelPath(undefined);
+    setPrefillSpeculativeNumTokens(undefined);
     setEditingServer(null);
   };
 
@@ -94,6 +102,10 @@ export default function Servers() {
       setPrefillServed(r.served_model_name ?? undefined);
       setPrefillKvDtype(r.kv_cache_dtype ?? undefined);
       setPrefillTask(r.task as "instruct" | "embed");
+      setPrefillSpeculativeEnabled(r.speculative_enabled ?? false);
+      setPrefillSpeculativeModel(r.speculative_model ?? undefined);
+      setPrefillSpeculativeModelPath(r.speculative_model_path ?? undefined);
+      setPrefillSpeculativeNumTokens(r.speculative_num_tokens ?? undefined);
       setShowImportRecipe(false);
       setRecipeInput("");
       setShowNew(true);
@@ -118,6 +130,10 @@ export default function Servers() {
       prefillKvDtype?: string;
       prefillTask?: "instruct" | "embed";
       prefillChannel?: "upstream" | "prism";
+      prefillSpeculativeEnabled?: boolean;
+      prefillSpeculativeModel?: string;
+      prefillSpeculativeModelPath?: string;
+      prefillSpeculativeNumTokens?: number;
     } | null;
     if (state?.prefillModel) {
       setPrefillModel(state.prefillModel);
@@ -144,6 +160,18 @@ export default function Servers() {
       }
       if (state.prefillGpuUtil !== undefined) {
         setPrefillGpuUtil(state.prefillGpuUtil);
+      }
+      if (state.prefillSpeculativeEnabled !== undefined) {
+        setPrefillSpeculativeEnabled(state.prefillSpeculativeEnabled);
+      }
+      if (state.prefillSpeculativeModel !== undefined) {
+        setPrefillSpeculativeModel(state.prefillSpeculativeModel);
+      }
+      if (state.prefillSpeculativeModelPath !== undefined) {
+        setPrefillSpeculativeModelPath(state.prefillSpeculativeModelPath);
+      }
+      if (state.prefillSpeculativeNumTokens !== undefined) {
+        setPrefillSpeculativeNumTokens(state.prefillSpeculativeNumTokens);
       }
       if (state.prefillServed !== undefined) {
         setPrefillServed(state.prefillServed);
@@ -378,6 +406,10 @@ export default function Servers() {
           initialTask={prefillTask}
           initialChannel={prefillChannel}
           initialEnv={editingServer?.env ?? {}}
+          initialSpeculativeEnabled={prefillSpeculativeEnabled}
+          initialSpeculativeModel={prefillSpeculativeModel}
+          initialSpeculativeModelPath={prefillSpeculativeModelPath}
+          initialSpeculativeNumTokens={prefillSpeculativeNumTokens}
           initialServer={editingServer}
           onDone={(s) => {
             setShowNew(false);
@@ -438,6 +470,14 @@ export default function Servers() {
                     {r.def.backend === "vllm" && r.def.cpu_offload_gb != null && r.def.cpu_offload_gb > 0 && (
                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-950/80 text-amber-300 border border-amber-800">
                         offload {r.def.cpu_offload_gb}GB
+                      </span>
+                    )}
+                    {r.def.speculative_enabled && (
+                      <span
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-950/80 text-purple-300 border border-purple-800"
+                        title={`Speculative decoding enabled (draft: ${r.def.speculative_model || r.def.speculative_model_path || "configured"}, tokens: ${r.def.speculative_num_tokens ?? 5})`}
+                      >
+                        spec {r.def.speculative_num_tokens ?? 5}t
                       </span>
                     )}
                   </div>
@@ -835,6 +875,10 @@ function NewServerForm({
   initialTask,
   initialChannel,
   initialEnv,
+  initialSpeculativeEnabled,
+  initialSpeculativeModel,
+  initialSpeculativeModelPath,
+  initialSpeculativeNumTokens,
   initialServer, // When provided, enables edit mode
   onDone,
   onCancel,
@@ -856,6 +900,10 @@ function NewServerForm({
   initialTask?: "instruct" | "embed";
   initialChannel?: "upstream" | "prism";
   initialEnv?: Record<string, string>;
+  initialSpeculativeEnabled?: boolean;
+  initialSpeculativeModel?: string;
+  initialSpeculativeModelPath?: string;
+  initialSpeculativeNumTokens?: number;
   initialServer?: ServerDef | null; // For editing existing server
   onDone: (s: { id: string }) => void;
   onCancel: () => void;
@@ -920,6 +968,22 @@ function NewServerForm({
   const [cacheTypeK, setCacheTypeK] = useState("q8_0");
   const [cacheTypeV, setCacheTypeV] = useState("q8_0");
   const [kvCacheDtype, setKvCacheDtype] = useState(initialKvDtype || "");
+  const [speculativeEnabled, setSpeculativeEnabled] = useState(
+    initialServer?.speculative_enabled ?? initialSpeculativeEnabled ?? false
+  );
+  const [speculativeModel, setSpeculativeModel] = useState(
+    initialServer?.speculative_model ?? initialSpeculativeModel ?? ""
+  );
+  const [speculativeModelPath, setSpeculativeModelPath] = useState(
+    initialServer?.speculative_model_path ?? initialSpeculativeModelPath ?? ""
+  );
+  const [speculativeNumTokens, setSpeculativeNumTokens] = useState(
+    initialServer?.speculative_num_tokens !== undefined && initialServer?.speculative_num_tokens !== null
+      ? String(initialServer.speculative_num_tokens)
+      : initialSpeculativeNumTokens !== undefined && initialSpeculativeNumTokens !== null
+        ? String(initialSpeculativeNumTokens)
+        : "5"
+  );
   const [contextFit, setContextFit] = useState<ContextFitReport | null>(null);
   const [contextFitError, setContextFitError] = useState<string | null>(null);
   const [contextFitLoading, setContextFitLoading] = useState(false);
@@ -967,6 +1031,18 @@ function NewServerForm({
     if (initialChannel !== undefined) {
       setLlamaCppChannel(initialChannel);
     }
+    if (initialSpeculativeEnabled !== undefined) {
+      setSpeculativeEnabled(initialSpeculativeEnabled);
+    }
+    if (initialSpeculativeModel !== undefined) {
+      setSpeculativeModel(initialSpeculativeModel);
+    }
+    if (initialSpeculativeModelPath !== undefined) {
+      setSpeculativeModelPath(initialSpeculativeModelPath);
+    }
+    if (initialSpeculativeNumTokens !== undefined) {
+      setSpeculativeNumTokens(String(initialSpeculativeNumTokens));
+    }
     if (initialServer) {
       setEnforceEager(initialServer.enforce_eager ?? true);
       setLlamaCppChannel(initialServer.llamacpp_channel === "prism" ? "prism" : "upstream");
@@ -995,6 +1071,14 @@ function NewServerForm({
       setExtraArgs((initialServer.extra_args || []).join("\n"));
       setEnv(initialServer.env ?? {});
       setMmprojPath(initialServer.mmproj_path || "");
+      setSpeculativeEnabled(initialServer.speculative_enabled ?? false);
+      setSpeculativeModel(initialServer.speculative_model || "");
+      setSpeculativeModelPath(initialServer.speculative_model_path || "");
+      setSpeculativeNumTokens(
+        initialServer.speculative_num_tokens != null
+          ? String(initialServer.speculative_num_tokens)
+          : "5"
+      );
     }
   }, [
     initialModelId,
@@ -1011,6 +1095,10 @@ function NewServerForm({
     initialKvDtype,
     initialTask,
     initialChannel,
+    initialSpeculativeEnabled,
+    initialSpeculativeModel,
+    initialSpeculativeModelPath,
+    initialSpeculativeNumTokens,
     initialServer,
   ]);
 
@@ -1018,6 +1106,10 @@ function NewServerForm({
     setBackend(nextBackend);
     setContextFit(null);
     setContextFitError(null);
+    setSpeculativeEnabled(false);
+    setSpeculativeModel("");
+    setSpeculativeModelPath("");
+    setSpeculativeNumTokens("5");
     if (nextBackend === "vllm") {
       if (/[\\/]|\.gguf$/i.test(modelId)) setModelId("");
       setModelPath("");
@@ -1105,6 +1197,17 @@ function NewServerForm({
         fit_target:
           backend === "llamacpp" && fitTarget ? parseInt(fitTarget, 10) : 1024,
         no_kv_offload: backend === "llamacpp" ? noKvOffload : null,
+        speculative_enabled: task !== "embed" ? speculativeEnabled : false,
+        speculative_model:
+          backend === "vllm"
+            ? (speculativeModel.trim() || null)
+            : (speculativeModelPath.trim() || speculativeModel.trim() || null),
+        speculative_model_path:
+          backend === "llamacpp"
+            ? (speculativeModelPath.trim() || speculativeModel.trim() || null)
+            : null,
+        speculative_num_tokens:
+          speculativeEnabled && speculativeNumTokens ? parseInt(speculativeNumTokens, 10) : 5,
       });
       setContextFit(result);
     } catch (error) {
@@ -1149,6 +1252,13 @@ function NewServerForm({
     try {
       const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
+      const parsedSpecTokens = parseInt(speculativeNumTokens, 10);
+      const validSpecTokens = !isNaN(parsedSpecTokens) && parsedSpecTokens > 0 ? parsedSpecTokens : 5;
+      const isSpecActive = speculativeEnabled && task !== "embed";
+      const specDraftVllm = isSpecActive && speculativeModel.trim() ? speculativeModel.trim() : null;
+      const specDraftLlama = isSpecActive && (speculativeModelPath.trim() || speculativeModel.trim())
+        ? (speculativeModelPath.trim() || speculativeModel.trim())
+        : null;
       const serverData = {
         backend,
         model_id: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : chosenModelId,
@@ -1203,6 +1313,13 @@ function NewServerForm({
                 .filter(Boolean)
             : null,
         env: backend === "vllm" ? env : {},
+        speculative_enabled: backend === "vllm" ? Boolean(specDraftVllm) : Boolean(specDraftLlama),
+        speculative_model: backend === "vllm" ? specDraftVllm : specDraftLlama,
+        speculative_model_path: backend === "llamacpp" ? specDraftLlama : null,
+        speculative_num_tokens:
+          (backend === "vllm" ? Boolean(specDraftVllm) : Boolean(specDraftLlama))
+            ? validSpecTokens
+            : null,
       };
       let s;
       if (isEditing && initialServer) {
@@ -1587,6 +1704,104 @@ function NewServerForm({
           </label>
         </div>
       </Collapsible>
+
+      {task !== "embed" && (
+        <Collapsible
+          title="Speculative decoding (optional)"
+          subtitle={
+            speculativeEnabled
+              ? `Enabled · draft model: ${backend === "llamacpp" ? (speculativeModelPath || speculativeModel || "none") : (speculativeModel || "none")} (${speculativeNumTokens || "5"} tokens)`
+              : "Accelerate inference with a smaller draft model running alongside the main model"
+          }
+          storageKey="llm_panel_server_form_speculative"
+          className="mt-3"
+        >
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="sm:col-span-2 rounded-lg border border-purple-500/30 bg-purple-500/10 p-3 text-xs text-purple-200">
+              <strong>Notice:</strong> Speculative decoding loads a smaller &ldquo;draft&rdquo; model in parallel to generate candidate tokens, which are verified in batches by the main model.
+              The draft model <strong>consumes additional VRAM/RAM</strong> alongside the main model weights and must share the same tokenizer family/vocabulary.
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-slate-300 sm:col-span-2">
+              <input
+                type="checkbox"
+                checked={speculativeEnabled}
+                onChange={(e) => setSpeculativeEnabled(e.target.checked)}
+              />
+              Enable speculative decoding with a draft model
+            </label>
+
+            {speculativeEnabled && (
+              <>
+                <Field
+                  label={backend === "llamacpp" ? "Draft GGUF model path" : "Draft model ID (HF or local)"}
+                  hint={
+                    backend === "llamacpp"
+                      ? "Must be a GGUF file compatible with the target model (e.g. 0.5B draft for 7B target)."
+                      : "Hugging Face model repository ID or local directory (e.g. Qwen/Qwen2.5-0.5B-Instruct)."
+                  }
+                >
+                  {backend === "llamacpp" ? (
+                    <div className="flex gap-1.5">
+                      <input
+                        className={inputCls}
+                        placeholder="C:\models\draft-model-Q4_K_M.gguf"
+                        value={speculativeModelPath || speculativeModel}
+                        onChange={(e) => {
+                          setSpeculativeModelPath(e.target.value);
+                          setSpeculativeModel(e.target.value);
+                        }}
+                      />
+                      <Button
+                        variant="ghost"
+                        className="shrink-0 px-3 text-xs"
+                        onClick={async () => {
+                          try {
+                            const selected = await open({
+                              title: "Select draft GGUF model file",
+                              filters: [{ name: "GGUF models", extensions: ["gguf"] }],
+                            });
+                            if (selected && typeof selected === "string") {
+                              setSpeculativeModelPath(selected);
+                              setSpeculativeModel(selected);
+                            }
+                          } catch (browseErr) {
+                            onErr(String(browseErr));
+                          }
+                        }}
+                      >
+                        Browse…
+                      </Button>
+                    </div>
+                  ) : (
+                    <input
+                      className={inputCls}
+                      placeholder="e.g. Qwen/Qwen2.5-0.5B-Instruct"
+                      value={speculativeModel}
+                      onChange={(e) => setSpeculativeModel(e.target.value)}
+                    />
+                  )}
+                </Field>
+
+                <Field
+                  label="Number of speculative tokens"
+                  hint="Tokens proposed by the draft model per forward pass. Default is 5."
+                >
+                  <input
+                    type="number"
+                    min="1"
+                    max="32"
+                    className={inputCls}
+                    placeholder="5"
+                    value={speculativeNumTokens}
+                    onChange={(e) => setSpeculativeNumTokens(e.target.value)}
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+        </Collapsible>
+      )}
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-edge bg-surface-2/60 p-3">
         <div>

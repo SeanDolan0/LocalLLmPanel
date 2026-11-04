@@ -292,6 +292,18 @@ pub struct ServerDef {
     /// Per-server environment variables (merged with global default_env, per-server wins).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Optional speculative decoding draft model (HF repo id or local model path).
+    #[serde(default)]
+    pub speculative_model: Option<String>,
+    /// Optional speculative decoding draft GGUF model path for llama.cpp.
+    #[serde(default)]
+    pub speculative_model_path: Option<String>,
+    /// Number of speculative tokens to draft (e.g. 5).
+    #[serde(default)]
+    pub speculative_num_tokens: Option<usize>,
+    /// Whether speculative decoding is enabled for this server.
+    #[serde(default)]
+    pub speculative_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +349,33 @@ impl ServerDef {
     /// newly-created or explicitly-edited server. Legacy config loading remains
     /// non-destructive; normalization runs only at mutation boundaries.
     pub fn normalize_for_backend(&mut self) -> Result<(), String> {
+        if !self.speculative_enabled || self.task == "embed" {
+            self.speculative_enabled = false;
+            self.speculative_model = None;
+            self.speculative_model_path = None;
+            self.speculative_num_tokens = None;
+        } else {
+            if let Some(m) = &self.speculative_model {
+                if m.trim().is_empty() {
+                    self.speculative_model = None;
+                }
+            }
+            if let Some(p) = &self.speculative_model_path {
+                if p.trim().is_empty() {
+                    self.speculative_model_path = None;
+                }
+            }
+            if let Some(tokens) = self.speculative_num_tokens {
+                if tokens == 0 {
+                    self.speculative_num_tokens = None;
+                }
+            }
+            if self.speculative_model.is_none() && self.speculative_model_path.is_none() {
+                self.speculative_enabled = false;
+                self.speculative_num_tokens = None;
+            }
+        }
+
         match self.backend_kind()? {
             ServerBackend::Vllm => {
                 self.llamacpp_channel = LlamaCppChannel::Upstream;
@@ -359,6 +398,12 @@ impl ServerDef {
                 self.jinja = false;
                 self.no_kv_offload = false;
                 self.extra_args.clear();
+                self.speculative_model_path = None;
+                if self.speculative_model.as_deref().map_or(false, |m| m.ends_with(".gguf") || m.contains('\\')) {
+                    self.speculative_model = None;
+                    self.speculative_enabled = false;
+                    self.speculative_num_tokens = None;
+                }
             }
             ServerBackend::Llamacpp => {
                 self.gpu_mem_util = 0.0;
@@ -369,6 +414,13 @@ impl ServerDef {
                 self.kv_cache_dtype = None;
                 self.task = "instruct".into();
                 self.env.clear();
+                if self.speculative_enabled && self.speculative_model_path.is_none() {
+                    if let Some(m) = self.speculative_model.clone() {
+                        if m.ends_with(".gguf") || m.contains('\\') || m.contains('/') {
+                            self.speculative_model_path = Some(m);
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -969,6 +1021,14 @@ pub struct ServerRecipe {
     pub swap_space_gb: Option<usize>,
     #[serde(default)]
     pub cpu_offload_gb: Option<usize>,
+    #[serde(default)]
+    pub speculative_model: Option<String>,
+    #[serde(default)]
+    pub speculative_model_path: Option<String>,
+    #[serde(default)]
+    pub speculative_num_tokens: Option<usize>,
+    #[serde(default)]
+    pub speculative_enabled: bool,
 }
 
 fn default_recipe_schema() -> String {
@@ -990,6 +1050,10 @@ impl ServerRecipe {
             enforce_eager: def.enforce_eager,
             swap_space_gb: def.swap_space_gb,
             cpu_offload_gb: def.cpu_offload_gb,
+            speculative_model: def.speculative_model.clone(),
+            speculative_model_path: def.speculative_model_path.clone(),
+            speculative_num_tokens: def.speculative_num_tokens,
+            speculative_enabled: def.speculative_enabled,
         }
     }
 }
@@ -1438,6 +1502,10 @@ mod tests {
             metrics: true,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
+            speculative_model: None,
+            speculative_model_path: None,
+            speculative_num_tokens: None,
+            speculative_enabled: false,
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -1897,6 +1965,10 @@ mod tests {
             metrics: true,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
+            speculative_model: None,
+            speculative_model_path: None,
+            speculative_num_tokens: None,
+            speculative_enabled: false,
         });
 
         let text = serde_json::to_string(&cfg).unwrap();
@@ -1949,6 +2021,10 @@ mod tests {
             metrics: true,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
+            speculative_model: Some("Qwen/Qwen2.5-0.5B-Instruct".into()),
+            speculative_model_path: None,
+            speculative_num_tokens: Some(5),
+            speculative_enabled: true,
         };
 
         let recipe = ServerRecipe::from_server_def(&def);
@@ -1956,6 +2032,9 @@ mod tests {
         assert_eq!(recipe.port, 8088);
         assert_eq!(recipe.swap_space_gb, Some(4));
         assert_eq!(recipe.kv_cache_dtype.as_deref(), Some("fp8_e4m3"));
+        assert_eq!(recipe.speculative_enabled, true);
+        assert_eq!(recipe.speculative_model.as_deref(), Some("Qwen/Qwen2.5-0.5B-Instruct"));
+        assert_eq!(recipe.speculative_num_tokens, Some(5));
 
         let text = serde_json::to_string_pretty(&recipe).unwrap();
         let parsed_recipe: ServerRecipe = serde_json::from_str(&text).unwrap();
@@ -2138,5 +2217,114 @@ mod tests {
         );
         assert_eq!(gguf_display_name("/models/nal").as_deref(), Some("nal"));
         assert_eq!(gguf_display_name("   ").as_deref(), None);
+    }
+
+    #[test]
+    fn test_old_config_loads_with_speculative_defaults() {
+        use super::PersistedConfig;
+        let old = r#"{
+            "distro": "Ubuntu-22.04",
+            "llm_dir": "~/llm-lp",
+            "venv_dir": "~/llm-lp/.venv",
+            "hf_token": "",
+            "default_quant": "fp16",
+            "servers": [{
+                "id": "old",
+                "name": "old server",
+                "model_id": "org/model",
+                "task": "instruct",
+                "port": 8000,
+                "gpu_mem_util": 0.92,
+                "max_model_len": 4096,
+                "quant": "fp16",
+                "served_model_name": null,
+                "params_b": null,
+                "n_gpu_layers": 99
+            }],
+            "measured": {}
+        }"#;
+        let cfg: PersistedConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        let s = &cfg.servers[0];
+        assert_eq!(s.speculative_enabled, false);
+        assert_eq!(s.speculative_model, None);
+        assert_eq!(s.speculative_model_path, None);
+        assert_eq!(s.speculative_num_tokens, None);
+    }
+
+    #[test]
+    fn test_backend_normalization_speculative_decoding() {
+        use super::ServerDef;
+        let mut def = ServerDef {
+            backend: "vllm".into(),
+            id: "s1".into(),
+            name: "test".into(),
+            model_id: "Qwen/Qwen2.5-7B-Instruct".into(),
+            task: "instruct".into(),
+            port: 8000,
+            gpu_mem_util: 0.9,
+            max_model_len: None,
+            quant: "fp16".into(),
+            served_model_name: None,
+            kv_cache_dtype: None,
+            llamacpp_channel: LlamaCppChannel::Upstream,
+            enforce_eager: true,
+            params_b: None,
+            swap_space_gb: None,
+            cpu_offload_gb: None,
+            was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: Some(99),
+            n_cpu_moe: None,
+            fit: true,
+            fit_target: None,
+            device: None,
+            api_key: None,
+            log_verbosity: None,
+            flash_attn: true,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: 1,
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
+            env: BTreeMap::new(),
+            speculative_model: Some("Qwen/Qwen2.5-0.5B-Instruct".into()),
+            speculative_model_path: Some("/tmp/draft.gguf".into()),
+            speculative_num_tokens: Some(5),
+            speculative_enabled: true,
+        };
+
+        // vLLM instruct with speculative decoding enabled:
+        // clears speculative_model_path (GGUF only) and retains speculative_model and tokens
+        def.normalize_for_backend().unwrap();
+        assert_eq!(def.speculative_enabled, true);
+        assert_eq!(def.speculative_model.as_deref(), Some("Qwen/Qwen2.5-0.5B-Instruct"));
+        assert_eq!(def.speculative_model_path, None);
+        assert_eq!(def.speculative_num_tokens, Some(5));
+
+        // When disabled, all speculative fields are cleared
+        def.speculative_enabled = false;
+        def.normalize_for_backend().unwrap();
+        assert_eq!(def.speculative_enabled, false);
+        assert_eq!(def.speculative_model, None);
+        assert_eq!(def.speculative_model_path, None);
+        assert_eq!(def.speculative_num_tokens, None);
+
+        // When task is embed, speculative decoding is cleared even if enabled was true
+        def.task = "embed".into();
+        def.speculative_enabled = true;
+        def.speculative_model = Some("draft-model".into());
+        def.speculative_num_tokens = Some(5);
+        def.normalize_for_backend().unwrap();
+        assert_eq!(def.speculative_enabled, false);
+        assert_eq!(def.speculative_model, None);
+        assert_eq!(def.speculative_num_tokens, None);
     }
 }

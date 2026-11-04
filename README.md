@@ -131,6 +131,21 @@ vLLM's FlashInfer top-k/top-p sampler JIT-compiles a CUDA kernel on first use, r
 
 GitHub API access uses a separate optional token; the HF token is never sent to GitHub. A rejected GitHub token is retried anonymously, with diagnostics explaining the fallback. If GitHub is unreachable, download the Windows x64 CUDA zip plus the matching `cudart` zip manually, extract them together, and set **Custom llama-server.exe** in Settings.
 
+### Speculative decoding (optional)
+
+Accelerate inference token generation on `instruct` servers by running a smaller draft model alongside the main model. Speculative decoding is disabled by default per server and preserves existing server behavior when unused.
+
+1. **How to configure:** In **Servers → New/Edit server**, scroll to the **Speculative decoding (optional)** section (available for `instruct` servers only).
+2. **Enable & select a draft model:**
+   - **vLLM (WSL2):** Enter a Hugging Face model repository ID or local path (e.g., `Qwen/Qwen2.5-0.5B-Instruct` drafting for `Qwen/Qwen2.5-7B-Instruct`).
+   - **llama.cpp (Windows native):** Select or browse for a `.gguf` file using the **Browse…** picker (e.g. a 0.5B or 1.5B GGUF draft model).
+3. **Draft tokens:** Set the number of speculative tokens to draft per verification step (default: `5`).
+4. **Important considerations:**
+   - **Tokenizer & Family Compatibility:** The draft model must share the same tokenizer family, vocabulary, and formatting as the main target model (e.g. Qwen 2.5 draft for Qwen 2.5 main; Llama 3.2 draft for Llama 3.1 main).
+   - **Memory Usage:** The draft model weights and draft KV cache consume additional VRAM/RAM beyond the main model. Use the **Context fit test** before starting the server to verify your hardware headroom.
+   - **Backend Support:** Modern vLLM (0.30.0+ and 0.7.0+) automatically uses `--speculative-config`, while vLLM 0.4.0–0.6.x uses model-based flags. Native llama.cpp binaries detect `--model-draft`/`--spec-draft-model` and `--spec-draft-n-max`. If an installed binary does not support speculative decoding, startup fails explicitly with an actionable message instead of silently falling back.
+5. **Recipes & Presets:** Speculative decoding configurations are included when exporting and importing server recipes.
+
 ## Using the gateway
 
 Enable it in **Settings → Advanced Mode → Network → OpenAI-Compatible Gateway**, and configure an **API Key** in the same section. The key is required for every `/v1/*` route; a gateway without one returns `503` rather than exposing models to any local process.

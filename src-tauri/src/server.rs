@@ -170,16 +170,130 @@ fn is_prequantized_model(model_id: &str) -> bool {
     false
 }
 
+/// Parse a vLLM version string into (major, minor, patch) components.
+pub fn parse_vllm_version(v: &str) -> Option<(u64, u64, u64)> {
+    let clean = v.trim().trim_start_matches('v');
+    let mut parts = clean.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor_str = parts.next()?;
+    let minor = minor_str
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u64>()
+        .ok()?;
+    let patch = parts
+        .next()
+        .and_then(|p| {
+            p.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Build vLLM launch arguments for speculative decoding based on installed
+/// version and advertised capabilities.
+pub fn build_vllm_speculative_args(
+    def: &ServerDef,
+    vllm_version: Option<&str>,
+    vllm_help: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if !def.speculative_enabled {
+        return Ok(Vec::new());
+    }
+    let draft_model = def
+        .speculative_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Speculative decoding is enabled for server '{}' but no draft model was specified. Please specify a draft model ID.",
+                def.name
+            )
+        })?;
+
+    if let Some(ver_str) = vllm_version {
+        if let Some((major, minor, _)) = parse_vllm_version(ver_str) {
+            if major == 0 && minor < 4 {
+                return Err(format!(
+                    "Installed vLLM version '{ver_str}' does not support speculative decoding. vLLM 0.4.0 or newer is required."
+                ));
+            }
+        }
+    }
+
+    let tokens = def.speculative_num_tokens.unwrap_or(5);
+
+    if let Some(help) = vllm_help {
+        if help.contains("--speculative-config") {
+            let config = serde_json::json!({
+                "model": draft_model,
+                "num_speculative_tokens": tokens,
+            });
+            return Ok(vec![
+                "--speculative-config".into(),
+                shell_quote(&config.to_string()),
+            ]);
+        }
+        if help.contains("--spec-model") {
+            return Ok(vec![
+                "--spec-model".into(),
+                shell_quote(draft_model),
+                "--spec-tokens".into(),
+                tokens.to_string(),
+            ]);
+        }
+        if help.contains("--speculative-model") {
+            return Ok(vec![
+                "--speculative-model".into(),
+                shell_quote(draft_model),
+                "--num-speculative-tokens".into(),
+                tokens.to_string(),
+            ]);
+        }
+    }
+
+    let use_speculative_config = match vllm_version.and_then(parse_vllm_version) {
+        Some((major, minor, _)) => major > 0 || minor >= 7,
+        None => true,
+    };
+
+    if use_speculative_config {
+        let config = serde_json::json!({
+            "model": draft_model,
+            "num_speculative_tokens": tokens,
+        });
+        Ok(vec![
+            "--speculative-config".into(),
+            shell_quote(&config.to_string()),
+        ])
+    } else {
+        Ok(vec![
+            "--speculative-model".into(),
+            shell_quote(draft_model),
+            "--num-speculative-tokens".into(),
+            tokens.to_string(),
+        ])
+    }
+}
+
 /// Build the launch script that will be written to a file in WSL and executed.
 /// This avoids nested quoting issues with `wsl.exe -d <distro> --exec bash -lc "<script>"`.
 /// The script activates the venv, records the PID, exports env vars, then execs vLLM.
-fn launch_script(
+pub fn launch_script_with_version(
     venv_dir: &str,
     def: &ServerDef,
     hf_token: &str,
     adv: &crate::state::AdvancedSettings,
     global_default_env: &BTreeMap<String, String>,
-) -> String {
+    vllm_version: Option<&str>,
+    vllm_help: Option<&str>,
+) -> Result<String, String> {
     // Merge global default_env with per-server env (per-server wins)
     let mut merged_env = global_default_env.clone();
     merged_env.extend(def.env.clone());
@@ -213,6 +327,11 @@ fn launch_script(
 
     // Export environment variables (merged global defaults + per-server overrides)
     parts.insert(0, format!("echo '[LocalLLmPanel] Starting server {} on port {}'", shell_quote(&def.id), def.port));
+    if def.speculative_enabled {
+        let draft = def.speculative_model.as_deref().unwrap_or("none");
+        let tokens = def.speculative_num_tokens.unwrap_or(5);
+        parts.insert(1, format!("echo '[LocalLLmPanel] Speculative decoding enabled: draft model = {}, speculative tokens = {}'", shell_quote(draft), tokens));
+    }
     for (name, value) in &merged_env {
         if let Err(e) = validate_env_name(name) {
             eprintln!("[launch_script] Invalid env name '{}': {}, skipping", name, e);
@@ -336,6 +455,12 @@ fn launch_script(
             "--api-key",
             "--kv-cache-dtype",
             "--max-num-seqs",
+            "--speculative-config",
+            "--spec-model",
+            "--spec-tokens",
+            "--spec-method",
+            "--speculative-model",
+            "--num-speculative-tokens",
         ];
         let tokens = shlex::split(extra).unwrap_or_else(|| {
             eprintln!("[launch_script] ignoring invalid quoted extra vLLM arguments");
@@ -366,6 +491,11 @@ fn launch_script(
             });
             index += 1;
         }
+    }
+
+    if def.speculative_enabled {
+        let spec_args = build_vllm_speculative_args(def, vllm_version, vllm_help)?;
+        args.extend(spec_args);
     }
 
     // Modern vLLM replaces legacy --swap-space with --kv-offloading-size.
@@ -421,13 +551,32 @@ fn launch_script(
         parts.insert(0, format!("export HF_TOKEN={}", shell_quote(hf_token)));
     }
     let setup_chain = parts.join(" && ");
-    format!(
+    Ok(format!(
         "{tilde_snippet}\nvenv_dir=$(__llm_panel_expand_tilde {venv})\n{setup_chain}\ntrap 'rm -f -- \"$0\"' EXIT HUP INT TERM\npython -m vllm.entrypoints.openai.api_server {args} &\nserver_pid=$!\necho \"$server_pid\" > \"$venv_dir/../run/{run_id}.pid\"\nwait \"$server_pid\"\n",
         tilde_snippet = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
         venv = shell_quote(venv_dir),
         setup_chain = setup_chain,
         args = args.join(" "),
+    ))
+}
+
+pub fn launch_script(
+    venv_dir: &str,
+    def: &ServerDef,
+    hf_token: &str,
+    adv: &crate::state::AdvancedSettings,
+    global_default_env: &BTreeMap<String, String>,
+) -> String {
+    launch_script_with_version(
+        venv_dir,
+        def,
+        hf_token,
+        adv,
+        global_default_env,
+        None,
+        None,
     )
+    .unwrap_or_else(|e| format!("echo 'Error: {}'; exit 1", shell_quote(&e)))
 }
 
 /// Collect `.gguf` files under `dir`, recursively.
@@ -676,6 +825,39 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         structured_flags.push("--log-verbosity");
         structured_flags.push("-lv");
     }
+    if def.speculative_enabled {
+        if let Some(draft_model) = def
+            .speculative_model_path
+            .as_deref()
+            .or(def.speculative_model.as_deref())
+            .filter(|s| !s.trim().is_empty())
+        {
+            let draft_flag = if help_supports_flag(help, "--model-draft") {
+                "--model-draft"
+            } else if help_supports_flag(help, "--spec-draft-model") {
+                "--spec-draft-model"
+            } else if help_supports_flag(help, "-md") {
+                "-md"
+            } else {
+                "--model-draft"
+            };
+            args.extend([draft_flag.into(), draft_model.into()]);
+            structured_flags.extend(["--model-draft", "--spec-draft-model", "-md"]);
+
+            let tokens = def.speculative_num_tokens.unwrap_or(5);
+            let token_flag = if help_supports_flag(help, "--spec-draft-n-max") {
+                "--spec-draft-n-max"
+            } else if help_supports_flag(help, "--draft-max") {
+                "--draft-max"
+            } else if help_supports_flag(help, "--draft") {
+                "--draft"
+            } else {
+                "--spec-draft-n-max"
+            };
+            args.extend([token_flag.into(), tokens.to_string()]);
+            structured_flags.extend(["--spec-draft-n-max", "--draft-max", "--draft"]);
+        }
+    }
 
     // Workaround for upstream metadata bug in Qwen AgentWorld / qwen35moe models.
     // Keep it structured so it can be merged with user override-kv entries.
@@ -759,6 +941,12 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                     | "--ubatch-size"
                     | "-np"
                     | "--parallel"
+                    | "--model-draft"
+                    | "--spec-draft-model"
+                    | "-md"
+                    | "--spec-draft-n-max"
+                    | "--draft-max"
+                    | "--draft"
             ) {
                 i += 1;
             }
@@ -830,6 +1018,12 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             "-fa" => supports("-fa") || supports("--flash-attn"),
             "--cache-type-k" | "--cache-type-v" => supports(arg),
             "--no-kv-offload" | "--metrics" | "--jinja" | "--no-jinja" => supports(arg),
+            "--model-draft" | "--spec-draft-model" | "-md" => {
+                supports("--model-draft") || supports("--spec-draft-model") || supports("-md")
+            }
+            "--spec-draft-n-max" | "--draft-max" | "--draft" => {
+                supports("--spec-draft-n-max") || supports("--draft-max") || supports("--draft")
+            }
             _ => true,
         };
         if supported {
@@ -858,6 +1052,12 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "-ub"
                     | "-np"
                     | "--override-kv"
+                    | "--model-draft"
+                    | "--spec-draft-model"
+                    | "-md"
+                    | "--spec-draft-n-max"
+                    | "--draft-max"
+                    | "--draft"
             ) {
                 if let Some(value) = args.get(i + 1) {
                     filtered.push(value.clone());
@@ -882,6 +1082,12 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--metrics"
                 | "--jinja"
                 | "--no-jinja"
+                | "--model-draft"
+                | "--spec-draft-model"
+                | "-md"
+                | "--spec-draft-n-max"
+                | "--draft-max"
+                | "--draft"
         ) {
             if matches!(
                 arg.as_str(),
@@ -897,6 +1103,12 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "-fa"
                     | "--cache-type-k"
                     | "--cache-type-v"
+                    | "--model-draft"
+                    | "--spec-draft-model"
+                    | "-md"
+                    | "--spec-draft-n-max"
+                    | "--draft-max"
+                    | "--draft"
             ) {
                 i += 1;
             }
@@ -1057,6 +1269,30 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     cfg.gguf_dir
                 );
             }
+            if def.speculative_enabled {
+                let draft_raw = def
+                    .speculative_model_path
+                    .as_deref()
+                    .or(def.speculative_model.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Speculative decoding is enabled for server '{}' but no draft model was specified. Please select a draft GGUF model file.",
+                            def.name
+                        )
+                    })?;
+                if let Some(resolved) = resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro) {
+                    let path_str = resolved.to_string_lossy().into_owned();
+                    def.speculative_model_path = Some(path_str.clone());
+                    def.speculative_model = Some(path_str);
+                } else if !std::path::Path::new(draft_raw).is_file() {
+                    bail!(
+                        "Speculative decoding draft GGUF model file not found for '{draft_raw}'. Please provide a valid path to a .gguf file or ensure the draft model is downloaded to your GGUF directory ({}).",
+                        cfg.gguf_dir
+                    );
+                }
+            }
             let help = crate::llamacpp_install::command_output(&exe, &["--help"])
                 .unwrap_or_else(|_| {
                     cfg.llamacpp_channels
@@ -1064,19 +1300,42 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                         .and_then(|c| c.help.clone())
                         .unwrap_or_default()
                 });
+            if def.speculative_enabled {
+                let has_draft_support = help_supports_flag(&help, "--model-draft")
+                    || help_supports_flag(&help, "--spec-draft-model")
+                    || help_supports_flag(&help, "-md");
+                if !has_draft_support {
+                    bail!(
+                        "Speculative decoding was enabled for server '{}', but the installed llama-server binary does not support speculative decoding / draft models. Please update llama.cpp to a newer version.",
+                        def.name
+                    );
+                }
+                let draft_display = def
+                    .speculative_model_path
+                    .as_deref()
+                    .or(def.speculative_model.as_deref())
+                    .unwrap_or("none");
+                let tokens = def.speculative_num_tokens.unwrap_or(5);
+                log_cb(format!(
+                    "[LocalLLmPanel] Speculative decoding enabled: draft model = {draft_display}, speculative tokens = {tokens}"
+                ));
+            }
             let args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
             let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
                 .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
             (None, Some(child), None)
         }
         crate::state::ServerBackend::Vllm => {
-            let script = launch_script(
+            let vllm_version = crate::state::load_provision_report_cache().and_then(|r| r.vllm_version);
+            let script = launch_script_with_version(
                 &cfg.venv_dir,
                 &def,
                 &cfg.hf_token,
                 &cfg.advanced_settings,
                 &cfg.default_env,
-            );
+                vllm_version.as_deref(),
+                None,
+            ).map_err(|e| anyhow!(e))?;
             let child = wsl::WslChild::spawn(&distro, &script, &id_for_wsl, log_cb)
                 .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
             let pid = child.pid();
@@ -3049,6 +3308,10 @@ mod tests {
             metrics: true,
             extra_args: Vec::new(),
             env: BTreeMap::new(),
+            speculative_model: None,
+            speculative_model_path: None,
+            speculative_num_tokens: None,
+            speculative_enabled: false,
         }
     }
 
@@ -3895,5 +4158,195 @@ vllm:num_preemptions_total{model_name="my model"} 5
             
             assert_eq!(actual, value, "Env var {}: expected {:?}, got {:?}", name, value, actual);
         }
+    }
+
+    #[test]
+    fn test_vllm_speculative_args_modern_version_speculative_config() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = true;
+        d.speculative_model = Some("Qwen/Qwen2.5-0.5B-Instruct".into());
+        d.speculative_num_tokens = Some(5);
+
+        // vLLM 0.30.0 (or default modern) should produce --speculative-config JSON
+        let args = build_vllm_speculative_args(&d, Some("0.30.0"), None).unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--speculative-config");
+        let parsed: serde_json::Value = serde_json::from_str(args[1].trim_matches('\'')).unwrap();
+        assert_eq!(parsed["model"], "Qwen/Qwen2.5-0.5B-Instruct");
+        assert_eq!(parsed["num_speculative_tokens"], 5);
+
+        // Version None also defaults to modern --speculative-config
+        let args_default = build_vllm_speculative_args(&d, None, None).unwrap();
+        assert_eq!(args_default[0], "--speculative-config");
+    }
+
+    #[test]
+    fn test_vllm_speculative_args_legacy_version_flags() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = true;
+        d.speculative_model = Some("Qwen/Qwen2.5-0.5B-Instruct".into());
+        d.speculative_num_tokens = Some(4);
+
+        // vLLM 0.6.2 should use --speculative-model and --num-speculative-tokens
+        let args = build_vllm_speculative_args(&d, Some("0.6.2"), None).unwrap();
+        assert_eq!(args, vec![
+            "--speculative-model",
+            "'Qwen/Qwen2.5-0.5B-Instruct'",
+            "--num-speculative-tokens",
+            "4",
+        ]);
+    }
+
+    #[test]
+    fn test_vllm_speculative_args_help_flags() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = true;
+        d.speculative_model = Some("draft-model".into());
+        d.speculative_num_tokens = Some(3);
+
+        // If help explicitly advertises --spec-model
+        let args = build_vllm_speculative_args(&d, None, Some("--spec-model DRAFT --spec-tokens N")).unwrap();
+        assert_eq!(args, vec![
+            "--spec-model",
+            "'draft-model'",
+            "--spec-tokens",
+            "3",
+        ]);
+    }
+
+    #[test]
+    fn test_vllm_speculative_args_unsupported_version_fails() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = true;
+        d.speculative_model = Some("draft-model".into());
+
+        // vLLM < 0.4.0 should return an error
+        let err = build_vllm_speculative_args(&d, Some("0.3.3"), None).unwrap_err();
+        assert!(err.contains("does not support speculative decoding"));
+        assert!(err.contains("0.4.0 or newer is required"));
+    }
+
+    #[test]
+    fn test_vllm_speculative_args_missing_draft_model_fails() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = true;
+        d.speculative_model = None;
+
+        let err = build_vllm_speculative_args(&d, Some("0.30.0"), None).unwrap_err();
+        assert!(err.contains("no draft model was specified"));
+
+        d.speculative_model = Some("   ".into());
+        let err_blank = build_vllm_speculative_args(&d, Some("0.30.0"), None).unwrap_err();
+        assert!(err_blank.contains("no draft model was specified"));
+    }
+
+    #[test]
+    fn test_vllm_speculative_args_disabled_produces_no_flags() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = false;
+        d.speculative_model = Some("draft-model".into());
+
+        let args = build_vllm_speculative_args(&d, Some("0.30.0"), None).unwrap();
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_vllm_launch_script_with_version_and_log_notice() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        d.speculative_enabled = true;
+        d.speculative_model = Some("Qwen/Qwen2.5-0.5B-Instruct".into());
+        d.speculative_num_tokens = Some(5);
+
+        let script = launch_script_with_version(
+            "~/llm-lp/.venv",
+            &d,
+            "",
+            &crate::state::AdvancedSettings::default(),
+            &BTreeMap::new(),
+            Some("0.30.0"),
+            None,
+        ).unwrap();
+
+        assert!(script.contains("Speculative decoding enabled: draft model = 'Qwen/Qwen2.5-0.5B-Instruct', speculative tokens = 5"));
+        assert!(script.contains("--speculative-config '{\"model\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"num_speculative_tokens\":5}'"));
+    }
+
+    #[test]
+    fn test_vllm_extra_args_blocks_speculative_flags() {
+        let d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8000, "fp16", None);
+        let adv = crate::state::AdvancedSettings {
+            extra_vllm_args: Some(
+                "--speculative-config '{\"evil\":\"payload\"}' --spec-model bad --num-speculative-tokens 99 --custom-flag ok".into()
+            ),
+            ..Default::default()
+        };
+        let script = launch_script_with_version(
+            "~/llm-lp/.venv",
+            &d,
+            "",
+            &adv,
+            &BTreeMap::new(),
+            Some("0.30.0"),
+            None,
+        ).unwrap();
+
+        assert!(!script.contains("evil"));
+        assert!(!script.contains("bad"));
+        assert!(!script.contains("--num-speculative-tokens 99"));
+        assert!(script.contains("--custom-flag ok"));
+    }
+
+    #[test]
+    fn test_llamacpp_speculative_args_modern_and_legacy_help() {
+        let mut d = def("llama-7b", "instruct", 8000, "GGUF", None);
+        d.backend = "llamacpp".into();
+        d.speculative_enabled = true;
+        d.speculative_model_path = Some("C:\\models\\draft-0.5b.gguf".into());
+        d.speculative_num_tokens = Some(4);
+
+        // Modern llama.cpp advertising --model-draft and --spec-draft-n-max
+        let modern_help = "--model-draft FNAME  --spec-draft-n-max N";
+        let args_modern = build_llamacpp_args_with_help(&d, modern_help);
+        assert!(args_modern.contains(&"--model-draft".to_string()));
+        assert!(args_modern.contains(&"C:\\models\\draft-0.5b.gguf".to_string()));
+        assert!(args_modern.contains(&"--spec-draft-n-max".to_string()));
+        assert!(args_modern.contains(&"4".to_string()));
+
+        // Legacy llama.cpp advertising -md and --draft-max
+        let legacy_help = "-md FNAME  --draft-max N";
+        let args_legacy = build_llamacpp_args_with_help(&d, legacy_help);
+        assert!(args_legacy.contains(&"-md".to_string()));
+        assert!(args_legacy.contains(&"--draft-max".to_string()));
+        assert!(args_legacy.contains(&"4".to_string()));
+    }
+
+    #[test]
+    fn test_llamacpp_speculative_args_disabled_produces_no_flags() {
+        let mut d = def("llama-7b", "instruct", 8000, "GGUF", None);
+        d.backend = "llamacpp".into();
+        d.speculative_enabled = false;
+        d.speculative_model_path = Some("C:\\models\\draft-0.5b.gguf".into());
+
+        let help = "--model-draft FNAME  --spec-draft-n-max N";
+        let args = build_llamacpp_args_with_help(&d, help);
+        assert!(!args.contains(&"--model-draft".to_string()));
+        assert!(!args.contains(&"--spec-draft-n-max".to_string()));
+    }
+
+    #[test]
+    fn test_filter_llamacpp_args_strips_draft_when_unsupported() {
+        let input_args = vec![
+            "-m".to_string(),
+            "model.gguf".to_string(),
+            "--model-draft".to_string(),
+            "draft.gguf".to_string(),
+            "--spec-draft-n-max".to_string(),
+            "5".to_string(),
+        ];
+
+        // Binary help does NOT advertise draft flags
+        let old_help = "-m FNAME  -c N";
+        let filtered = filter_llamacpp_args(input_args, old_help);
+        assert_eq!(filtered, vec!["-m", "model.gguf"]);
     }
 }

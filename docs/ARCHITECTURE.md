@@ -129,6 +129,17 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `analyze_vllm_context` / `analyze_llama_context` — pre-start analysis of a requested context against model weight, KV-cache geometry, current free VRAM, available WSL RAM, GPU utilization, and offload settings.
 - `ContextFitReport` — status (`Fits`, `FitsWithCpu`, `Tight`, `DoesNotFit`, `Unknown`), weight source, KV bytes/token, projected VRAM and headroom, max context with/without RAM overflow, recommended context and KV-cache dtype, required CPU offload, plus warnings.
 - Backs the editable **Context fit test** in the server editor; recommendations can be applied to the form without starting the server.
+- Accounts for optional speculative decoding draft models by estimating additional draft weight consumption, adding memory headroom warnings, and preventing configurations where the main model already exceeds memory limits.
+
+### Speculative decoding
+- **Optional per-server acceleration** for `instruct` servers running on either `vLLM` (WSL2) or `llama.cpp` (Windows native). Disabled by default with zero behavioral changes when unused.
+- **Mechanism:** A smaller draft model runs alongside the main model to propose candidate tokens, which the main model verifies in batches in a single forward pass.
+- **Model compatibility:** The draft model must share the same tokenizer family, vocabulary, and prompt formatting as the main target model (for example, `Qwen/Qwen2.5-0.5B-Instruct` drafting for `Qwen/Qwen2.5-7B-Instruct`, or `Llama-3.2-1B-Instruct` drafting for `Meta-Llama-3.1-8B-Instruct`).
+- **Memory impact:** Draft model weights and draft KV caches consume additional VRAM/RAM. Context-fit analysis inspects draft models and provides estimate warnings.
+- **Backend & version awareness:**
+  - **vLLM:** Probes installed vLLM version and CLI capabilities. Modern vLLM releases (>= 0.7.0 and 0.30.0+) use `--speculative-config '{"model": "<id>", "num_speculative_tokens": N}'`. Earlier versions (0.4.0–0.6.x) use `--speculative-model` and `--num-speculative-tokens`. Versions < 0.4.0 fail explicitly with actionable upgrade instructions. Protected extra argument filters prevent injection or conflict.
+  - **llama.cpp:** Inspects installed `llama-server.exe --help` flags. Supports modern `--model-draft`/`--spec-draft-model`/`-md` and `--spec-draft-n-max` (or legacy `--draft-max`/`--draft`). Resolves GGUF files from disk or the panel's GGUF directory. If speculative decoding is configured but the installed binary lacks support, startup fails explicitly with guidance to update llama.cpp.
+- **Gateway & UI:** Gateway routes seamlessly to the primary server port; chat streaming, cancellation, tool calling, and metrics series operate without change. Startup logs clearly display the draft model and speculative token count. Servers UI provides a dedicated collapsible configuration panel for instruct servers. Server recipes include speculative parameters on export and import.
 
 ### `gguf.rs`
 - Minimal GGUF v2/v3 metadata reader (bounds-checked, no external parser dependency).
