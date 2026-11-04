@@ -87,6 +87,16 @@ pub struct ModelWithFit {
     pub capabilities: Vec<String>,
     pub gguf_sources: Vec<GgufSourceDto>,
     pub installed: bool,
+    #[serde(default)]
+    pub explanation: Option<String>,
+    #[serde(default)]
+    pub explanation_highlights: Vec<String>,
+    #[serde(default)]
+    pub is_split: bool,
+    #[serde(default)]
+    pub shard_count: usize,
+    #[serde(default)]
+    pub publisher_tier: Option<String>,
 }
 
 impl Default for ModelWithFit {
@@ -127,6 +137,11 @@ impl Default for ModelWithFit {
             capabilities: Vec::new(),
             gguf_sources: Vec::new(),
             installed: false,
+            explanation: None,
+            explanation_highlights: Vec::new(),
+            is_split: false,
+            shard_count: 1,
+            publisher_tier: None,
         }
     }
 }
@@ -486,6 +501,11 @@ pub fn fit_to_model_with_fit(
         capabilities,
         gguf_sources,
         installed: fit.installed,
+        explanation: None,
+        explanation_highlights: Vec::new(),
+        is_split: false,
+        shard_count: 1,
+        publisher_tier: None,
     }
 }
 

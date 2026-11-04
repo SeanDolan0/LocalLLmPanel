@@ -2,14 +2,19 @@
 
 pub mod commands;
 pub mod context_fit;
+pub mod download_manager;
 mod estimate;
 mod gguf;
 pub mod fit;
 pub mod gateway;
 pub mod hf;
+pub mod hf_discovery;
 pub mod llamacpp_install;
 pub mod llmfit_adapter;
+pub mod model_intelligence;
+pub mod model_registry;
 pub mod provision;
+pub mod recommendation;
 pub mod security;
 pub mod server;
 pub mod state;
@@ -180,6 +185,12 @@ pub fn run() {
             commands::install_cuda_build_tools,
             commands::check_app_update,
             commands::download_and_install_update,
+            commands::discovery_feed,
+            commands::inspect_model_artifacts,
+            commands::download_start,
+            commands::download_pause,
+            commands::download_cancel,
+            commands::download_queue_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

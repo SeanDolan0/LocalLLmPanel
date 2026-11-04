@@ -143,6 +143,33 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 - `list_gguf_repo_files`, `check_gguf_repo`, and grouping helpers — discover GGUF files, combine split shards, and separate optional `mmproj` companions.
 - Native GGUF downloads run on Windows (not WSL), are bearer-authenticated, resumable per shard, and write into the configured `gguf_dir`.
 
+### `hf_discovery.rs`
+- **Dynamic live Hub discovery** querying `trendingScore`, `createdAt`, `lastModified`, pipeline tags, and full metadata without suppressing live results.
+- **Search query parser and normalizer** (`ParsedSearchQuery`) — recognizes exact repo IDs (`org/name`), Hugging Face URLs (`https://huggingface.co/...`), and extracts structured intent (GGUF/AWQ/GPTQ format filters, target quantization e.g. `Q4_K_M`, parameter count limits e.g. `7b`, and task keywords).
+- **Publisher reputation tiers** (`PublisherRegistry`) — categorizes publishers into `OfficialOrg` (Qwen, meta-llama, mistralai, google, deepseek-ai, microsoft), `TrustedQuantizer` (bartowski, unsloth, QuantFactory, MaziyarPanahi, lmstudio-community), and `Community`.
+- **Multi-tier discovery cache** (`DiscoveryCache`) — separates cache TTLs for trending feeds (45 min), categorized feeds (60 min), and search queries (15 min) with stale-while-revalidate semantics.
+
+### `model_intelligence.rs`
+- **Recursive repository tree inspection** and multi-shard GGUF grouping (`group_gguf_repo_files`). Combines multi-part shards (`model-Q4_K_M-00001-of-00003.gguf`) into unified `LogicalGgufArtifact` entries reporting aggregated size and full shard file lists.
+- **Companion file resolution** — detects associated `mmproj` vision projectors and tokenizer configurations.
+- **Base model family and lineage extraction** — infers base architectures from repository naming patterns and tags.
+
+### `recommendation.rs`
+- **Composite recommendation scoring engine** — evaluates candidates using an explainable multi-signal rubric: Hardware Fit (40%), Task Relevance (25%), Quality & Publisher Reputation (20%), Freshness & Trending Velocity (10%), and Popularity (5%).
+- **Natural-language explanation generator** (`RecommendationExplanation`) — produces concise reasoning (e.g., "Strong coding focus · Fits comfortably in GPU VRAM (5.2 GB) · Q5_K_M available") and verifiable highlight badges for every candidate.
+- **Category feeds** — For You, New & Trending, Coding, Reasoning, General Chat, Small & Fast, Embeddings / RAG, and Vision & Multimodal.
+
+### `model_registry.rs`
+- **Local Model Registry** persisted to `%APPDATA%/local-llm-panel/model_registry.json`.
+- Bridges live discovery, downloads, and the installed library: tracks model ID, commit revision, base model, publisher tier, backend, format, quant, downloaded artifact file list, total byte size, and installation status.
+- Detects remote updates and prevents duplicate or partial downloads.
+
+### `download_manager.rs`
+- **Unified async download engine and queue** supporting concurrency, pause, resume, and cancellation.
+- **Resumable HTTP Range transport** for native GGUF downloads: manages `.part` temporary files, handles HTTP 206 Partial Content, graceful fallback on HTTP 200, handles HTTP 416, and performs atomic rename on completion.
+- **Multi-shard sequential downloads** — downloads all shards of a logical model sequentially before marking the artifact complete.
+- Emits real-time `download-progress` events alongside backward-compatible `pull-progress` events.
+
 ### `llamacpp_install.rs`
 - **Per-channel installs** — `Upstream` (`ggml-org/llama.cpp`) and `PrismML` (`PrismML-Eng/llama.cpp@prism`, needed for ternary formats). Each channel keeps its own installed tag, version, executable, help text, and directory in config.
 - Lists and caches recent releases, parses anchored Windows x64 CUDA/`cudart` names, selects a driver-compatible numeric CUDA version (with Blackwell warnings), falls back across incomplete releases, extracts both archives into a tag directory, and probes `--version` / `--help`.
@@ -186,7 +213,7 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 
 **Core/WSL:** `env_status`, `provision`, `wsl_distros`, `wslconfig_get`, `gpu_status`, `system_metrics_series`, `get_system_memory`, `get_memory_settings`, `update_memory_settings`, `check_flashinfer_ready`, `install_cuda_build_tools`.
 
-**HF/Models:** `search_models`, `search_models_with_fit`, `recommended_models`, `model_stats`, `analyze_context_fit`, `pull_model`, `pull_status`, `pull_cancel`, `gguf_files`, `download_gguf`, `library_list`, `library_remove`, `library_disk_usage`, `library_import_local`.
+**HF/Models/Discovery/Downloads:** `search_models`, `search_models_with_fit`, `recommended_models`, `discovery_feed`, `inspect_model_artifacts`, `model_stats`, `analyze_context_fit`, `pull_model`, `pull_status`, `pull_cancel`, `download_start`, `download_pause`, `download_cancel`, `download_queue_status`, `gguf_files`, `download_gguf`, `library_list`, `library_remove`, `library_disk_usage`, `library_import_local`.
 
 **llama.cpp:** `install_llamacpp`, `install_llamacpp_channel`, `llamacpp_status`, `github_access`, `clear_github_token`.
 
@@ -200,7 +227,7 @@ Each phase emits `wsl-log` lines; a phase that already succeeded is skipped (mar
 
 **Settings/Config:** `settings_get`, `settings_set`, `autostart_get`, `autostart_set`, `config_export`, `config_import`, `server_recipe_export`, `server_recipe_parse`, `open_url`.
 
-Events: `wsl-log {phase,line}`, `llamacpp-install-progress {file,done,total?}`, `pull-progress {model,state,file?,percent?,speed_bps?,eta_seconds?,bytes_downloaded?,bytes_total?}`, `server-status {id,status,error?}`, `server-log {id,line}`, `server-metrics`, `chat-token {request_id,server_id,token}`, `chat-done {request_id}`, `chat-cancel {request_id}`, `chat-error {request_id,error}`, `benchmark-step`, `benchmark-done`, `benchmark-cancel`, `benchmark-error`.
+Events: `wsl-log {phase,line}`, `llamacpp-install-progress {file,done,total?}`, `pull-progress {model,state,file?,percent?,speed_bps?,eta_seconds?,bytes_downloaded?,bytes_total?}`, `download-progress {job_id,model_id,current_file,file_index,total_files,downloaded_bytes,total_bytes,percent,speed_bps,eta_seconds,state,error?}`, `server-status {id,status,error?}`, `server-log {id,line}`, `server-metrics`, `chat-token {request_id,server_id,token}`, `chat-done {request_id}`, `chat-cancel {request_id}`, `chat-error {request_id,error}`, `benchmark-step`, `benchmark-done`, `benchmark-cancel`, `benchmark-error`.
 
 ## Frontend (`src/`)
 - Vite + React 18 + TS; Tailwind v4 (`@tailwindcss/vite`); dark theme (zinc/indigo).

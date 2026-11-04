@@ -528,6 +528,11 @@ export interface ModelWithFit {
   capabilities?: string[];
   gguf_sources?: GgufSource[];
   installed?: boolean;
+  explanation?: string | null;
+  explanation_highlights?: string[];
+  is_split?: boolean;
+  shard_count?: number;
+  publisher_tier?: string | null;
 }
 
 export interface ChatMessage {
@@ -687,3 +692,66 @@ export interface UpdateLaunchResult {
   success: boolean;
   message: string;
 }
+
+export interface LogicalGgufArtifact {
+  quant: string;
+  files: string[];
+  total_size_bytes: number;
+  is_split: boolean;
+  shard_count: number;
+  has_mmproj: boolean;
+  mmproj_files: string[];
+}
+
+export type DownloadState =
+  | "Queued"
+  | "Resolving"
+  | "Downloading"
+  | "Paused"
+  | "Verifying"
+  | "Completed"
+  | "Failed"
+  | "Cancelled";
+
+export interface DownloadJob {
+  id: string;
+  model_id: string;
+  repo_id: string;
+  quant: string;
+  backend: string;
+  files: string[];
+  destination_dir: string;
+  total_bytes: number;
+  downloaded_bytes: number;
+  current_file_idx: number;
+  speed_bps: number;
+  eta_seconds: number;
+  state: DownloadState;
+  error: string | null;
+}
+
+export interface DownloadProgressPayload {
+  job_id: string;
+  model_id: string;
+  repo_id?: string;
+  current_file: string;
+  file_index: number;
+  total_files: number;
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+  speed_bps: number;
+  eta_seconds: number;
+  state: string;
+  error?: string | null;
+}
+
+export type DiscoveryCategory =
+  | "for_you"
+  | "trending"
+  | "coding"
+  | "reasoning"
+  | "chat"
+  | "small"
+  | "embeddings"
+  | "vision";

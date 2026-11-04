@@ -11,10 +11,13 @@ import {
 } from "../api";
 import { Badge, Button, inputCls, Spinner } from "../ui";
 import type {
+  DiscoveryCategory,
+  DownloadJob,
   EnvStatus,
   FitResultBackend,
   FitVerdict,
   LlamaCppChannel,
+  LogicalGgufArtifact,
   ModelWithFit,
   PullStatus,
   QuantVariantWithFit,
@@ -321,23 +324,25 @@ function getBestVariant(m: ModelWithFit): QuantVariantWithFit | undefined {
   return m.variants[0];
 }
 
-const CATEGORIES = [
-  ["all", "All"],
-  ["chat", "Chat & Instruct"],
-  ["coding", "Coding"],
-  ["reasoning", "Reasoning (R1)"],
-  ["multimodal", "Multimodal"],
-  ["embedding", "Embeddings"],
-] as const;
+const CATEGORIES: { key: DiscoveryCategory; label: string; desc: string; icon: string }[] = [
+  { key: "for_you", label: "For You", desc: "Best overall models tailored to your GPU VRAM, compute, and context", icon: "✨" },
+  { key: "trending", label: "New & Trending", desc: "Recently released and fast-rising models on Hugging Face Hub", icon: "🔥" },
+  { key: "coding", label: "Coding", desc: "Specialized models for code generation, agentic coding, and tool calling", icon: "💻" },
+  { key: "reasoning", label: "Reasoning", desc: "Deep multi-step reasoning, mathematical, and logic models", icon: "🧠" },
+  { key: "chat", label: "General Chat", desc: "Top conversational instruction-tuned assistant models", icon: "💬" },
+  { key: "small", label: "Small & Fast", desc: "Low-footprint models with ultra-fast token generation", icon: "⚡" },
+  { key: "embeddings", label: "Embeddings / RAG", desc: "Models for semantic search, document embeddings, and retrieval", icon: "📚" },
+  { key: "vision", label: "Vision", desc: "Multimodal models capable of image understanding", icon: "👁️" },
+];
 
 function matchesCategory(m: ModelWithFit, cat: string): boolean {
-  if (cat === "all") return true;
+  if (cat === "for_you" || cat === "all") return true;
   const useCaseLower = (m.use_case || m.category || "").toLowerCase();
   if (useCaseLower && (useCaseLower === cat || useCaseLower.includes(cat))) {
     return true;
   }
   const idLower = m.id.toLowerCase();
-  if (cat === "embedding") {
+  if (cat === "embeddings" || cat === "embedding") {
     return (
       m.pipeline_tag === "feature-extraction" ||
       idLower.includes("embed") ||
@@ -361,7 +366,7 @@ function matchesCategory(m: ModelWithFit, cat: string): boolean {
       idLower.includes("thinking")
     );
   }
-  if (cat === "multimodal") {
+  if (cat === "vision" || cat === "multimodal") {
     return (
       m.pipeline_tag === "image-text-to-text" ||
       idLower.includes("vl") ||
@@ -370,6 +375,9 @@ function matchesCategory(m: ModelWithFit, cat: string): boolean {
       idLower.includes("llava") ||
       idLower.includes("multimodal")
     );
+  }
+  if (cat === "small") {
+    return (m.params_b ?? 0) > 0 && (m.params_b ?? 0) <= 4.0;
   }
   if (cat === "chat") {
     return (
@@ -472,7 +480,10 @@ export default function Search() {
 
   const [pulls, setPulls] = useState<Record<string, PullStatus>>({});
   const [env, setEnv] = useState<EnvStatus | null>(null);
-  const [activeCategory, setActiveCategory] = useState<string>("all");
+  const [activeCategory, setActiveCategory] = useState<DiscoveryCategory>("for_you");
+  const [feedRefreshing, setFeedRefreshing] = useState(false);
+  const [lastFeedRefresh, setLastFeedRefresh] = useState<Date | null>(null);
+  const [queueJobs, setQueueJobs] = useState<DownloadJob[]>([]);
   const [onlyRecommended, setOnlyRecommended] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
   const [selectedModel, setSelectedModel] = useState<ModelWithFit | null>(null);
@@ -512,8 +523,13 @@ export default function Search() {
     [installedModels]
   );
 
+  const refreshQueue = useCallback(() => {
+    api.downloadQueueStatus().then(setQueueJobs).catch(() => {});
+  }, []);
+
   useEffect(() => {
     refreshLibrary();
+    refreshQueue();
     api.envStatus().then(setEnv).catch(() => {});
     api.pullStatus().then((res) => {
       if (res?.pulling?.length) {
@@ -524,40 +540,69 @@ export default function Search() {
         setPulls((prev) => ({ ...prev, ...active }));
       }
     }).catch(() => {});
-    const unsub = events.pullProgress((p) => {
+
+    const unsubPull = events.pullProgress((p) => {
       setPulls((prev) => ({ ...prev, [p.model]: p }));
       if (p.state === "complete") {
         refreshLibrary();
+        refreshQueue();
       }
     });
-    return () => {
-      unsub.then((f) => f());
-    };
-  }, [refreshLibrary]);
 
-  // Fetch dynamic recommendations on component mount
-  useEffect(() => {
-    let active = true;
-    setLoadingRecs(true);
-    setRecsErr(null);
-    api
-      .recommendedModels()
-      .then((data) => {
-        if (active) {
-          setRecommended(data);
-          setLoadingRecs(false);
+    const unsubDl = events.downloadProgress((p) => {
+      const entry: PullStatus = {
+        model: p.model_id,
+        state: p.state.toLowerCase() === "completed" ? "complete" : p.state.toLowerCase(),
+        file: p.current_file,
+        percent: p.percent,
+        speed_bps: p.speed_bps,
+        eta_seconds: p.eta_seconds,
+        bytes_downloaded: p.downloaded_bytes,
+        bytes_total: p.total_bytes,
+        error: p.error ?? null,
+      };
+      setPulls((prev) => {
+        const next = { ...prev, [p.model_id]: entry };
+        if (p.repo_id && p.repo_id !== p.model_id) {
+          next[p.repo_id] = entry;
         }
-      })
-      .catch((e) => {
-        if (active) {
-          setRecsErr(String(e));
-          setLoadingRecs(false);
-        }
+        return next;
       });
+      if (p.state.toLowerCase() === "completed") {
+        refreshLibrary();
+        refreshQueue();
+      }
+    });
+
+    const queueTimer = setInterval(refreshQueue, 2500);
+
     return () => {
-      active = false;
+      clearInterval(queueTimer);
+      unsubPull.then((f) => f());
+      unsubDl.then((f) => f());
     };
+  }, [refreshLibrary, refreshQueue]);
+
+  // Load dynamic discovery feed for the active category
+  const loadFeed = useCallback(async (cat: DiscoveryCategory, force = false) => {
+    setLoadingRecs(true);
+    setFeedRefreshing(force);
+    setRecsErr(null);
+    try {
+      const data = await api.discoveryFeed(cat, force);
+      setRecommended(data);
+      setLastFeedRefresh(new Date());
+    } catch (e) {
+      setRecsErr(String(e));
+    } finally {
+      setLoadingRecs(false);
+      setFeedRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadFeed(activeCategory, false);
+  }, [loadFeed, activeCategory]);
 
   // Auto-search logic
   const doSearch = async (searchTerm: string) => {
@@ -616,37 +661,56 @@ export default function Search() {
     return ids;
   }, [recommended, results, selectedModel]);
 
-  const pull = (repoId: string, quant?: string) => {
+  const pull = async (repoId: string, quant?: string) => {
     if (isModelInstalled(repoId)) return;
-    if (ggufRepoIds.has(repoId.toLowerCase())) {
-      api
-        .ggufFiles(repoId)
-        .then((files) => {
-          const targets = files.filter(
-            (f) => !f.is_mmproj && (!quant || f.quant === quant)
+    try {
+      if (ggufRepoIds.has(repoId.toLowerCase())) {
+        const artifacts = await api.inspectModelArtifacts(repoId).catch(() => []);
+        const target = artifacts.find(
+          (a) => !quant || a.quant.toLowerCase() === quant.toLowerCase()
+        );
+        if (target && target.files.length > 0) {
+          await api.downloadStart(repoId, repoId, target.quant, target.files, "llamacpp");
+          refreshQueue();
+          return;
+        }
+        const files = await api.ggufFiles(repoId).catch(() => []);
+        const targets = files.filter(
+          (f) => !f.is_mmproj && (!quant || f.quant === quant)
+        );
+        if (targets.length > 0) {
+          await api.downloadStart(
+            repoId,
+            repoId,
+            quant ?? "GGUF",
+            targets.map((f) => f.path),
+            "llamacpp"
           );
-          if (!targets.length) {
-            throw new Error(
-              quant
-                ? `No GGUF files found for ${quant} in ${repoId}`
-                : `No GGUF files found in ${repoId}`
-            );
-          }
-          return api.downloadGguf(repoId, targets.map((f) => f.path));
-        })
-        .catch((e) => setSearchErr(String(e)));
-    } else {
-      api.pullModel(repoId).catch((e) => setSearchErr(String(e)));
+          refreshQueue();
+          return;
+        }
+        // Fallback to vLLM native download if no GGUF files exist in this repository
+        await api.pullModel(repoId);
+      } else {
+        await api.pullModel(repoId);
+      }
+    } catch (e) {
+      setSearchErr(String(e));
     }
   };
 
   const cancelPull = (repoId: string) => {
+    const job = queueJobs.find((j) => j.model_id === repoId || j.repo_id === repoId);
+    if (job) {
+      api.downloadCancel(job.id).catch(() => {});
+    }
     api.pullCancel(repoId).catch((e) => setSearchErr(String(e)));
     setPulls((prev) => {
       const next = { ...prev };
       delete next[repoId];
       return next;
     });
+    setTimeout(refreshQueue, 500);
   };
 
   const deploy = (
@@ -670,10 +734,6 @@ export default function Search() {
         prefillTask: isGguf ? "instruct" : /embed|bge|gte/i.test(repoId) ? "embed" : "instruct",
       },
     });
-  };
-
-  const selectCategory = (key: string) => {
-    setActiveCategory(key);
   };
 
   const clearSearch = () => {
@@ -761,20 +821,39 @@ export default function Search() {
       {/* Quick category filters & compatibility toggle */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-slate-500 font-medium mr-1">Categories:</span>
-          {CATEGORIES.map(([key, label]) => (
+          <span className="text-slate-500 font-medium mr-1">Feeds:</span>
+          {CATEGORIES.map(({ key, label, icon }) => (
             <button
               key={key}
-              onClick={() => selectCategory(key)}
-              className={`rounded-full px-2.5 py-1 transition-colors ${
+              onClick={() => setActiveCategory(key)}
+              className={`rounded-full px-2.5 py-1 text-xs transition-colors flex items-center gap-1 ${
                 activeCategory === key
-                  ? "bg-indigo-600 text-white font-medium"
+                  ? "bg-indigo-600 text-white font-medium shadow-sm"
                   : "bg-surface-2 border border-edge text-slate-400 hover:text-slate-200"
               }`}
             >
-              {label}
+              <span>{icon}</span>
+              <span>{label}</span>
             </button>
           ))}
+          {results === null && (
+            <div className="flex items-center gap-1.5 ml-2">
+              <button
+                onClick={() => loadFeed(activeCategory, true)}
+                disabled={feedRefreshing}
+                className="rounded-full border border-edge bg-surface-2 px-2.5 py-1 text-xs text-indigo-400 hover:text-indigo-300 hover:bg-surface-3 transition-colors flex items-center gap-1.5"
+                title="Force refresh discovery feed from Hugging Face Hub (bypasses cache)"
+              >
+                <span className={feedRefreshing ? "animate-spin" : ""}>↻</span>
+                <span>{feedRefreshing ? "Refreshing..." : "Refresh"}</span>
+              </button>
+              {lastFeedRefresh && (
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {lastFeedRefresh.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-4">
@@ -812,6 +891,111 @@ export default function Search() {
           )}
         </div>
       </div>
+
+      {/* Active Download Queue Manager Card */}
+      {queueJobs.filter((j) => j.state !== "Completed" && j.state !== "Cancelled").length > 0 && (
+        <div className="rounded-xl border border-indigo-500/30 bg-surface-2/95 p-4 shadow-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="flex h-2.5 w-2.5 rounded-full bg-indigo-500 animate-pulse" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                Active Download Queue ({queueJobs.filter((j) => j.state === "Downloading" || j.state === "Queued").length} jobs)
+              </h3>
+            </div>
+            <span className="text-[11px] text-slate-400 font-mono">
+              Resumable HTTP Range Engine
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            {queueJobs
+              .filter((j) => j.state !== "Completed" && j.state !== "Cancelled")
+              .map((job) => {
+                const pct = job.total_bytes > 0 ? (job.downloaded_bytes / job.total_bytes) * 100 : 0;
+                return (
+                  <div key={job.id} className="rounded-lg border border-edge/80 bg-surface-3/40 p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="min-w-0">
+                        <span className="font-semibold text-slate-100">{job.model_id}</span>
+                        <span className="text-slate-400 ml-2 font-mono text-[11px]">
+                          ({job.quant} · {job.files.length} file{job.files.length > 1 ? "s" : ""})
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          job.state === "Downloading"
+                            ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+                            : job.state === "Paused"
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                            : job.state === "Failed"
+                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                            : "bg-surface-2 text-slate-400"
+                        }`}>
+                          {job.state}
+                        </span>
+                        {job.state === "Downloading" && (
+                          <Button
+                            variant="ghost"
+                            className="text-xs px-2 py-0.5 text-amber-300 hover:text-amber-200"
+                            onClick={() => api.downloadPause(job.id)}
+                            title="Pause download"
+                          >
+                            Pause
+                          </Button>
+                        )}
+                        {job.state === "Paused" && (
+                          <Button
+                            variant="ghost"
+                            className="text-xs px-2 py-0.5 text-emerald-300 hover:text-emerald-200"
+                            onClick={() => api.downloadStart(job.model_id, job.repo_id, job.quant, job.files, job.backend)}
+                            title="Resume download"
+                          >
+                            Resume
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          className="text-xs px-2 py-0.5 text-rose-400 hover:text-rose-300"
+                          onClick={() => cancelPull(job.repo_id || job.model_id)}
+                          title="Cancel download"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-indigo-500 transition-all duration-300 ease-out"
+                          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                        />
+                      </div>
+                      <span className="font-mono text-xs text-slate-300 w-10 text-right">
+                        {pct.toFixed(0)}%
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-400">
+                      <span>
+                        {fmtBytes(job.downloaded_bytes)} / {fmtBytes(job.total_bytes)}
+                        {job.files.length > 1 && (
+                          <span className="text-slate-500 ml-1.5">
+                            (file {job.current_file_idx + 1} of {job.files.length})
+                          </span>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        <span>{fmtTransferRate(job.speed_bps)}</span>
+                        <span>ETA: {fmtDuration(job.eta_seconds)}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
 
       {/* Error Banners */}
       {searchErr && (
@@ -1212,6 +1396,31 @@ function ModelCard({
             )}
           </div>
           <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            {model.publisher_tier && (
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded font-medium border ${
+                  model.publisher_tier === "official"
+                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                    : model.publisher_tier === "trusted"
+                    ? "bg-indigo-500/15 text-indigo-300 border-indigo-500/30"
+                    : "bg-surface-3 text-slate-400 border-edge"
+                }`}
+              >
+                {model.publisher_tier === "official"
+                  ? "Official Org"
+                  : model.publisher_tier === "trusted"
+                  ? "Trusted"
+                  : "Community"}
+              </span>
+            )}
+            {model.is_split && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                title="Weights are split into multiple GGUF shards"
+              >
+                📦 {model.shard_count ? `${model.shard_count} Shards` : "Split"}
+              </span>
+            )}
             {model.runtime && (
               <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                 {model.runtime}
@@ -1382,6 +1591,30 @@ function ModelCard({
           </div>
         )}
 
+        {/* Recommendation Explanation & Highlights */}
+        {model.explanation && (
+          <div className="rounded-lg bg-indigo-500/10 border border-indigo-500/20 p-2.5 space-y-1 text-xs">
+            <div className="flex items-center gap-1 font-semibold text-indigo-300 text-[11px]">
+              <span>💡 Why recommended:</span>
+            </div>
+            <p className="text-slate-300 text-[11px] leading-relaxed">
+              {model.explanation}
+            </p>
+            {model.explanation_highlights && model.explanation_highlights.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1 pt-1">
+                {model.explanation_highlights.map((h, i) => (
+                  <span
+                    key={i}
+                    className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-200 border border-indigo-500/30"
+                  >
+                    ✓ {h}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Notes from llmfit */}
         {model.notes && model.notes.length > 0 && !fit?.reason && (
           <div className="space-y-0.5 text-[10px] text-slate-400">
@@ -1479,6 +1712,31 @@ function ModelDetailModal({
     (vwf) => vwf.variant.format === "GGUF" || vwf.fit.format_support === "Experimental"
   );
 
+  const [repoArtifactsMap, setRepoArtifactsMap] = useState<Record<string, LogicalGgufArtifact[]>>({});
+
+  useEffect(() => {
+    const ggufRepos = Array.from(
+      new Set(
+        model.variants
+          .filter((v) => v.variant.format === "GGUF")
+          .map((v) => v.variant.repo_id)
+      )
+    );
+    if (ggufRepos.length === 0 && model.id) {
+      ggufRepos.push(model.id);
+    }
+    for (const repo of ggufRepos) {
+      api
+        .inspectModelArtifacts(repo)
+        .then((res) => {
+          if (res && res.length > 0) {
+            setRepoArtifactsMap((prev) => ({ ...prev, [repo.toLowerCase()]: res }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [model]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150"
@@ -1495,6 +1753,23 @@ function ModelDetailModal({
               <h2 className="text-lg font-bold text-slate-100 truncate">
                 {model.id.split("/").pop()}
               </h2>
+              {model.publisher_tier && (
+                <span
+                  className={`text-xs px-2 py-0.5 rounded font-medium border ${
+                    model.publisher_tier === "official"
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : model.publisher_tier === "trusted"
+                      ? "bg-indigo-500/15 text-indigo-300 border-indigo-500/30"
+                      : "bg-surface-3 text-slate-400 border-edge"
+                  }`}
+                >
+                  {model.publisher_tier === "official"
+                    ? "Official Org"
+                    : model.publisher_tier === "trusted"
+                    ? "Trusted Quantizer"
+                    : "Community"}
+                </span>
+              )}
               {model.pipeline_tag && (
                 <span className="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
                   {model.pipeline_tag}
@@ -1551,6 +1826,30 @@ function ModelDetailModal({
             </div>
           </div>
         </div>
+
+        {/* Recommendation Rationale */}
+        {model.explanation && (
+          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3.5 space-y-1.5 text-xs">
+            <div className="flex items-center gap-1.5 font-bold text-indigo-300 text-sm">
+              <span>💡 Recommendation Rationale</span>
+            </div>
+            <p className="text-slate-200 leading-relaxed text-xs">
+              {model.explanation}
+            </p>
+            {model.explanation_highlights && model.explanation_highlights.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                {model.explanation_highlights.map((h, i) => (
+                  <span
+                    key={i}
+                    className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-200 border border-indigo-500/30 font-medium"
+                  >
+                    ✓ {h}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* llmfit Hardware Fit & Score Breakdown */}
         {model.score_components && (
@@ -1660,6 +1959,14 @@ function ModelDetailModal({
                 const pullState = pulls[variant.repo_id] || (isBest ? pulls[model.id] : undefined);
                 const tokS = fit.measured_tok_s ?? fit.est_tok_s;
 
+                const repoArtifacts = repoArtifactsMap[variant.repo_id.toLowerCase()] || [];
+                const matchingArtifact = repoArtifacts.find(
+                  (a) =>
+                    a.quant.toLowerCase() === variant.label.toLowerCase() ||
+                    (variant.format === "GGUF" && a.quant.toLowerCase() === (variant.format || "").toLowerCase())
+                );
+                const isExternalQuantizer = variant.repo_id.toLowerCase() !== model.id.toLowerCase();
+
                 return (
                   <div
                     key={`${variant.repo_id}-${variant.label}-${idx}`}
@@ -1679,6 +1986,14 @@ function ModelDetailModal({
                           <span className="font-semibold text-sm text-slate-100">
                             {variant.label}
                           </span>
+                          {isExternalQuantizer && (
+                            <span
+                              className="inline-flex items-center gap-1 rounded bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 text-[10px] text-indigo-300 font-medium"
+                              title={`Community quantizer: ${variant.repo_id}`}
+                            >
+                              via {variant.repo_id.split("/")[0]}
+                            </span>
+                          )}
                           {isBest && (
                             <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500 text-black shadow">
                               Best Fit
@@ -1714,6 +2029,25 @@ function ModelDetailModal({
                             </span>
                           )}
                         </div>
+
+                        {matchingArtifact && (
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            {matchingArtifact.is_split ? (
+                              <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[10px] text-amber-200 font-medium">
+                                📦 Multi-shard: {matchingArtifact.shard_count} files ({fmtBytes(matchingArtifact.total_size_bytes)})
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded bg-surface-2 border border-edge px-1.5 py-0.5 text-[10px] text-slate-300">
+                                Exact size: {fmtBytes(matchingArtifact.total_size_bytes)}
+                              </span>
+                            )}
+                            {matchingArtifact.has_mmproj && (
+                              <span className="inline-flex items-center gap-1 rounded bg-purple-500/15 border border-purple-500/30 px-1.5 py-0.5 text-[10px] text-purple-200">
+                                👁️ Includes mmproj companion
+                              </span>
+                            )}
+                          </div>
+                        )}
 
                         {/* Fit Metrics Breakdown */}
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs">
@@ -1780,18 +2114,34 @@ function ModelDetailModal({
                           <RunModeBadge mode={fit.run_mode} />
                         </div>
 
-<div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-          <PullStateButton
-            pullState={pullState}
-            targetId={variant.repo_id}
-            quant={variant.format === "GGUF" ? variant.label : undefined}
-            isInstalled={isModelInstalled ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id) : false}
-            onPull={onPull}
-            onCancelPull={onCancelPull}
-            pullButtonClassName="text-xs px-2.5 py-1"
-            cancelButtonClassName="text-xs px-2 py-1"
-            retryButtonClassName="text-xs px-2 py-1"
-          />
+                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                          <PullStateButton
+                            pullState={pullState}
+                            targetId={variant.repo_id}
+                            quant={variant.format === "GGUF" ? variant.label : undefined}
+                            isInstalled={isModelInstalled ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id) : false}
+                            onPull={(_id, q) => {
+                              if (variant.format === "GGUF") {
+                                if (matchingArtifact && matchingArtifact.files.length > 0) {
+                                  api.downloadStart(
+                                    model.id,
+                                    variant.repo_id,
+                                    matchingArtifact.quant,
+                                    matchingArtifact.files,
+                                    "llamacpp"
+                                  ).catch((err) => console.error(err));
+                                } else {
+                                  onPull(variant.repo_id, q);
+                                }
+                              } else {
+                                api.pullModel(variant.repo_id || model.id).catch((err) => console.error(err));
+                              }
+                            }}
+                            onCancelPull={onCancelPull}
+                            pullButtonClassName="text-xs px-2.5 py-1"
+                            cancelButtonClassName="text-xs px-2 py-1"
+                            retryButtonClassName="text-xs px-2 py-1"
+                          />
                           <Button
                             variant="primary"
                             className="text-xs px-3 py-1"

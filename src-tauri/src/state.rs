@@ -1191,6 +1191,9 @@ pub struct AppState {
     pub template_effort_cache: Mutex<HashMap<u16, (u64, Option<Vec<String>>)>>,
     pub app_update_cache: Mutex<Option<(crate::updater::AppUpdateInfo, Instant)>>,
     pub provisioning: AtomicBool,
+    pub discovery_cache: Arc<crate::hf_discovery::DiscoveryCache>,
+    pub model_registry: Arc<crate::model_registry::ModelRegistry>,
+    pub download_manager: Arc<crate::download_manager::DownloadManager>,
 }
 
 pub const METRICS_SERIES_CAPACITY: usize = 60;
@@ -1258,6 +1261,9 @@ impl AppState {
                 let _ = config.save();
             }
         }
+        let discovery_cache = Arc::new(crate::hf_discovery::DiscoveryCache::new());
+        let model_registry = Arc::new(crate::model_registry::ModelRegistry::new());
+        let download_manager = Arc::new(crate::download_manager::DownloadManager::new(Arc::clone(&model_registry)));
         AppState {
             config: Mutex::new(config),
             servers: Mutex::new(BTreeMap::new()),
@@ -1278,6 +1284,9 @@ impl AppState {
             template_effort_cache: Mutex::new(HashMap::new()),
             app_update_cache: Mutex::new(None),
             provisioning: AtomicBool::new(false),
+            discovery_cache,
+            model_registry,
+            download_manager,
         }
     }
 

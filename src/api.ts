@@ -38,6 +38,9 @@ import type {
   AppUpdateInfo,
   AppUpdateProgress,
   UpdateLaunchResult,
+  LogicalGgufArtifact,
+  DownloadJob,
+  DownloadProgressPayload,
 } from "./types";
 
 export type {
@@ -65,6 +68,18 @@ export const api = {
     invoke<ModelWithFit[]>("search_models_with_fit", { query }),
   recommendedModels: () =>
     invoke<ModelWithFit[]>("recommended_models"),
+  discoveryFeed: (category?: string, forceRefresh?: boolean) =>
+    invoke<ModelWithFit[]>("discovery_feed", { category: category ?? null, forceRefresh: forceRefresh ?? null }),
+  inspectModelArtifacts: (repoId: string) =>
+    invoke<LogicalGgufArtifact[]>("inspect_model_artifacts", { repoId }),
+  downloadStart: (modelId: string, repoId: string, quant: string, files: string[], backend: string) =>
+    invoke<string>("download_start", { modelId, repoId, quant, files, backend }),
+  downloadPause: (jobId: string) =>
+    invoke<boolean>("download_pause", { jobId }),
+  downloadCancel: (jobId: string) =>
+    invoke<boolean>("download_cancel", { jobId }),
+  downloadQueueStatus: () =>
+    invoke<DownloadJob[]>("download_queue_status"),
   analyzeContextFit: (input: ContextFitRequest) =>
     invoke<ContextFitReport>("analyze_context_fit", { input }),
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),
@@ -203,6 +218,8 @@ export const events = {
   serverMetrics: (cb: (e: MetricsSnapshot & { id?: string }) => void) =>
     listen("server-metrics", (e) => cb(e.payload as MetricsSnapshot & { id?: string })),
   pullProgress: (cb: (e: PullStatus) => void) => listen<PullStatus>("pull-progress", (e) => cb(e.payload)),
+  downloadProgress: (cb: (e: DownloadProgressPayload) => void) =>
+    listen<DownloadProgressPayload>("download-progress", (e) => cb(e.payload)),
   chatToken: (cb: (e: ChatTokenPayload) => void) =>
     listen<ChatTokenPayload>("chat-token", (e) => cb(e.payload)),
   chatDone: (cb: (e: ChatDonePayload) => void) =>

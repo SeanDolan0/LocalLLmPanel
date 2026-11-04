@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::estimate;
 use crate::fit::{self, FitResult, HardwareProfile, ModelArchInfo, VariantInput};
-use crate::hf::{self, HfModel, QuantFormat, QuantVariant};
+use crate::hf::{self, QuantFormat, QuantVariant};
 use crate::provision::{self, ProvisionReport};
 use crate::server;
 use crate::state::{
@@ -740,7 +740,13 @@ async fn hydrate_gguf_variants(
     }
 }
 
-async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<ModelWithFit> {
+
+
+async fn process_records_with_fit(
+    st: &AppState,
+    records: Vec<crate::hf_discovery::HfModelRecord>,
+    category: crate::hf_discovery::DiscoveryCategory,
+) -> Vec<ModelWithFit> {
     let enrich_sem = Arc::new(Semaphore::new(10));
     let disc_sem = Arc::new(Semaphore::new(6));
     let hw = search_hardware_profile(st);
@@ -750,26 +756,28 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
 
     let futures: Vec<
         std::pin::Pin<Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>>,
-    > = models
+    > = records
         .into_iter()
-        .map(|m| {
+        .map(|r| {
             let enrich_sem = Arc::clone(&enrich_sem);
             let disc_sem = Arc::clone(&disc_sem);
             let hw = hw.clone();
             let preferred = preferred.clone();
             let token = token.clone();
             let mem_settings = mem_settings.clone();
+            let cat = category.clone();
+
             let fut: std::pin::Pin<
                 Box<dyn std::future::Future<Output = ModelWithFit> + Send + '_>,
             > = Box::pin(async move {
                 let token_ref = token.as_deref();
                 let enrich_fut = async {
                     let _permit = enrich_sem.acquire().await.ok();
-                    hf::enrich(&st.http, &m.id, Some(&st.enrichment_cache), token_ref).await
+                    hf::enrich(&st.http, &r.id, Some(&st.enrichment_cache), token_ref).await
                 };
                 let disc_fut = hf::discover_quant_variants(
                     &st.http,
-                    &m.id,
+                    &r.id,
                     &disc_sem,
                     Some(&st.quant_cache),
                     token_ref,
@@ -808,13 +816,43 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
                 let (final_variants, best_variant_idx) =
                     score_variants(st, &hw, &mem_settings, &arch, variants, &preferred);
 
+                let family = crate::model_intelligence::infer_model_family(
+                    &r.id,
+                    r.pipeline_tag.as_deref(),
+                    &r.tags,
+                );
+
+                let (comp_score, _details, explanation) = if let Some(best_vwf) = final_variants.get(best_variant_idx) {
+                    crate::recommendation::calculate_composite_score(
+                        &best_vwf.fit,
+                        &r,
+                        &cat,
+                        &family,
+                    )
+                } else {
+                    (0.0, Default::default(), crate::recommendation::RecommendationExplanation {
+                        headline: format!("Model from {}", family.family_name),
+                        highlights: vec![],
+                        trade_offs: vec!["No compatible quant variants found".into()],
+                    })
+                };
+
+                let pub_tier = crate::hf_discovery::PublisherRegistry::get_tier(&r.id);
+                let pub_str = match pub_tier {
+                    crate::hf_discovery::PublisherTier::OfficialOrg => "Official",
+                    crate::hf_discovery::PublisherTier::TrustedQuantizer => "Trusted Quantizer",
+                    crate::hf_discovery::PublisherTier::Community => "Community",
+                };
+
+                let installed = st.model_registry.is_installed(&r.id, None);
+
                 let mut model = ModelWithFit {
-                    id: m.id,
-                    provider: None,
-                    downloads: m.downloads,
-                    likes: m.likes,
-                    trending_score: m.trending_score,
-                    pipeline_tag: m.pipeline_tag,
+                    id: r.id.clone(),
+                    provider: r.author.clone(),
+                    downloads: r.downloads,
+                    likes: r.likes,
+                    trending_score: r.trending_score,
+                    pipeline_tag: r.pipeline_tag.clone(),
                     params_b,
                     parameter_count: params_b.map(|p| format!("{p:.1}B")),
                     context,
@@ -824,10 +862,15 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
                     n_layers,
                     n_kv_heads,
                     use_case: None,
-                    category: None,
-                    release_date: None,
+                    category: Some(cat.display_name().to_string()),
+                    release_date: r.created_at.clone(),
                     variants: final_variants,
                     best_variant_idx,
+                    score: comp_score,
+                    explanation: Some(explanation.headline),
+                    explanation_highlights: explanation.highlights,
+                    publisher_tier: Some(pub_str.to_string()),
+                    installed,
                     ..ModelWithFit::default()
                 };
                 apply_best_variant(&mut model);
@@ -840,44 +883,82 @@ async fn process_models_with_fit(st: &AppState, models: Vec<HfModel>) -> Vec<Mod
     let mut out = join_all(futures).await;
 
     out.sort_by(|a, b| {
-        let score_a = a
-            .variants
-            .get(a.best_variant_idx)
-            .map(|v| v.fit.score)
-            .unwrap_or(0);
-        let score_b = b
-            .variants
-            .get(b.best_variant_idx)
-            .map(|v| v.fit.score)
-            .unwrap_or(0);
-        score_b
-            .cmp(&score_a)
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.trending_score.partial_cmp(&a.trending_score).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| b.downloads.cmp(&a.downloads))
     });
 
     out
 }
 
-/// Everything that feeds scoring, folded into one value so the recommendation
-/// cache is invalidated when any of it changes (not just VRAM size).
-fn scoring_fingerprint(hw: &HardwareProfile, mem: &MemorySettings) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    hw.vram_total_mb.hash(&mut hasher);
-    hw.ram_total_mb.hash(&mut hasher);
-    hw.ram_usable_mb.hash(&mut hasher);
-    hw.ram_potential_mb.hash(&mut hasher);
-    hw.gpu_name.hash(&mut hasher);
-    hw.bandwidth_known.hash(&mut hasher);
-    hw.bandwidth_gbs.to_bits().hash(&mut hasher);
-    mem.default_gpu_mem_util.to_bits().hash(&mut hasher);
-    mem.vram_overhead_mb.to_bits().hash(&mut hasher);
-    mem.enable_ram_overflow.hash(&mut hasher);
-    mem.manual_ram_limit_mb.hash(&mut hasher);
-    mem.safety_reserve_mb.hash(&mut hasher);
-    mem.offload_weights_allowed.hash(&mut hasher);
-    mem.max_context_cap.hash(&mut hasher);
-    hasher.finish()
+#[tauri::command]
+pub async fn discovery_feed(
+    state: State<'_, Arc<AppState>>,
+    category: Option<String>,
+    force_refresh: Option<bool>,
+) -> Result<Vec<ModelWithFit>, String> {
+    let st = (*state).clone();
+    let cat_enum = crate::hf_discovery::DiscoveryCategory::from_str_loose(category.as_deref().unwrap_or("for_you"));
+    let bypass = force_refresh.unwrap_or(false);
+
+    // 1. Check discovery cache if not forcing refresh
+    if !bypass {
+        if let Some(cached_records) = st.discovery_cache.get_feed(&cat_enum, std::time::Duration::from_secs(1800)) {
+            let scored = process_records_with_fit(&st, cached_records, cat_enum.clone()).await;
+            if !scored.is_empty() {
+                return Ok(scored);
+            }
+        }
+    }
+
+    // 2. Query live Hugging Face feed
+    let token = st.hf_token();
+    let live_result = crate::hf_discovery::DiscoveryService::fetch_category_feed(
+        &st.http,
+        cat_enum.clone(),
+        25,
+        token.as_deref(),
+    )
+    .await;
+
+    match live_result {
+        Ok(records) if !records.is_empty() => {
+            st.discovery_cache.set_feed(&cat_enum, records.clone());
+            let scored = process_records_with_fit(&st, records, cat_enum).await;
+            Ok(scored)
+        }
+        _ => {
+            // 3. Graceful offline fallback to curated local database
+            let hw = search_hardware_profile(&st);
+            let mem = st.config().memory_settings;
+            let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
+            let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
+            let mut out = tokio::task::spawn_blocking(move || {
+                crate::llmfit_adapter::recommend_models(40, &specs, &config)
+            })
+            .await
+            .map_err(|e| format!("recommendation worker failed: {e}"))?;
+
+            hydrate_gguf_variants(&st, &mut out, &hw, &mem).await;
+
+            for m in &mut out {
+                m.notes.push("Loaded from offline catalog fallback".into());
+                if m.explanation.is_none() {
+                    m.explanation = Some(format!("Curated recommendation for {}", cat_enum.display_name()));
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn recommended_models(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ModelWithFit>, String> {
+    discovery_feed(state, Some("for_you".to_string()), None).await
 }
 
 #[tauri::command]
@@ -896,87 +977,92 @@ pub async fn search_models_with_fit(
     let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
     let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
 
-    // 1. Search local llmfit curated database first (exact formulas, instant, zero rate limits)
-    let mut results = crate::llmfit_adapter::search_models_local(q, 30, &specs, &config);
-    // Local results carry only the quant the scorer guessed; replace it with the
-    // quants the repo actually publishes.
-    hydrate_gguf_variants(&st, &mut results, &hw, &mem).await;
+    let parsed = crate::hf_discovery::parse_search_query(q);
 
-    // 2. Augment with Hugging Face API search if fewer than 15 local results
-    if results.len() < 15 {
-        let token = st.hf_token();
-        if let Ok(hf_results) = hf::search(&st.http, q, 12, token.as_deref()).await {
-            let existing_ids: std::collections::HashSet<String> =
-                results.iter().map(|m| m.id.to_lowercase()).collect();
-            let new_hf: Vec<_> = hf_results
-                .into_iter()
-                .filter(|m| !existing_ids.contains(&m.id.to_lowercase()))
-                .collect();
-            if !new_hf.is_empty() {
-                let mut hf_scored = process_models_with_fit(&st, new_hf).await;
-                results.append(&mut hf_scored);
-            }
+    // 1. Search local curated database
+    let mut local_results = crate::llmfit_adapter::search_models_local(&parsed.clean_text, 25, &specs, &config);
+    hydrate_gguf_variants(&st, &mut local_results, &hw, &mem).await;
+
+    // 2. Concurrently search live Hugging Face
+    let token = st.hf_token();
+    let hf_records = crate::hf_discovery::DiscoveryService::search_models(
+        &st.http,
+        &parsed,
+        20,
+        token.as_deref(),
+    )
+    .await
+    .unwrap_or_default();
+
+    let mut hf_scored = if !hf_records.is_empty() {
+        let cat = if let Some(t) = &parsed.target_task {
+            crate::hf_discovery::DiscoveryCategory::from_str_loose(t)
+        } else {
+            crate::hf_discovery::DiscoveryCategory::ForYou
+        };
+        process_records_with_fit(&st, hf_records, cat).await
+    } else {
+        Vec::new()
+    };
+
+    // 3. Merge results with deduplication
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+
+    // Exact matches go first
+    if let Some(exact) = &parsed.exact_repo_id {
+        if let Some(pos) = hf_scored.iter().position(|m| m.id.eq_ignore_ascii_case(exact)) {
+            let m = hf_scored.remove(pos);
+            seen_ids.insert(m.id.to_ascii_lowercase());
+            merged.push(m);
         }
     }
 
-    // Local scores and live-HF scores come from the same hardware/settings now,
-    // so rank the merged list instead of leaving it in "local first" order.
-    results.sort_by(|a, b| {
+    for m in hf_scored {
+        if seen_ids.insert(m.id.to_ascii_lowercase()) {
+            merged.push(m);
+        }
+    }
+
+    for m in local_results {
+        if seen_ids.insert(m.id.to_ascii_lowercase()) {
+            merged.push(m);
+        }
+    }
+
+    // 4. Apply format/quant filters if extracted from search query
+    if let Some(fmt) = &parsed.format_filter {
+        let fmt_upper = fmt.to_ascii_uppercase();
+        merged.retain(|m| {
+            m.variants.iter().any(|v| {
+                format!("{:?}", v.variant.format).to_ascii_uppercase().contains(&fmt_upper)
+                    || v.variant.label.to_ascii_uppercase().contains(&fmt_upper)
+            })
+        });
+    }
+
+    if let Some(q_filter) = &parsed.quant_filter {
+        let q_upper = q_filter.to_ascii_uppercase();
+        merged.retain(|m| {
+            m.variants.iter().any(|v| v.variant.label.to_ascii_uppercase().contains(&q_upper))
+        });
+    }
+
+    if let Some(max_params) = parsed.max_params_b {
+        merged.retain(|m| {
+            m.params_b.map(|p| p <= max_params * 1.25).unwrap_or(true)
+        });
+    }
+
+    // Sort by composite score
+    merged.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.downloads.cmp(&a.downloads))
     });
 
-    Ok(results)
-}
-
-#[tauri::command]
-pub async fn recommended_models(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<ModelWithFit>, String> {
-    let st = (*state).clone();
-    let hw = search_hardware_profile(&st);
-    let mem = st.config().memory_settings;
-    let fingerprint = scoring_fingerprint(&hw, &mem);
-
-    // 1. Check cache (10 min TTL). Keyed on every scoring input, so changing a
-    // memory setting invalidates it immediately instead of serving numbers that
-    // no longer match the Search tab.
-    {
-        let mut cache = st.rec_cache.lock().unwrap();
-        if let Some((ref cached_models, cached_at, cached_fingerprint)) = *cache {
-            if cached_fingerprint == fingerprint
-                && cached_at.elapsed() < std::time::Duration::from_secs(600)
-            {
-                return Ok(cached_models.clone());
-            }
-            if cached_fingerprint != fingerprint {
-                *cache = None;
-            }
-        }
-    }
-
-    // 2. Exact match to `llmfit recommend` on the local hardware, then verify
-    //    the GGUF quants it suggests against the repos that actually host them.
-    // Catalog scanning + scoring is CPU/IO heavy; keep it off the async runtime.
-    let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
-    let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
-    let mut out = tokio::task::spawn_blocking(move || {
-        crate::llmfit_adapter::recommend_models(50, &specs, &config)
-    })
-    .await
-    .map_err(|e| format!("recommendation worker failed: {e}"))?;
-
-    hydrate_gguf_variants(&st, &mut out, &hw, &mem).await;
-
-    // 3. Store in cache
-    if !out.is_empty() {
-        let mut cache = st.rec_cache.lock().unwrap();
-        *cache = Some((out.clone(), std::time::Instant::now(), fingerprint));
-    }
-
-    Ok(out)
+    Ok(merged)
 }
 
 #[derive(Serialize)]
@@ -3171,6 +3257,79 @@ fn safe_relative_gguf_path(raw: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
+pub async fn inspect_model_artifacts(
+    state: State<'_, Arc<AppState>>,
+    repo_id: String,
+) -> Result<Vec<crate::model_intelligence::LogicalGgufArtifact>, String> {
+    crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
+    let token = state.hf_token();
+    let files = crate::hf::list_gguf_repo_files(&state.http, &repo_id, token.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    let artifacts = crate::model_intelligence::group_gguf_repo_files(&repo_id, &files);
+    Ok(artifacts)
+}
+
+#[tauri::command]
+pub async fn download_start(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    model_id: String,
+    repo_id: String,
+    quant: String,
+    files: Vec<String>,
+    backend: String,
+) -> Result<String, String> {
+    let st = (*state).clone();
+    crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
+
+    if backend.eq_ignore_ascii_case("vllm") {
+        let mid = if model_id.is_empty() { repo_id.clone() } else { model_id.clone() };
+        hf::pull_model(&st, app, &mid).map_err(|e| e.to_string())?;
+        Ok(format!("vllm-{}", crate::state::now_ms()))
+    } else {
+        if files.is_empty() {
+            return Err("At least one GGUF file must be selected for download".into());
+        }
+        let relative_files: Vec<String> = files
+            .iter()
+            .map(|f| safe_relative_gguf_path(f).map(|p| p.to_string_lossy().replace('\\', "/")))
+            .collect::<Result<_, _>>()?;
+
+        let gguf_root = PathBuf::from(&st.config().gguf_dir);
+        let repo_leaf = repo_id.rsplit('/').next().unwrap_or("model");
+        let dest = gguf_root.join(repo_leaf).to_string_lossy().into_owned();
+        let token = st.hf_token();
+
+        let job_id = st.download_manager.enqueue_gguf_job(
+            app,
+            model_id,
+            repo_id,
+            quant,
+            relative_files,
+            dest,
+            token,
+        )?;
+        Ok(job_id)
+    }
+}
+
+#[tauri::command]
+pub fn download_pause(state: State<'_, Arc<AppState>>, job_id: String) -> Result<bool, String> {
+    Ok(state.download_manager.pause_job(&job_id))
+}
+
+#[tauri::command]
+pub fn download_cancel(state: State<'_, Arc<AppState>>, job_id: String) -> Result<bool, String> {
+    Ok(state.download_manager.cancel_job(&job_id))
+}
+
+#[tauri::command]
+pub fn download_queue_status(state: State<'_, Arc<AppState>>) -> Result<Vec<crate::download_manager::DownloadJob>, String> {
+    Ok(state.download_manager.list_jobs())
+}
+
+#[tauri::command]
 pub async fn download_gguf(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -3181,246 +3340,23 @@ pub async fn download_gguf(
         return Err("select at least one GGUF file".into());
     }
     crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
-    let relative_files: Vec<PathBuf> = files
-        .iter()
-        .map(|file| safe_relative_gguf_path(file))
-        .collect::<Result<_, _>>()?;
 
-    let st = (*state).clone();
-    let cfg = st.config();
-    let token = st.hf_token();
-    let model = repo_id.clone();
-    let pulling_arc = Arc::clone(&st.pulling);
-    let gguf_root = PathBuf::from(&cfg.gguf_dir);
-    std::fs::create_dir_all(&gguf_root).map_err(|e| e.to_string())?;
-    let gguf_root = gguf_root
-        .canonicalize()
-        .map_err(|e| format!("GGUF directory is not accessible: {e}"))?;
-    let destination = gguf_root.join(
-        repo_id
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("model"),
-    );
-    if destination.exists() {
-        let canonical_destination = destination
-            .canonicalize()
-            .map_err(|e| format!("GGUF destination is not accessible: {e}"))?;
-        if !canonical_destination.starts_with(&gguf_root) {
-            return Err("Refusing to download into a path outside the GGUF directory".into());
-        }
-    }
-    {
-        let mut pulling = pulling_arc.lock().unwrap();
-        if *pulling.get(&model).unwrap_or(&false) {
-            return Err(format!("already downloading {model}"));
-        }
-        pulling.insert(model.clone(), true);
-    }
+    let quant = files
+        .first()
+        .and_then(|f| crate::hf::parse_gguf_quant_label(f))
+        .unwrap_or_else(|| "GGUF".to_string());
 
-    let fail_app = app.clone();
-    let fail_model = model.clone();
-    let download_result = tokio::task::spawn_blocking(move || {
-        let mut current_file: Option<String> = None;
-        let result = (|| -> Result<(), String> {
-            std::fs::create_dir_all(&destination)
-                .map_err(|e| format!("could not create GGUF directory: {e}"))?;
-            let client = reqwest::blocking::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| format!("could not create HTTP client: {e}"))?;
+    let _ = download_start(
+        app,
+        state,
+        repo_id.clone(),
+        repo_id,
+        quant,
+        files,
+        "llamacpp".to_string(),
+    )
+    .await?;
 
-            'outer: for relative in relative_files {
-                let display = relative.to_string_lossy().replace('\\', "/");
-                current_file = Some(display.clone());
-                if !pulling_arc.lock().unwrap().contains_key(&model) {
-                    return Ok(());
-                }
-
-                let target = destination.join(&relative);
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("{display}: could not create directory: {e}"))?;
-                }
-
-                let url = format!("https://huggingface.co/{model}/resolve/main/{display}");
-
-                // Ask for the authoritative size first. Without it a read that
-                // simply hit EOF (dropped connection, proxy truncation) looks
-                // exactly like a finished download, and a leftover file from a
-                // different revision gets appended to instead of replaced.
-                let mut head = client.head(&url);
-                if let Some(token) = token.as_deref().filter(|t| !t.trim().is_empty()) {
-                    head = head.bearer_auth(token);
-                }
-                let head_response = head
-                    .send()
-                    .and_then(|r| r.error_for_status())
-                    .map_err(|e| format!("{display}: could not read remote size: {e}"))?;
-                let remote_size = head_response.content_length();
-
-                let mut offset = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-                if let Some(remote) = remote_size {
-                    if remote > 0 && offset == remote {
-                        // Already complete; report it and move on.
-                        let _ = app.emit(
-                            "pull-progress",
-                            serde_json::json!({
-                                "model": model,
-                                "state": "downloading",
-                                "file": display,
-                                "percent": 100.0,
-                                "bytes_downloaded": offset,
-                                "bytes_total": remote,
-                            }),
-                        );
-                        continue;
-                    }
-                    if offset > remote {
-                        // Larger than the remote file: stale or corrupt bytes.
-                        std::fs::remove_file(&target)
-                            .map_err(|e| format!("{display}: could not reset stale file: {e}"))?;
-                        offset = 0;
-                    }
-                }
-
-                let mut request = client.get(&url);
-                if let Some(token) = token.as_deref().filter(|t| !t.trim().is_empty()) {
-                    request = request.bearer_auth(token);
-                }
-                if offset > 0 {
-                    request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-                }
-                let response = request
-                    .send()
-                    .map_err(|e| format!("{display}: {e}"))?;
-
-                // 416 means the server considers the resume point past the end
-                // of the file; if the local copy already matches the remote
-                // size there is nothing left to fetch.
-                if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-                    if remote_size.map(|remote| offset >= remote).unwrap_or(false) {
-                        continue;
-                    }
-                    return Err(format!(
-                        "{display}: resume rejected by server (HTTP 416) and local file does not match the remote size"
-                    ));
-                }
-
-                // A 200 answer to a ranged request means Range was ignored;
-                // restart from zero rather than appending a second copy.
-                let restart = offset > 0 && response.status() == reqwest::StatusCode::OK;
-                if restart {
-                    offset = 0;
-                }
-                let mut response = response
-                    .error_for_status()
-                    .map_err(|e| format!("{display}: {e}"))?;
-
-                let total = remote_size.or_else(|| response.content_length().map(|n| n + offset));
-                let mut output = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .append(offset > 0)
-                    .truncate(offset == 0)
-                    .open(&target)
-                    .map_err(|e| format!("{display}: {e}"))?;
-
-                let file_started = std::time::Instant::now();
-                let mut done = offset;
-                let mut buf = vec![0u8; 1024 * 1024];
-                loop {
-                    if !pulling_arc.lock().unwrap().contains_key(&model) {
-                        break 'outer;
-                    }
-                    let n = std::io::Read::read(&mut response, &mut buf)
-                        .map_err(|e| format!("{display}: {e}"))?;
-                    if n == 0 {
-                        break;
-                    }
-                    std::io::Write::write_all(&mut output, &buf[..n])
-                        .map_err(|e| format!("{display}: {e}"))?;
-                    done += n as u64;
-                    let percent = total.map(|t| (done as f64 / t as f64 * 100.0) as f32);
-                    let speed = (done.saturating_sub(offset)) as f64
-                        / file_started.elapsed().as_secs_f64().max(0.001);
-                    let eta_seconds = match (total, speed) {
-                        (Some(t), s) if s > 0.0 => Some(((t.saturating_sub(done)) as f64 / s) as f32),
-                        _ => None,
-                    };
-                    let _ = app.emit(
-                        "pull-progress",
-                        serde_json::json!({
-                            "model": model,
-                            "state": "downloading",
-                            "file": display,
-                            "percent": percent,
-                            "speed_bps": speed,
-                            "eta_seconds": eta_seconds,
-                            "bytes_downloaded": done,
-                            "bytes_total": total,
-                        }),
-                    );
-                }
-                std::io::Write::flush(&mut output)
-                    .map_err(|e| format!("{display}: {e}"))?;
-
-                if let Some(total) = total {
-                    if done != total {
-                        return Err(format!(
-                            "{display}: incomplete download ({done} of {total} bytes); retry to resume"
-                        ));
-                    }
-                }
-            }
-
-            if !pulling_arc.lock().unwrap().contains_key(&model) {
-                // cancelled (frontend already removed the progress entry)
-                return Ok(());
-            }
-            let _ = app.emit(
-                "pull-progress",
-                serde_json::json!({"model": model, "state": "complete", "file": null, "percent": 100.0}),
-            );
-            Ok(())
-        })();
-
-        if let Err(err) = &result {
-            let cancelled = !pulling_arc.lock().unwrap().contains_key(&model);
-            if !cancelled {
-                let _ = app.emit(
-                    "pull-progress",
-                    serde_json::json!({
-                        "model": model,
-                        "state": "failed",
-                        "file": current_file,
-                        "error": err,
-                    }),
-                );
-            }
-        }
-        result
-    });
-    let download_result = match download_result.await {
-        Ok(result) => result,
-        Err(error) => {
-            st.pulling.lock().unwrap().remove(&repo_id);
-            let message = format!("download worker failed: {error}");
-            let _ = fail_app.emit(
-                "pull-progress",
-                serde_json::json!({
-                    "model": fail_model,
-                    "state": "failed",
-                    "file": null,
-                    "error": message,
-                }),
-            );
-            return Err(message);
-        }
-    };
-    st.pulling.lock().unwrap().remove(&repo_id);
-    download_result?;
     Ok(())
 }
 
@@ -4576,6 +4512,11 @@ mod tests {
             capabilities: vec![],
             gguf_sources: vec![],
             installed: false,
+            explanation: Some("Fits comfortably in VRAM".into()),
+            explanation_highlights: vec!["Strong fit".into()],
+            is_split: false,
+            shard_count: 1,
+            publisher_tier: Some("official".into()),
         };
 
         let json = serde_json::to_string(&m).expect("serialize");
@@ -4608,7 +4549,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_models_with_fit_empty() {
         let st = AppState::new();
-        let out = process_models_with_fit(&st, vec![]).await;
+        let out = process_records_with_fit(&st, vec![], crate::hf_discovery::DiscoveryCategory::ForYou).await;
         assert!(out.is_empty());
     }
 
@@ -4652,17 +4593,25 @@ mod tests {
             },
         );
 
-        let models = vec![HfModel {
+        let models = vec![crate::hf_discovery::HfModelRecord {
             id: model_id,
+            author: None,
             downloads: 100,
+            downloads_all_time: None,
             likes: 10,
             trending_score: 5.0,
-            private: false,
+            created_at: None,
+            last_modified: None,
             pipeline_tag: Some("text-generation".into()),
-            stats: None,
+            tags: vec![],
+            library_name: None,
+            siblings: Some(vec![]),
+            sha: None,
+            private: false,
+            gated: None,
         }];
 
-        let res = process_models_with_fit(&st, models).await;
+        let res = process_records_with_fit(&st, models, crate::hf_discovery::DiscoveryCategory::ForYou).await;
         assert_eq!(res.len(), 1);
         let variant = &res[0].variants[0];
         assert_eq!(variant.fit.extended_context, 2048);
