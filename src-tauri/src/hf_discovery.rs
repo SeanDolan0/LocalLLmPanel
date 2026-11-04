@@ -109,7 +109,11 @@ pub fn clean_repo_query(input: &str) -> String {
     } else if let Some(rest) = s.strip_prefix("http://") {
         s = rest;
     }
-    if let Some(rest) = s.strip_prefix("huggingface.co/") {
+    if let Some(rest) = s.strip_prefix("www.huggingface.co/") {
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix("huggingface.co/") {
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix("hf.co/") {
         s = rest;
     }
     if let Some(idx) = s.find('?') {
@@ -124,7 +128,15 @@ pub fn clean_repo_query(input: &str) -> String {
     if let Some(idx) = s.find("/blob/") {
         s = &s[..idx];
     }
-    s.trim_end_matches('/').to_string()
+    let s = s.trim_end_matches('/');
+    // Normalize spaces around owner/model slash, e.g. "XHToken / Spark" -> "XHToken/Spark"
+    if s.contains('/') {
+        let parts: Vec<&str> = s.split('/').map(str::trim).collect();
+        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return format!("{}/{}", parts[0], parts[1]);
+        }
+    }
+    s.to_string()
 }
 
 /// Normalize an arbitrary user search string, extracting explicit format/quant
@@ -137,7 +149,11 @@ pub fn parse_search_query(raw: &str) -> ParsedSearchQuery {
     let is_exact = cleaned.contains('/') && !cleaned.contains(' ') && cleaned.chars().all(|ch| {
         ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.')
     });
-    let is_url = trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("huggingface.co/");
+    let is_url = trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("huggingface.co/")
+        || trimmed.starts_with("www.huggingface.co/")
+        || trimmed.starts_with("hf.co/");
 
     if is_exact {
         return ParsedSearchQuery {
@@ -624,11 +640,19 @@ impl DiscoveryService {
         let mut results = Vec::new();
         let mut seen_ids = HashSet::new();
 
+        let mut last_err = None;
+
         // 1. If an exact repo ID was recognized, fetch it directly
         if let Some(exact_id) = &parsed.exact_repo_id {
-            if let Ok(Some(record)) = Self::fetch_exact_model(client, exact_id, token).await {
-                seen_ids.insert(record.id.to_ascii_lowercase());
-                results.push(record);
+            match Self::fetch_exact_model(client, exact_id, token).await {
+                Ok(Some(record)) => {
+                    seen_ids.insert(record.id.to_ascii_lowercase());
+                    results.push(record);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    last_err = Some(e);
+                }
             }
         }
 
@@ -648,11 +672,16 @@ impl DiscoveryService {
                 ("sort", "trendingScore"),
                 ("direction", "-1"),
             ];
-            if let Ok(records) = Self::query_models(client, &params, token).await {
-                for r in records {
-                    if seen_ids.insert(r.id.to_ascii_lowercase()) {
-                        results.push(r);
+            match Self::query_models(client, &params, token).await {
+                Ok(records) => {
+                    for r in records {
+                        if seen_ids.insert(r.id.to_ascii_lowercase()) {
+                            results.push(r);
+                        }
                     }
+                }
+                Err(e) => {
+                    last_err = Some(e);
                 }
             }
 
@@ -663,12 +692,25 @@ impl DiscoveryService {
                 ("sort", "downloads"),
                 ("direction", "-1"),
             ];
-            if let Ok(records) = Self::query_models(client, &params_dl, token).await {
-                for r in records {
-                    if seen_ids.insert(r.id.to_ascii_lowercase()) {
-                        results.push(r);
+            match Self::query_models(client, &params_dl, token).await {
+                Ok(records) => {
+                    for r in records {
+                        if seen_ids.insert(r.id.to_ascii_lowercase()) {
+                            results.push(r);
+                        }
                     }
                 }
+                Err(e) => {
+                    if last_err.is_none() {
+                        last_err = Some(e);
+                    }
+                }
+            }
+        }
+
+        if results.is_empty() {
+            if let Some(err) = last_err {
+                return Err(err);
             }
         }
 
@@ -789,5 +831,25 @@ mod tests {
         assert_eq!(PublisherRegistry::get_tier("bartowski/Qwen2.5-7B-GGUF"), PublisherTier::TrustedQuantizer);
         assert_eq!(PublisherRegistry::get_tier("unsloth/Llama-3.1-8B-GGUF"), PublisherTier::TrustedQuantizer);
         assert_eq!(PublisherRegistry::get_tier("some-random-user/my-model"), PublisherTier::Community);
+    }
+
+    #[test]
+    fn test_clean_repo_query_urls_and_spacing() {
+        assert_eq!(clean_repo_query("https://www.huggingface.co/XHToken/Spark-X2.6-4B-GGUF"), "XHToken/Spark-X2.6-4B-GGUF");
+        assert_eq!(clean_repo_query("https://hf.co/XHToken/Spark-X2.6-4B-GGUF"), "XHToken/Spark-X2.6-4B-GGUF");
+        assert_eq!(clean_repo_query("XHToken / Spark-X2.6-4B-GGUF"), "XHToken/Spark-X2.6-4B-GGUF");
+        let parsed = parse_search_query("XHToken / Spark-X2.6-4B-GGUF");
+        assert_eq!(parsed.exact_repo_id.as_deref(), Some("XHToken/Spark-X2.6-4B-GGUF"));
+    }
+
+    #[tokio::test]
+    async fn test_search_xhtoken() {
+        let st = std::sync::Arc::new(crate::state::AppState::new());
+        let results = crate::commands::search_models_with_fit_impl(&st, "XHToken/Spark-X2.6-4B-GGUF").await.unwrap();
+        assert!(!results.is_empty(), "Should return search results for XHToken/Spark-X2.6-4B-GGUF");
+        let exact = results.iter().find(|m| m.id.eq_ignore_ascii_case("XHToken/Spark-X2.6-4B-GGUF"));
+        assert!(exact.is_some(), "Exact model should be in results");
+        let m = exact.unwrap();
+        assert!(!m.variants.is_empty(), "Should discover GGUF variants for XHToken/Spark-X2.6-4B-GGUF");
     }
 }

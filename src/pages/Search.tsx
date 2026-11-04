@@ -768,11 +768,18 @@ export default function Search() {
     [recommended, activeCategory, onlyRecommended]
   );
 
-  // Filter search results
-  const filteredResults = useMemo(
-    () => filterModels(results, activeCategory, onlyRecommended, getBestVariant, matchesCategory),
-    [results, activeCategory, onlyRecommended]
-  );
+  // Filter search results: apply compatibility filter if toggled, but do not
+  // restrict user search results by recommendation feed categories.
+  const filteredResults = useMemo(() => {
+    if (!results) return [];
+    return results.filter((m) => {
+      if (onlyRecommended) {
+        const best = getBestVariant(m);
+        if (!best || best.fit.verdict === "DoesNotFit") return false;
+      }
+      return true;
+    });
+  }, [results, onlyRecommended]);
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-6">
@@ -844,9 +851,14 @@ export default function Search() {
           {CATEGORIES.map(({ key, label, icon }) => (
             <button
               key={key}
-              onClick={() => setActiveCategory(key)}
+              onClick={() => {
+                setActiveCategory(key);
+                if (results !== null) {
+                  clearSearch();
+                }
+              }}
               className={`rounded-full px-2.5 py-1 text-xs transition-colors flex items-center gap-1 ${
-                activeCategory === key
+                activeCategory === key && results === null
                   ? "bg-indigo-600 text-white font-medium shadow-sm"
                   : "bg-surface-2 border border-edge text-slate-400 hover:text-slate-200"
               }`}

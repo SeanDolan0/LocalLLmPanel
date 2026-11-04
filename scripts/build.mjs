@@ -109,11 +109,25 @@ function configureEnvironment() {
   }
 
   if (!hasLldLink) {
+    try {
+      const rustcSysroot = execSync("rustc --print sysroot", { encoding: "utf8" }).trim();
+      const rustLldDir = path.join(rustcSysroot, "lib", "rustlib", "x86_64-pc-windows-msvc", "bin");
+      if (fs.existsSync(path.join(rustLldDir, "rust-lld.exe"))) {
+        console.log(`[Toolchain] Found rust-lld at: ${rustLldDir}`);
+        env.PATH = `${rustLldDir}${pathSeparator}${currentPath}`;
+        env.Path = env.PATH;
+        env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "rust-lld.exe";
+        hasLldLink = true;
+      }
+    } catch {}
+  }
+
+  if (!hasLldLink) {
     console.warn("[WARN] lld-link.exe not found in PATH or standard LLVM directories.");
     console.warn("[WARN] Falling back to default MSVC link.exe (linking may be slower).");
     env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "link.exe";
   } else {
-    console.log("[Toolchain] High-speed lld-link.exe enabled.");
+    console.log("[Toolchain] High-speed lld linker enabled.");
   }
 
   return env;

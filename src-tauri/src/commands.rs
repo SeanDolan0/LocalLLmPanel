@@ -1113,13 +1113,19 @@ pub async fn search_models_with_fit(
     state: State<'_, Arc<AppState>>,
     query: String,
 ) -> Result<Vec<ModelWithFit>, String> {
+    search_models_with_fit_impl(&state, &query).await
+}
+
+pub async fn search_models_with_fit_impl(
+    st: &AppState,
+    query: &str,
+) -> Result<Vec<ModelWithFit>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
 
-    let st = (*state).clone();
-    let hw = search_hardware_profile(&st);
+    let hw = search_hardware_profile(st);
     let mem = st.config().memory_settings;
     let specs = crate::llmfit_adapter::specs_from_hardware(&hw, &mem);
     let config = crate::llmfit_adapter::config_from_memory(&hw, &mem);
@@ -1132,14 +1138,21 @@ pub async fn search_models_with_fit(
 
     // 2. Concurrently search live Hugging Face
     let token = st.hf_token();
-    let hf_records = crate::hf_discovery::DiscoveryService::search_models(
+    let hf_records = match crate::hf_discovery::DiscoveryService::search_models(
         &st.http,
         &parsed,
         20,
         token.as_deref(),
     )
-    .await
-    .unwrap_or_default();
+    .await {
+        Ok(records) => records,
+        Err(e) => {
+            if local_results.is_empty() {
+                return Err(e.to_string());
+            }
+            Vec::new()
+        }
+    };
 
     let mut hf_scored = if !hf_records.is_empty() {
         let cat = if let Some(t) = &parsed.target_task {

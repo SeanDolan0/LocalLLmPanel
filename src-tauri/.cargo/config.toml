@@ -13,4 +13,4 @@ rustflags = ["--cfg", "getrandom_backend=\"windows_legacy\""]
 # LLVM's linker is substantially faster than MSVC link.exe for this project.
 # Keep LLVM's bin directory on PATH before running Cargo/Tauri commands.
 [target.x86_64-pc-windows-msvc]
-linker = "lld-link.exe"
+linker = "rust-lld.exe"

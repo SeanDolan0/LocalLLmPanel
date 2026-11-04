@@ -74,8 +74,8 @@ pub fn provision_all(
 
 fn venv_assignment(venv_dir: &str) -> String {
     format!(
-        "{}venv_dir=$(__llm_panel_expand_tilde {})",
-        wsl::WSL_TILDE_EXPANSION_SNIPPET,
+        "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\n",
+        wsl::WSL_TILDE_EXPANSION_SNIPPET.trim(),
         wsl::shell_quote_wsl(venv_dir),
     )
 }
@@ -224,10 +224,10 @@ mkdir -p ~/llm-lp/run ~/llm-lp/logs
 if command -v uv >/dev/null 2>&1 || [ -x "$HOME/.local/bin/uv" ]; then
   export PATH="$HOME/.local/bin:$PATH"
   echo "using uv: $(uv --version)"
-  uv venv --python 3.12 "$venv_dir" 2>/dev/null || uv venv "$venv_dir"
+  uv venv --seed --clear --python 3.12 "$venv_dir" 2>/dev/null || uv venv --seed --clear "$venv_dir"
 else
   echo "uv not found; falling back to python3 -m venv"
-  python3 -m venv "$venv_dir" || {{ echo "could not create venv at $venv_dir" >&2; exit 1; }}
+  python3 -m venv --clear "$venv_dir" || {{ echo "could not create venv at $venv_dir" >&2; exit 1; }}
 fi
 # Ubuntu 22.04's python3-venv meta sometimes misses the version-specific
 # package, leaving a pip-less venv. Repair with ensurepip, or apt-install the
@@ -237,7 +237,7 @@ if ! "$venv_dir/bin/python" -m pip --version >/dev/null 2>&1; then
   if ! "$venv_dir/bin/python" -m ensurepip --upgrade >/dev/null 2>&1; then
     echo "ensurepip failed; apt-get installing python3.12-venv…"
     DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq python3.12-venv >/dev/null 2>&1
-    python3 -m venv "$venv_dir"
+    python3 -m venv --clear "$venv_dir"
   fi
 fi
 "$venv_dir/bin/python" --version
@@ -463,5 +463,12 @@ mod tests {
         let cmd = apt_done_script();
         assert!(cmd.contains(".apt-done"));
         assert!(cmd.contains("python3"));
+    }
+
+    #[test]
+    fn test_venv_assignment_ends_with_newline() {
+        let snippet = venv_assignment("~/llm-lp/.venv");
+        assert!(snippet.ends_with('\n'));
+        assert!(snippet.contains("venv_dir=$(__llm_panel_expand_tilde '~/llm-lp/.venv')\n"));
     }
 }
