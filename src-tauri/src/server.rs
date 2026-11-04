@@ -27,7 +27,10 @@ pub fn validate_env_name(name: &str) -> Result<(), String> {
     }
     for c in chars {
         if !c.is_ascii_alphanumeric() && c != '_' {
-            return Err("Environment variable name can only contain letters, numbers, and underscores".into());
+            return Err(
+                "Environment variable name can only contain letters, numbers, and underscores"
+                    .into(),
+            );
         }
     }
     Ok(())
@@ -326,7 +329,14 @@ pub fn launch_script_with_version(
     ];
 
     // Export environment variables (merged global defaults + per-server overrides)
-    parts.insert(0, format!("echo '[LocalLLmPanel] Starting server {} on port {}'", shell_quote(&def.id), def.port));
+    parts.insert(
+        0,
+        format!(
+            "echo '[LocalLLmPanel] Starting server {} on port {}'",
+            shell_quote(&def.id),
+            def.port
+        ),
+    );
     if def.speculative_enabled {
         let draft = def.speculative_model.as_deref().unwrap_or("none");
         let tokens = def.speculative_num_tokens.unwrap_or(5);
@@ -334,7 +344,10 @@ pub fn launch_script_with_version(
     }
     for (name, value) in &merged_env {
         if let Err(e) = validate_env_name(name) {
-            eprintln!("[launch_script] Invalid env name '{}': {}, skipping", name, e);
+            eprintln!(
+                "[launch_script] Invalid env name '{}': {}, skipping",
+                name, e
+            );
             continue;
         }
         let quoted = shell_quote(value);
@@ -405,7 +418,12 @@ pub fn launch_script_with_version(
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .or_else(|| adv.api_key.as_deref().map(str::trim).filter(|key| !key.is_empty()));
+        .or_else(|| {
+            adv.api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+        });
     if let Some(key) = api_key {
         args.push("--api-key".into());
         args.push(shell_quote(key));
@@ -482,7 +500,10 @@ pub fn launch_script_with_version(
             }
             let safe = token.chars().all(|ch| {
                 ch.is_ascii_alphanumeric()
-                    || matches!(ch, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '@' | '%' | '+' | '^')
+                    || matches!(
+                        ch,
+                        '_' | '-' | '.' | '/' | ':' | '=' | ',' | '@' | '%' | '+' | '^'
+                    )
             });
             args.push(if safe {
                 token.to_string()
@@ -506,12 +527,24 @@ pub fn launch_script_with_version(
     }
 
     // Environment variables (WSL2 vLLM requirements: bypass UVA pin-memory bug & use spawn workers)
-    parts.insert(0, format!("export VLLM_WORKER_MULTIPROC_METHOD={}", shell_quote("spawn")));
-    parts.insert(0, format!("export VLLM_WSL2_ENABLE_PIN_MEMORY={}", shell_quote("1")));
+    parts.insert(
+        0,
+        format!(
+            "export VLLM_WORKER_MULTIPROC_METHOD={}",
+            shell_quote("spawn")
+        ),
+    );
+    parts.insert(
+        0,
+        format!("export VLLM_WSL2_ENABLE_PIN_MEMORY={}", shell_quote("1")),
+    );
     if !adv.log_level.trim().is_empty() {
         parts.insert(
             0,
-            format!("export VLLM_LOGGING_LEVEL={}", shell_quote(&adv.log_level.trim())),
+            format!(
+                "export VLLM_LOGGING_LEVEL={}",
+                shell_quote(&adv.log_level.trim())
+            ),
         );
     }
     if adv.hf_offline {
@@ -541,7 +574,10 @@ pub fn launch_script_with_version(
                         let quoted = shell_quote(&sanitized);
                         parts.insert(0, format!("export {}={}", key, quoted));
                     } else {
-                        eprintln!("[launch_script] Invalid custom env name '{}', skipping", key);
+                        eprintln!(
+                            "[launch_script] Invalid custom env name '{}', skipping",
+                            key
+                        );
                     }
                 }
             }
@@ -567,16 +603,8 @@ pub fn launch_script(
     adv: &crate::state::AdvancedSettings,
     global_default_env: &BTreeMap<String, String>,
 ) -> String {
-    launch_script_with_version(
-        venv_dir,
-        def,
-        hf_token,
-        adv,
-        global_default_env,
-        None,
-        None,
-    )
-    .unwrap_or_else(|e| format!("echo 'Error: {}'; exit 1", shell_quote(&e)))
+    launch_script_with_version(venv_dir, def, hf_token, adv, global_default_env, None, None)
+        .unwrap_or_else(|e| format!("echo 'Error: {}'; exit 1", shell_quote(&e)))
 }
 
 /// Collect `.gguf` files under `dir`, recursively.
@@ -1293,8 +1321,8 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     );
                 }
             }
-            let help = crate::llamacpp_install::command_output(&exe, &["--help"])
-                .unwrap_or_else(|_| {
+            let help =
+                crate::llamacpp_install::command_output(&exe, &["--help"]).unwrap_or_else(|_| {
                     cfg.llamacpp_channels
                         .get(&channel)
                         .and_then(|c| c.help.clone())
@@ -1326,7 +1354,8 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             (None, Some(child), None)
         }
         crate::state::ServerBackend::Vllm => {
-            let vllm_version = crate::state::load_provision_report_cache().and_then(|r| r.vllm_version);
+            let vllm_version =
+                crate::state::load_provision_report_cache().and_then(|r| r.vllm_version);
             let script = launch_script_with_version(
                 &cfg.venv_dir,
                 &def,
@@ -1335,7 +1364,8 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 &cfg.default_env,
                 vllm_version.as_deref(),
                 None,
-            ).map_err(|e| anyhow!(e))?;
+            )
+            .map_err(|e| anyhow!(e))?;
             let child = wsl::WslChild::spawn(&distro, &script, &id_for_wsl, log_cb)
                 .map_err(|e| anyhow!("failed to launch wsl: {e}"))?;
             let pid = child.pid();
@@ -1549,7 +1579,12 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                             Err(error) => {
                                 let error = format!("auto-restart failed: {error}");
                                 mark_server_error(&state_task, &id_task, error.clone());
-                                emit_status(app.as_ref(), &id_task, ServerStatus::Error, Some(error));
+                                emit_status(
+                                    app.as_ref(),
+                                    &id_task,
+                                    ServerStatus::Error,
+                                    Some(error),
+                                );
                                 return;
                             }
                         }
@@ -1716,9 +1751,13 @@ pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String
         || lower.contains("ninja not found")
     {
         "Install ninja build tool in WSL: run 'sudo apt update && sudo apt install -y ninja-build'."
-    } else if lower.contains("matches the legacy prism q2_0 layout") || lower.contains("legacy prism q2_0") {
+    } else if lower.contains("matches the legacy prism q2_0 layout")
+        || lower.contains("legacy prism q2_0")
+    {
         "This GGUF uses legacy Prism Q2_0 (type ID 42, group size 128). Modern llama.cpp and PrismML builds require the PQ2_0 variant (type ID 142) or official group-64 Q2_0. Convert the tensor types in the GGUF to PQ2_0 or download the updated PQ2_0 release."
-    } else if (lower.contains("has offset") && lower.contains("expected")) || lower.contains("failed to read tensor data") {
+    } else if (lower.contains("has offset") && lower.contains("expected"))
+        || lower.contains("failed to read tensor data")
+    {
         "GGUF tensor offset mismatch. The model's quantization format (e.g. ternary group size 128) does not match what the running llama.cpp binary expects. Ensure you are running the PrismML llama.cpp channel for ternary models, or use a GGUF quantized for standard llama.cpp (e.g. Q2_g64 / PQ2_0)."
     } else if lower.contains("erroroutofdevicememory")
         || lower.contains("unable to allocate")
@@ -1734,9 +1773,15 @@ pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String
         || lower.contains("invalid option")
     {
         "The installed binary does not support one of the configured flags; reinstall/update llama.cpp or remove the unsupported extra argument."
-    } else if lower.contains("invalid ggml type") || lower.contains("unknown ggml type") || lower.contains("unsupported ggml type") {
+    } else if lower.contains("invalid ggml type")
+        || lower.contains("unknown ggml type")
+        || lower.contains("unsupported ggml type")
+    {
         "The model uses a ternary quantization format (PQ2_0, PTQ1_0, etc.) that requires the PrismML llama.cpp fork. Switch the server's llama.cpp channel to 'prism' in Settings, install the Prism channel from Dashboard, and restart the server."
-    } else if lower.contains("no kernel image") || lower.contains("sm_120") || lower.contains("unsupported device") {
+    } else if lower.contains("no kernel image")
+        || lower.contains("sm_120")
+        || lower.contains("unsupported device")
+    {
         "CUDA kernel missing for Blackwell (sm_120). The installed binary may lack native Blackwell kernels. Options: (1) build llama.cpp from source with -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120, (2) update NVIDIA driver for CUDA 12.8+, (3) use a prebuilt binary with sm_120 support."
     } else if lower.contains("no such file")
         || lower.contains("cannot open")
@@ -1963,7 +2008,8 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
         if let Some(d) = cfg.servers.iter_mut().find(|s| s.id == id) {
             d.was_running = false;
         }
-        cfg.save().map_err(|e| anyhow!("failed to persist stopped server: {e}"))?;
+        cfg.save()
+            .map_err(|e| anyhow!("failed to persist stopped server: {e}"))?;
     }
     let _ = term_ok;
     emit_status(app, id, ServerStatus::Stopped, None);
@@ -2352,8 +2398,9 @@ pub fn parse_metrics(text: &str) -> Option<Metrics> {
         (Some(hits), Some(queries)) if queries > 0.0 => {
             Some((hits / queries * 100.0).clamp(0.0, 100.0))
         }
-        _ if direct_cache_hit_rate.is_some() => direct_cache_hit_rate
-            .map(|rate| (rate * 100.0).clamp(0.0, 100.0)),
+        _ if direct_cache_hit_rate.is_some() => {
+            direct_cache_hit_rate.map(|rate| (rate * 100.0).clamp(0.0, 100.0))
+        }
         _ if prompt_tokens_cached > 0 => {
             let prompt = prompt_tokens.unwrap_or(0.0);
             let total = prompt + prompt_tokens_cached as f64;
@@ -2501,7 +2548,12 @@ pub fn list_servers(
         .map(|def| {
             let public_def = crate::state::redact_server_def(&def);
             if let Some(ls) = servers.get(&def.id) {
-                (public_def, ls.status, ls.error.clone(), ls.last_metrics.clone())
+                (
+                    public_def,
+                    ls.status,
+                    ls.error.clone(),
+                    ls.last_metrics.clone(),
+                )
             } else {
                 (public_def, ServerStatus::Stopped, None, None)
             }
@@ -2531,13 +2583,11 @@ pub fn apply_vllm_auth(
 }
 
 pub(crate) fn server_api_key(state: &Arc<AppState>, def: &ServerDef) -> Option<String> {
-    let per_server = def
-        .api_key
-        .clone()
-        .filter(|key| !key.trim().is_empty());
+    let per_server = def.api_key.clone().filter(|key| !key.trim().is_empty());
     match def.backend_kind().ok() {
-        Some(crate::state::ServerBackend::Vllm) => per_server
-            .or_else(|| state.config().advanced_settings.api_key.clone()),
+        Some(crate::state::ServerBackend::Vllm) => {
+            per_server.or_else(|| state.config().advanced_settings.api_key.clone())
+        }
         Some(crate::state::ServerBackend::Llamacpp) => per_server,
         None => None,
     }
@@ -2915,11 +2965,13 @@ pub async fn run_benchmark(app: Option<tauri::AppHandle>, state: Arc<AppState>, 
         };
 
         // Persist run
-        {
+        let persist_result = {
             let mut bms = state.benchmarks.lock().unwrap();
             bms.insert(0, run.clone());
-            let _ = crate::state::BenchmarkRun::save_all(&bms);
-        }
+            let snapshot = bms.clone();
+            crate::state::BenchmarkRun::save_all(&snapshot)
+        };
+        persist_result.map_err(|error| anyhow!("persist benchmark: {error}"))?;
 
         // Update measured stats in config
         {
@@ -2928,7 +2980,8 @@ pub async fn run_benchmark(app: Option<tauri::AppHandle>, state: Arc<AppState>, 
             entry.tokens_per_sec = Some(avg_gen_tok_s);
             entry.prompt_tokens_per_sec = Some(avg_prompt_tok_s);
             entry.measured_at_ms = Some(now_sec * 1000);
-            let _ = cfg.save();
+            cfg.save()
+                .map_err(|error| anyhow!("persist measured stats: {error}"))?;
         }
 
         Ok(Some(run))
@@ -3075,7 +3128,10 @@ mod tests {
         assert!(validate_venv_dir("~/llm-lp/.venv").is_ok());
         assert!(validate_venv_dir("/mnt/d/AI/venv").is_ok());
         for path in ["/", "~", "$HOME", "/tmp/../"] {
-            assert!(validate_venv_dir(path).is_err(), "accepted unsafe path {path}");
+            assert!(
+                validate_venv_dir(path).is_err(),
+                "accepted unsafe path {path}"
+            );
         }
     }
 
@@ -3354,13 +3410,7 @@ mod tests {
             api_key: Some("global-key".into()),
             ..Default::default()
         };
-        let script = launch_script(
-            "~/llm-lp/.venv",
-            &d,
-            "",
-            &adv,
-            &BTreeMap::new(),
-        );
+        let script = launch_script("~/llm-lp/.venv", &d, "", &adv, &BTreeMap::new());
         assert!(script.contains("--api-key 'server-key'"));
         assert!(!script.contains("--api-key 'global-key'"));
         assert!(script.contains("--served-model-name 'coder'"));
@@ -3376,7 +3426,10 @@ mod tests {
             "--jinja",
             "--flash-attn",
         ] {
-            assert!(!script.contains(native_flag), "unexpected native flag {native_flag}");
+            assert!(
+                !script.contains(native_flag),
+                "unexpected native flag {native_flag}"
+            );
         }
         for removed_vllm_flag in ["--swap-space", "--flash-attn", "--jinja"] {
             assert!(!script.contains(removed_vllm_flag));
@@ -3385,7 +3438,13 @@ mod tests {
 
     #[test]
     fn launch_script_true_auto_context_omits_max_model_len() {
-        let mut d = def("Qwen/Qwen2.5-Coder-7B-Instruct", "instruct", 8010, "fp16", None);
+        let mut d = def(
+            "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "instruct",
+            8010,
+            "fp16",
+            None,
+        );
         d.max_model_len = None;
         let script = launch_script(
             "~/llm-lp/.venv",
@@ -3715,8 +3774,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
     fn extra_vllm_args_are_quoted_and_cannot_override_core_settings() {
         let adv = crate::state::AdvancedSettings {
             extra_vllm_args: Some(
-                "--port 9999 --hf-overrides '{\"key\":\"value with spaces\"}' ; echo unsafe"
-                    .into(),
+                "--port 9999 --hf-overrides '{\"key\":\"value with spaces\"}' ; echo unsafe".into(),
             ),
             ..Default::default()
         };
@@ -3914,16 +3972,12 @@ vllm:num_preemptions_total{model_name="my model"} 5
         global_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         global_env.insert("GLOBAL_VAR".to_string(), "global_value".to_string());
 
-        let mut def = def(
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            "instruct",
-            8010,
-            "fp16",
-            None,
-        );
-        def.env.insert("PER_SERVER_VAR".to_string(), "per_server_value".to_string());
+        let mut def = def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None);
+        def.env
+            .insert("PER_SERVER_VAR".to_string(), "per_server_value".to_string());
         // Per-server should override global
-        def.env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "1".to_string());
+        def.env
+            .insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "1".to_string());
 
         let script = launch_script(
             "~/llm-lp/.venv",
@@ -3949,13 +4003,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
         global_env.insert("VALID_VAR".to_string(), "valid".to_string());
         global_env.insert("INVALID-VAR".to_string(), "invalid".to_string()); // hyphen not allowed
 
-        let def = def(
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            "instruct",
-            8010,
-            "fp16",
-            None,
-        );
+        let def = def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None);
 
         let script = launch_script(
             "~/llm-lp/.venv",
@@ -3978,25 +4026,13 @@ vllm:num_preemptions_total{model_name="my model"} 5
         global_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         global_env.insert("TEST_VAR".to_string(), "test_value".to_string());
 
-        let def = def(
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            "instruct",
-            8010,
-            "fp16",
-            None,
-        );
+        let def = def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None);
         let adv = crate::state::AdvancedSettings {
             custom_env_vars: Some("CUSTOM_SECRET=custom_value".into()),
             ..Default::default()
         };
 
-        let script = launch_script(
-            "~/llm-lp/.venv",
-            &def,
-            "hf_secret_123",
-            &adv,
-            &global_env,
-        );
+        let script = launch_script("~/llm-lp/.venv", &def, "hf_secret_123", &adv, &global_env);
 
         assert!(script.contains("export VLLM_USE_FLASHINFER_SAMPLER='0'"));
         assert!(script.contains("export TEST_VAR='test_value'"));
@@ -4014,13 +4050,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
 
     #[test]
     fn test_launch_script_expands_wsl_tilde_before_activation() {
-        let def = def(
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            "instruct",
-            8010,
-            "fp16",
-            None,
-        );
+        let def = def("Qwen/Qwen2.5-0.5B-Instruct", "instruct", 8010, "fp16", None);
         let script = launch_script(
             "~/llm lp/.venv",
             &def,
@@ -4072,7 +4102,11 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let client = reqwest::blocking::Client::new();
         let mut ready = false;
         for _ in 0..120 {
-            if client.get(&health_url).send().is_ok_and(|response| response.status().is_success()) {
+            if client
+                .get(&health_url)
+                .send()
+                .is_ok_and(|response| response.status().is_success())
+            {
                 ready = true;
                 break;
             }
@@ -4106,7 +4140,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
             return;
         }
         let distro = crate::wsl::detect_default_distro().expect("WSL distro not found");
-        
+
         // Test values including hostile ones
         let test_cases = vec![
             ("SIMPLE", "0"),
@@ -4129,20 +4163,23 @@ vllm:num_preemptions_total{model_name="my model"} 5
                 shell_quote(value),
                 name
             );
-            
+
             // Write script to file and execute
             let script_path = format!("~/.local/share/local-llm-panel/test-{}.sh", name);
             let mkdir_cmd = format!("mkdir -p ~/.local/share/local-llm-panel");
             let write_cmd = format!("cat > {}", crate::wsl::shell_quote_wsl(&script_path));
             let chmod_cmd = format!("chmod +x {}", crate::wsl::shell_quote_wsl(&script_path));
             let exec_cmd = format!("bash -l {}", crate::wsl::shell_quote_wsl(&script_path));
-            let full_cmd = format!("{} && {} && {} && {}", mkdir_cmd, write_cmd, chmod_cmd, exec_cmd);
+            let full_cmd = format!(
+                "{} && {} && {} && {}",
+                mkdir_cmd, write_cmd, chmod_cmd, exec_cmd
+            );
 
             let mut cmd = crate::wsl::wsl_command();
             cmd.env("WSL_UTF8", "1");
             cmd.args(["-d", &distro, "--exec", "bash", "-lc", &full_cmd]);
             cmd.stdin(std::process::Stdio::piped());
-            
+
             let mut child = cmd.spawn().expect("failed to spawn wsl");
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write;
@@ -4151,12 +4188,18 @@ vllm:num_preemptions_total{model_name="my model"} 5
             }
             let output = child.wait_with_output().expect("failed to wait");
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             // Extract the RESULT line
             let result_line = stdout.lines().find(|l| l.starts_with("RESULT="));
-            let actual = result_line.map(|l| l["RESULT=".len()..].to_string()).unwrap_or_default();
-            
-            assert_eq!(actual, value, "Env var {}: expected {:?}, got {:?}", name, value, actual);
+            let actual = result_line
+                .map(|l| l["RESULT=".len()..].to_string())
+                .unwrap_or_default();
+
+            assert_eq!(
+                actual, value,
+                "Env var {}: expected {:?}, got {:?}",
+                name, value, actual
+            );
         }
     }
 
@@ -4189,12 +4232,15 @@ vllm:num_preemptions_total{model_name="my model"} 5
 
         // vLLM 0.6.2 should use --speculative-model and --num-speculative-tokens
         let args = build_vllm_speculative_args(&d, Some("0.6.2"), None).unwrap();
-        assert_eq!(args, vec![
-            "--speculative-model",
-            "'Qwen/Qwen2.5-0.5B-Instruct'",
-            "--num-speculative-tokens",
-            "4",
-        ]);
+        assert_eq!(
+            args,
+            vec![
+                "--speculative-model",
+                "'Qwen/Qwen2.5-0.5B-Instruct'",
+                "--num-speculative-tokens",
+                "4",
+            ]
+        );
     }
 
     #[test]
@@ -4205,13 +4251,13 @@ vllm:num_preemptions_total{model_name="my model"} 5
         d.speculative_num_tokens = Some(3);
 
         // If help explicitly advertises --spec-model
-        let args = build_vllm_speculative_args(&d, None, Some("--spec-model DRAFT --spec-tokens N")).unwrap();
-        assert_eq!(args, vec![
-            "--spec-model",
-            "'draft-model'",
-            "--spec-tokens",
-            "3",
-        ]);
+        let args =
+            build_vllm_speculative_args(&d, None, Some("--spec-model DRAFT --spec-tokens N"))
+                .unwrap();
+        assert_eq!(
+            args,
+            vec!["--spec-model", "'draft-model'", "--spec-tokens", "3",]
+        );
     }
 
     #[test]
@@ -4265,7 +4311,8 @@ vllm:num_preemptions_total{model_name="my model"} 5
             &BTreeMap::new(),
             Some("0.30.0"),
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(script.contains("Speculative decoding enabled: draft model = 'Qwen/Qwen2.5-0.5B-Instruct', speculative tokens = 5"));
         assert!(script.contains("--speculative-config '{\"model\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"num_speculative_tokens\":5}'"));
@@ -4288,7 +4335,8 @@ vllm:num_preemptions_total{model_name="my model"} 5
             &BTreeMap::new(),
             Some("0.30.0"),
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(!script.contains("evil"));
         assert!(!script.contains("bad"));

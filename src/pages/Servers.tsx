@@ -222,16 +222,16 @@ export default function Servers() {
               try {
                 const pts = await api.serverMetricsSeries(r.def.id);
                 seriesMap[r.def.id] = pts;
-              } catch {
-                // ignore
+              } catch (e) {
+                setErr(`Metrics unavailable for ${r.def.id}: ${e}`);
               }
             })
           );
           setServerSeries((prev) => ({ ...prev, ...seriesMap }));
         }
       })
-      .catch(() => {});
-    api.gpuStatus().then(setGpu).catch(() => {});
+      .catch((e) => setErr(`Failed to refresh servers: ${e}`));
+    api.gpuStatus().then(setGpu).catch((e) => setErr(`GPU status unavailable: ${e}`));
   }, []);
 
   useEffect(() => {

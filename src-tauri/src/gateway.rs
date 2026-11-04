@@ -30,6 +30,7 @@ pub struct RequestHead {
     pub target: String,
     pub headers: HashMap<String, String>,
     pub content_length: usize,
+    pub chunked: bool,
 }
 
 /// All live servers of `task` status that are currently `Running`.
@@ -272,11 +273,7 @@ pub fn template_has_reasoning(template: &str) -> bool {
         || lower.contains("thinking_effort")
 }
 
-fn model_traits(
-    def: &ServerDef,
-    launch_args: &[String],
-    template_reasoning: bool,
-) -> ModelTraits {
+fn model_traits(def: &ServerDef, launch_args: &[String], template_reasoning: bool) -> ModelTraits {
     let name = format!("{} {}", def.model_id, def.effective_model_name()).to_ascii_lowercase();
     let is_instruct = def.task == "instruct";
 
@@ -336,7 +333,8 @@ fn model_traits(
         };
 
     let vision = is_instruct
-        && (def.mmproj_path
+        && (def
+            .mmproj_path
             .as_deref()
             .is_some_and(|path| !path.trim().is_empty())
             || looks_like_vision_model(&name));
@@ -412,7 +410,11 @@ fn model_row_with_ladder(
     let context = context.filter(|value| *value > 0);
     let is_instruct = def.task == "instruct";
     let is_embed = def.task == "embed";
-    let traits = model_traits(def, launch_args, template_reasoning || effort_ladder.is_some());
+    let traits = model_traits(
+        def,
+        launch_args,
+        template_reasoning || effort_ladder.is_some(),
+    );
     let hints = model_hints(def, &traits, launch_args);
     let model_name = def.effective_model_name();
 
@@ -853,7 +855,11 @@ fn read_symlink_or_file(path: &std::path::Path) -> Option<String> {
 fn read_vllm_chat_template(distro: &str, def: &ServerDef) -> Option<String> {
     if let Some(path) = &def.model_path {
         let p = std::path::Path::new(path);
-        for file in ["tokenizer_config.json", "chat_template.json", "chat_template.jinja"] {
+        for file in [
+            "tokenizer_config.json",
+            "chat_template.json",
+            "chat_template.jinja",
+        ] {
             let candidate = p.join(file);
             if let Some(content) = read_symlink_or_file(&candidate) {
                 if file.ends_with(".jinja") {
@@ -910,13 +916,10 @@ async fn fetch_template_info(
         let api_key = crate::server::server_api_key(state, def);
         let url = format!("http://127.0.0.1:{}/props", def.port);
         let request = apply_vllm_auth(state.http.get(&url), api_key.as_deref());
-        let response = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            request.send(),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok());
+        let response = tokio::time::timeout(std::time::Duration::from_millis(500), request.send())
+            .await
+            .ok()
+            .and_then(|r| r.ok());
         if let Some(resp) = response.filter(|r| r.status().is_success()) {
             let val = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
@@ -925,7 +928,11 @@ async fn fetch_template_info(
             .await
             .ok()
             .and_then(|v| v.ok());
-            val.and_then(|v| v.get("chat_template").and_then(|t| t.as_str()).map(str::to_string))
+            val.and_then(|v| {
+                v.get("chat_template")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+            })
         } else {
             None
         }
@@ -938,10 +945,7 @@ async fn fetch_template_info(
     (ladder, template_reasoning)
 }
 
-async fn template_info_for(
-    state: &Arc<AppState>,
-    def: &ServerDef,
-) -> (Option<Vec<String>>, bool) {
+async fn template_info_for(state: &Arc<AppState>, def: &ServerDef) -> (Option<Vec<String>>, bool) {
     let now = crate::state::now_ms();
     {
         let cache = state.template_effort_cache.lock().unwrap();
@@ -1040,9 +1044,7 @@ fn model_id_from_path(path: &str) -> Option<String> {
     } else {
         // Decode first: an encoded `%3Alatest` suffix must be stripped too, so
         // a client that refreshes ids from `/v1/models` can address them.
-        decode_path_component(raw).map(|id| {
-            id.strip_suffix(":latest").unwrap_or(&id).to_string()
-        })
+        decode_path_component(raw).map(|id| id.strip_suffix(":latest").unwrap_or(&id).to_string())
     }
 }
 
@@ -1050,7 +1052,11 @@ fn model_id_from_path(path: &str) -> Option<String> {
 /// Accepts `"model"` or `"name"` and strips `:latest` if present.
 pub fn model_from_body(body: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let name = value.get("model").or_else(|| value.get("name"))?.as_str()?.trim();
+    let name = value
+        .get("model")
+        .or_else(|| value.get("name"))?
+        .as_str()?
+        .trim();
     if name.is_empty() {
         return None;
     }
@@ -1505,7 +1511,10 @@ fn apply_harness_precedence_with_ladder(
 
     // Normalize legacy OpenAI 0.x functions -> tools
     if object.get("tools").is_none() {
-        if let Some(functions) = object.get("functions").and_then(serde_json::Value::as_array) {
+        if let Some(functions) = object
+            .get("functions")
+            .and_then(serde_json::Value::as_array)
+        {
             let tools: Vec<serde_json::Value> = functions
                 .iter()
                 .map(|f| {
@@ -1523,7 +1532,10 @@ fn apply_harness_precedence_with_ladder(
         if let Some(fc) = object.get("function_call") {
             match fc {
                 serde_json::Value::String(s) => {
-                    object.insert("tool_choice".to_string(), serde_json::Value::String(s.clone()));
+                    object.insert(
+                        "tool_choice".to_string(),
+                        serde_json::Value::String(s.clone()),
+                    );
                 }
                 serde_json::Value::Object(map) if map.contains_key("name") => {
                     object.insert(
@@ -1548,11 +1560,7 @@ fn apply_harness_precedence_with_ladder(
 /// returned body contains explicit request-level controls that both vLLM and
 /// llama.cpp rank above server defaults.
 #[cfg(test)]
-fn normalize_chat_request(
-    body: &[u8],
-    backend: &str,
-    context_tokens: Option<usize>,
-) -> Vec<u8> {
+fn normalize_chat_request(body: &[u8], backend: &str, context_tokens: Option<usize>) -> Vec<u8> {
     normalize_chat_request_with_ladder(body, backend, context_tokens, None)
 }
 
@@ -1637,7 +1645,8 @@ pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
         return None;
     }
     let mut headers = HashMap::new();
-    let mut content_length = 0usize;
+    let mut content_length = None;
+    let mut chunked = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -1646,15 +1655,28 @@ pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
         let name = it.next()?.trim().to_ascii_lowercase();
         let value = it.next().unwrap_or("").trim().to_string();
         if name == "content-length" {
-            content_length = value.parse().unwrap_or(0);
+            let parsed = value.parse().ok()?;
+            if content_length.replace(parsed).is_some() {
+                return None;
+            }
+        } else if name == "transfer-encoding" {
+            let encodings: Vec<_> = value.split(',').map(str::trim).collect();
+            if encodings.len() != 1 || !encodings[0].eq_ignore_ascii_case("chunked") {
+                return None;
+            }
+            chunked = true;
         }
         headers.insert(name, value);
+    }
+    if chunked && content_length.is_some() {
+        return None;
     }
     Some(RequestHead {
         method,
         target,
         headers,
-        content_length,
+        content_length: content_length.unwrap_or(0),
+        chunked,
     })
 }
 
@@ -1673,9 +1695,7 @@ pub fn cors_headers(origin: Option<&str>) -> String {
     let Some(origin) = origin.filter(|value| is_allowed_origin(value)) else {
         return String::new();
     };
-    format!(
-        "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n{CORS_HEADERS}"
-    )
+    format!("Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n{CORS_HEADERS}")
 }
 
 fn is_allowed_origin(origin: &str) -> bool {
@@ -1732,9 +1752,9 @@ async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Resu
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 8192];
     loop {
-        let n = stream
-            .read(&mut tmp)
+        let n = tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
             .await
+            .map_err(|_| "request header read timed out".to_string())?
             .map_err(|e| format!("read request: {e}"))?;
         if n == 0 {
             return Err("connection closed before request completed".into());
@@ -1747,11 +1767,16 @@ async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Resu
                 return Err("request body too large".into());
             }
             let total = sep + 4;
+            if head.chunked {
+                let body = read_chunked_body(stream, &mut buf, total).await?;
+                return route(stream, state, &head, &body).await;
+            }
             while buf.len() < total + head.content_length {
-                let m = stream
-                    .read(&mut tmp)
-                    .await
-                    .map_err(|e| format!("read body: {e}"))?;
+                let m =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
+                        .await
+                        .map_err(|_| "request body read timed out".to_string())?
+                        .map_err(|e| format!("read body: {e}"))?;
                 if m == 0 {
                     return Err("connection closed during body".into());
                 }
@@ -1762,6 +1787,65 @@ async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Resu
         }
         if buf.len() > MAX_HEAD_BYTES {
             return Err("request head too large".into());
+        }
+    }
+
+    async fn read_chunked_body(
+        stream: &mut TcpStream,
+        buf: &mut Vec<u8>,
+        mut cursor: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut body = Vec::new();
+        let mut tmp = [0u8; 8192];
+        loop {
+            while buf[cursor..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .is_none()
+            {
+                let n =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
+                        .await
+                        .map_err(|_| "chunked body read timed out".to_string())?
+                        .map_err(|e| format!("read chunk size: {e}"))?;
+                if n == 0 {
+                    return Err("connection closed during chunked body".into());
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let relative = buf[cursor..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .expect("chunk delimiter exists");
+            let line_end = cursor + relative;
+            let size_text = std::str::from_utf8(&buf[cursor..line_end])
+                .map_err(|_| "invalid chunk size".to_string())?;
+            let size_text = size_text.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| "invalid chunk size".to_string())?;
+            cursor = line_end + 2;
+            if size == 0 {
+                return Ok(body);
+            }
+            if body.len().saturating_add(size) > MAX_BODY_BYTES {
+                return Err("request body too large".into());
+            }
+            while buf.len() < cursor + size + 2 {
+                let n =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
+                        .await
+                        .map_err(|_| "chunked body read timed out".to_string())?
+                        .map_err(|e| format!("read chunk: {e}"))?;
+                if n == 0 {
+                    return Err("connection closed during chunked body".into());
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            body.extend_from_slice(&buf[cursor..cursor + size]);
+            if &buf[cursor + size..cursor + size + 2] != b"\r\n" {
+                return Err("invalid chunk terminator".into());
+            }
+            cursor += size + 2;
         }
     }
 }
@@ -1775,7 +1859,14 @@ async fn route(
     if head.method.as_str() == "OPTIONS" {
         if let Some(origin) = head.headers.get("origin") {
             if !is_allowed_origin(origin) {
-                return write_request_response(stream, head, 403, "text/plain", b"origin not allowed").await;
+                return write_request_response(
+                    stream,
+                    head,
+                    403,
+                    "text/plain",
+                    b"origin not allowed",
+                )
+                .await;
             }
         }
         return write_request_response(stream, head, 204, "text/plain", b"").await;
@@ -1845,12 +1936,33 @@ async fn route(
                     }
                 })
                 .to_string();
-                return write_request_response(stream, head, 404, "application/json", payload.as_bytes()).await;
+                return write_request_response(
+                    stream,
+                    head,
+                    404,
+                    "application/json",
+                    payload.as_bytes(),
+                )
+                .await;
             };
-            write_request_response(stream, head, 200, "application/json", row.to_string().as_bytes()).await
+            write_request_response(
+                stream,
+                head,
+                200,
+                "application/json",
+                row.to_string().as_bytes(),
+            )
+            .await
         }
         ("GET", "/health") => {
-            write_request_response(stream, head, 200, "application/json", b"{\"status\":\"ok\"}").await
+            write_request_response(
+                stream,
+                head,
+                200,
+                "application/json",
+                b"{\"status\":\"ok\"}",
+            )
+            .await
         }
         ("GET", "/api/version") => {
             write_request_response(
@@ -1858,7 +1970,7 @@ async fn route(
                 head,
                 200,
                 "application/json",
-                b"{\"version\":\"0.5.4\"}",
+                format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION")).as_bytes(),
             )
             .await
         }
@@ -1877,7 +1989,9 @@ async fn route(
                 let id = row["id"].as_str().unwrap_or("model");
                 let quant = row["quantization"].as_str().unwrap_or("unknown");
                 let format = row["compatibility_type"].as_str().unwrap_or("gguf");
-                let params = row.get("parameters_billions").and_then(serde_json::Value::as_f64);
+                let params = row
+                    .get("parameters_billions")
+                    .and_then(serde_json::Value::as_f64);
                 let param_size = params.map(|p| format!("{:.0}B", p)).unwrap_or_default();
                 let payload = serde_json::json!({
                     "modelfile": format!("FROM {id}"),
@@ -1894,24 +2008,36 @@ async fn route(
                     "model_info": row,
                 })
                 .to_string();
-                write_request_response(stream, head, 200, "application/json", payload.as_bytes()).await
+                write_request_response(stream, head, 200, "application/json", payload.as_bytes())
+                    .await
             } else {
                 let payload = serde_json::json!({
                     "error": format!("model '{requested_name}' not found")
                 })
                 .to_string();
-                write_request_response(stream, head, 404, "application/json", payload.as_bytes()).await
+                write_request_response(stream, head, 404, "application/json", payload.as_bytes())
+                    .await
             }
         }
         ("POST", "/v1/chat/completions") | ("POST", "/api/chat") => {
-            let model = model_from_body(body)
-                .ok_or_else(|| "request body must be JSON with a model or name field".to_string())?;
+            let model = model_from_body(body).ok_or_else(|| {
+                "request body must be JSON with a model or name field".to_string()
+            })?;
             let port = {
                 let servers = state.servers.lock().unwrap();
                 find_server_port_for(&servers, &model, "instruct")
             };
             match port {
-                Some(port) => proxy_chat(stream, state, port, body, head.headers.get("origin").map(String::as_str)).await,
+                Some(port) => {
+                    proxy_chat(
+                        stream,
+                        state,
+                        port,
+                        body,
+                        head.headers.get("origin").map(String::as_str),
+                    )
+                    .await
+                }
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
                     write_request_response(
@@ -1933,7 +2059,17 @@ async fn route(
                 find_server_port_for(&servers, &model, "instruct")
             };
             match port {
-                Some(port) => proxy_post(stream, state, port, "/v1/completions", body, head.headers.get("origin").map(String::as_str)).await,
+                Some(port) => {
+                    proxy_post(
+                        stream,
+                        state,
+                        port,
+                        "/v1/completions",
+                        body,
+                        head.headers.get("origin").map(String::as_str),
+                    )
+                    .await
+                }
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
                     write_request_response(
@@ -1955,7 +2091,17 @@ async fn route(
                 find_server_port_for(&servers, &model, "embed")
             };
             match port {
-                Some(port) => proxy_post(stream, state, port, "/v1/embeddings", body, head.headers.get("origin").map(String::as_str)).await,
+                Some(port) => {
+                    proxy_post(
+                        stream,
+                        state,
+                        port,
+                        "/v1/embeddings",
+                        body,
+                        head.headers.get("origin").map(String::as_str),
+                    )
+                    .await
+                }
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "embed");
                     write_request_response(
@@ -2051,13 +2197,18 @@ async fn ollama_tags_payload(state: &Arc<AppState>) -> serde_json::Value {
             let id = row["id"].as_str().unwrap_or("model");
             let quant = row["quantization"].as_str().unwrap_or("unknown");
             let format = row["compatibility_type"].as_str().unwrap_or("gguf");
-            let params = row.get("parameters_billions").and_then(serde_json::Value::as_f64);
+            let params = row
+                .get("parameters_billions")
+                .and_then(serde_json::Value::as_f64);
             let param_size = params.map(|p| format!("{:.0}B", p)).unwrap_or_default();
-            let size = row.get("parameter_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let size = row
+                .get("parameter_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             serde_json::json!({
                 "name": format!("{id}:latest"),
                 "model": format!("{id}:latest"),
-                "modified_at": "2026-10-21T00:00:00Z",
+                "modified_at": chrono::Utc::now().to_rfc3339(),
                 "size": size,
                 "digest": hash_to_hex(id),
                 "details": {
@@ -2078,20 +2229,32 @@ pub fn normalize_chat_response_json(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
-    if let Some(choices) = obj.get_mut("choices").and_then(serde_json::Value::as_array_mut) {
+    if let Some(choices) = obj
+        .get_mut("choices")
+        .and_then(serde_json::Value::as_array_mut)
+    {
         for choice in choices {
             let Some(choice_obj) = choice.as_object_mut() else {
                 continue;
             };
-            if let Some(delta) = choice_obj.get_mut("delta").and_then(serde_json::Value::as_object_mut) {
+            if let Some(delta) = choice_obj
+                .get_mut("delta")
+                .and_then(serde_json::Value::as_object_mut)
+            {
                 normalize_reasoning_message(delta);
             }
-            if let Some(msg) = choice_obj.get_mut("message").and_then(serde_json::Value::as_object_mut) {
+            if let Some(msg) = choice_obj
+                .get_mut("message")
+                .and_then(serde_json::Value::as_object_mut)
+            {
                 normalize_reasoning_message(msg);
             }
         }
     }
-    if let Some(usage) = obj.get_mut("usage").and_then(serde_json::Value::as_object_mut) {
+    if let Some(usage) = obj
+        .get_mut("usage")
+        .and_then(serde_json::Value::as_object_mut)
+    {
         normalize_usage_reasoning(usage);
     }
 }
@@ -2111,7 +2274,9 @@ fn normalize_reasoning_message(map: &mut serde_json::Map<String, serde_json::Val
 }
 
 fn normalize_usage_reasoning(usage: &mut serde_json::Map<String, serde_json::Value>) {
-    let mut reasoning_tokens = usage.get("reasoning_tokens").and_then(serde_json::Value::as_u64);
+    let mut reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .and_then(serde_json::Value::as_u64);
     if reasoning_tokens.is_none() {
         reasoning_tokens = usage
             .get("completion_tokens_details")
@@ -2244,7 +2409,10 @@ async fn proxy_post(
                                 .write_all(size.as_bytes())
                                 .await
                                 .map_err(|e| e.to_string())?;
-                            stream.write_all(normalized.as_bytes()).await.map_err(|e| e.to_string())?;
+                            stream
+                                .write_all(normalized.as_bytes())
+                                .await
+                                .map_err(|e| e.to_string())?;
                             stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
                         } else {
                             let size = format!("{:x}\r\n", line_bytes.len());
@@ -2252,7 +2420,10 @@ async fn proxy_post(
                                 .write_all(size.as_bytes())
                                 .await
                                 .map_err(|e| e.to_string())?;
-                            stream.write_all(&line_bytes).await.map_err(|e| e.to_string())?;
+                            stream
+                                .write_all(&line_bytes)
+                                .await
+                                .map_err(|e| e.to_string())?;
                             stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
                         }
                     }
@@ -2278,7 +2449,10 @@ async fn proxy_post(
                 .write_all(size.as_bytes())
                 .await
                 .map_err(|e| e.to_string())?;
-            stream.write_all(&line_buf).await.map_err(|e| e.to_string())?;
+            stream
+                .write_all(&line_buf)
+                .await
+                .map_err(|e| e.to_string())?;
             stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
         }
         stream
@@ -2681,10 +2855,7 @@ mod tests {
             serde_json::json!(["none", "low", "medium", "high"])
         );
         assert_eq!(row["reasoning_config"]["default_level"], "medium");
-        assert_eq!(
-            row["reasoning_config"]["control"],
-            "reasoning_effort"
-        );
+        assert_eq!(row["reasoning_config"]["control"], "reasoning_effort");
         assert_eq!(row["reasoning_config"]["mandatory"], false);
         assert_eq!(row["reasoning_config"]["default_effort"], "medium");
         assert_eq!(row["reasoning_config"]["request_precedence"], "harness");
@@ -2730,11 +2901,11 @@ mod tests {
         assert_eq!(row["capabilities"]["parallel_tool_calls"], true);
         assert_eq!(row["reasoning_config"]["output"], true);
         assert_eq!(row["reasoning_config"]["source"], "launch_args");
+        assert_eq!(row["reasoning_config"]["control"], "reasoning_effort");
         assert_eq!(
-            row["reasoning_config"]["control"],
-            "reasoning_effort"
+            row["reasoning_config"]["parameters"]["reasoning_effort"],
+            true
         );
-        assert_eq!(row["reasoning_config"]["parameters"]["reasoning_effort"], true);
         assert_eq!(
             row["reasoning_config"]["parameters"]["chat_template_kwargs"]["enable_thinking"],
             true
@@ -2767,7 +2938,8 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|hint| hint.as_str().unwrap_or_default().contains("max_new_tokens")));    }
+            .any(|hint| hint.as_str().unwrap_or_default().contains("max_new_tokens")));
+    }
 
     #[test]
     fn test_gpt_oss_reports_effort_levels() {
@@ -2822,9 +2994,7 @@ mod tests {
             ("xhigh", "high"),
             ("max", "high"),
         ] {
-            let body = format!(
-                r#"{{"model":"m","messages":[],"reasoning_effort":"{input}"}}"#
-            );
+            let body = format!(r#"{{"model":"m","messages":[],"reasoning_effort":"{input}"}}"#);
             let value = normalized(&body, "vllm", Some(8_192));
             assert_eq!(value["reasoning_effort"], expected, "vllm input {input}");
         }
@@ -2838,11 +3008,12 @@ mod tests {
             ("xhigh", "xhigh"),
             ("max", "max"),
         ] {
-            let body = format!(
-                r#"{{"model":"m","messages":[],"reasoning_effort":"{input}"}}"#
-            );
+            let body = format!(r#"{{"model":"m","messages":[],"reasoning_effort":"{input}"}}"#);
             let value = normalized(&body, "llamacpp", Some(8_192));
-            assert_eq!(value["reasoning_effort"], expected, "llamacpp input {input}");
+            assert_eq!(
+                value["reasoning_effort"], expected,
+                "llamacpp input {input}"
+            );
             assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
         }
     }
@@ -3065,6 +3236,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_request_head_accepts_chunked_bodies() {
+        let head = b"POST /v1/chat/completions HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let parsed = parse_head(head).expect("valid chunked head parses");
+        assert!(parsed.chunked);
+        assert_eq!(parsed.content_length, 0);
+    }
+
+    #[test]
+    fn test_parse_request_head_rejects_conflicting_framing() {
+        let both = b"POST / HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(parse_head(both).is_none());
+        let duplicate = b"POST / HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\n";
+        assert!(parse_head(duplicate).is_none());
+    }
+
+    #[test]
     fn test_parse_request_head_garbage() {
         assert!(parse_head(b"").is_none());
         assert!(parse_head(b"\r\n\r\n").is_none());
@@ -3150,12 +3337,8 @@ mod tests {
         context: Option<usize>,
         ladder: &[String],
     ) -> serde_json::Value {
-        let bytes = normalize_chat_request_with_ladder(
-            body.as_bytes(),
-            backend,
-            context,
-            Some(ladder),
-        );
+        let bytes =
+            normalize_chat_request_with_ladder(body.as_bytes(), backend, context, Some(ladder));
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -3365,11 +3548,7 @@ mod tests {
 
     #[test]
     fn test_llamacpp_clamps_effort_to_template_ladder() {
-        let ladder = vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "xhigh".to_string(),
-        ];
+        let ladder = vec!["low".to_string(), "medium".to_string(), "xhigh".to_string()];
 
         // `high` is the standard OpenAI default and the value Pi/Claude Code
         // send; it must never reach a Qwen3.8-style template that rejects it.
@@ -3418,19 +3597,9 @@ mod tests {
         def.backend = "llamacpp".into();
         def.jinja = true;
         def.ctx_size = Some(131_072);
-        let ladder = vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "xhigh".to_string(),
-        ];
-        let row = model_row_with_ladder(
-            &def,
-            Some(131_072),
-            "configured",
-            &[],
-            Some(&ladder),
-            true,
-        );
+        let ladder = vec!["low".to_string(), "medium".to_string(), "xhigh".to_string()];
+        let row =
+            model_row_with_ladder(&def, Some(131_072), "configured", &[], Some(&ladder), true);
         assert_eq!(
             row["reasoning_config"]["supported_efforts"],
             serde_json::json!(["none", "low", "medium", "xhigh"])
@@ -3599,7 +3768,10 @@ mod tests {
         assert_eq!(resp["choices"][0]["message"]["reasoning"], "think");
         assert_eq!(resp["choices"][0]["message"]["reasoning_content"], "think");
         assert_eq!(resp["usage"]["reasoning_tokens"], 15);
-        assert_eq!(resp["usage"]["completion_tokens_details"]["reasoning_tokens"], 15);
+        assert_eq!(
+            resp["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            15
+        );
 
         // Reverse mirror: reasoning -> reasoning_content
         let mut delta_resp = serde_json::json!({
@@ -3615,18 +3787,31 @@ mod tests {
             }
         });
         normalize_chat_response_json(&mut delta_resp);
-        assert_eq!(delta_resp["choices"][0]["delta"]["reasoning"], "thought-stream");
-        assert_eq!(delta_resp["choices"][0]["delta"]["reasoning_content"], "thought-stream");
+        assert_eq!(
+            delta_resp["choices"][0]["delta"]["reasoning"],
+            "thought-stream"
+        );
+        assert_eq!(
+            delta_resp["choices"][0]["delta"]["reasoning_content"],
+            "thought-stream"
+        );
         assert_eq!(delta_resp["usage"]["reasoning_tokens"], 7);
-        assert_eq!(delta_resp["usage"]["completion_tokens_details"]["reasoning_tokens"], 7);
+        assert_eq!(
+            delta_resp["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            7
+        );
     }
 
     #[test]
     fn test_normalize_sse_line_mirrors_reasoning() {
         let line = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n";
         let out = normalize_sse_line(line);
-        let parsed: serde_json::Value = serde_json::from_str(out.strip_prefix("data: ").unwrap().trim()).unwrap();
-        assert_eq!(parsed["choices"][0]["delta"]["reasoning_content"], "thinking...");
+        let parsed: serde_json::Value =
+            serde_json::from_str(out.strip_prefix("data: ").unwrap().trim()).unwrap();
+        assert_eq!(
+            parsed["choices"][0]["delta"]["reasoning_content"],
+            "thinking..."
+        );
         assert_eq!(parsed["choices"][0]["delta"]["reasoning"], "thinking...");
 
         let done = "data: [DONE]\n\n";
@@ -3647,12 +3832,24 @@ mod tests {
                 ServerStatus::Running,
             ),
         );
-        assert_eq!(find_server_port_for(&servers, "default", "instruct"), Some(8000));
-        assert_eq!(find_server_port_for(&servers, "local", "instruct"), Some(8000));
-        assert_eq!(find_server_port_for(&servers, "auto", "instruct"), Some(8000));
+        assert_eq!(
+            find_server_port_for(&servers, "default", "instruct"),
+            Some(8000)
+        );
+        assert_eq!(
+            find_server_port_for(&servers, "local", "instruct"),
+            Some(8000)
+        );
+        assert_eq!(
+            find_server_port_for(&servers, "auto", "instruct"),
+            Some(8000)
+        );
         assert_eq!(find_server_port_for(&servers, "*", "instruct"), Some(8000));
         assert_eq!(find_server_port_for(&servers, "", "instruct"), None);
-        assert_eq!(find_server_port_for(&servers, "qwen3-8b:latest", "instruct"), Some(8000));
+        assert_eq!(
+            find_server_port_for(&servers, "qwen3-8b:latest", "instruct"),
+            Some(8000)
+        );
     }
 
     #[test]
@@ -3706,9 +3903,22 @@ mod tests {
         assert!(tmpl.is_some(), "tmpl should be extracted via WSL");
         let ladder = template_effort_ladder(&tmpl.unwrap());
         assert_eq!(ladder, Some(vec!["low".to_string(), "high".to_string()]));
-        let row = model_row_with_ladder(&def, Some(36126), "configured", &[], ladder.as_deref(), true);
-        assert_eq!(row["reasoning_config"]["levels"], serde_json::json!(["none", "low", "high"]));
-        assert_eq!(row["reasoning_config"]["supported_efforts"], serde_json::json!(["none", "low", "high"]));
+        let row = model_row_with_ladder(
+            &def,
+            Some(36126),
+            "configured",
+            &[],
+            ladder.as_deref(),
+            true,
+        );
+        assert_eq!(
+            row["reasoning_config"]["levels"],
+            serde_json::json!(["none", "low", "high"])
+        );
+        assert_eq!(
+            row["reasoning_config"]["supported_efforts"],
+            serde_json::json!(["none", "low", "high"])
+        );
         assert_eq!(row["thinkingLevelMap"]["off"], "none");
         assert_eq!(row["thinkingLevelMap"]["low"], "low");
         assert_eq!(row["thinkingLevelMap"]["high"], "high");

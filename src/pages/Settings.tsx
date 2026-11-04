@@ -242,9 +242,12 @@ export default function Settings() {
         setManualMode(m.manual_ram_limit_mb !== null);
       })
       .catch((e) => setErr(String(e)));
-    api.getSystemMemory().then(setSysMem).catch(() => {});
-    api.llamacppStatus().then(setLlamacppStatus).catch(() => {});
-    api.checkAppUpdate(false).then((info) => setUpdateInfo(info)).catch(() => {});
+    api.getSystemMemory().then(setSysMem).catch((e) => setErr(`System memory unavailable: ${e}`));
+    api.llamacppStatus().then(setLlamacppStatus).catch((e) => setErr(`llama.cpp status unavailable: ${e}`));
+    api
+      .checkAppUpdate(false)
+      .then((info) => setUpdateInfo(info))
+      .catch((e) => setErr(`Update check failed: ${e}`));
   }, []);
 
   const upstreamUpdate = llamacppUpdates?.find((u) => u.channel === "upstream");
@@ -256,8 +259,8 @@ export default function Settings() {
       try {
         const status = await api.gatewayStatus();
         if (!cancelled) setGw(status);
-      } catch {
-        /* gateway status unavailable */
+      } catch (e) {
+        if (!cancelled) setErr(`Gateway status unavailable: ${e}`);
       }
       try {
         const rows = await api.serversList();
@@ -275,8 +278,8 @@ export default function Settings() {
             embed ? (embed.def.served_model_name ?? embed.def.model_id) : null,
           );
         }
-      } catch {
-        /* servers list unavailable */
+      } catch (e) {
+        if (!cancelled) setErr(`Server status unavailable: ${e}`);
       }
     };
     poll();

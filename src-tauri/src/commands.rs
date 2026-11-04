@@ -69,7 +69,12 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
                 "cat ~/llm-lp/.provisioned 2>/dev/null || true",
             )
         } else {
-            crate::wsl::RunOutput { ok: false, code: 1, stdout: String::new(), stderr: String::new() }
+            crate::wsl::RunOutput {
+                ok: false,
+                code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            }
         };
         if let Some(g) = &gpu {
             *st.gpu.lock().unwrap() = Some(g.clone());
@@ -218,7 +223,8 @@ pub async fn provision(
     let cfg = st.config();
     let distro = st.resolve_distro();
     let venv = cfg.venv_dir.clone();
-    st.provisioning.store(true, std::sync::atomic::Ordering::Relaxed);
+    st.provisioning
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let res = tauri::async_runtime::spawn_blocking(move || {
         let on_log = |phase: &str, line: &str| {
             let _ = app.emit(
@@ -231,7 +237,8 @@ pub async fn provision(
     .await
     .map_err(|e| format!("provision task error: {e}"))?
     .map_err(|e| format!("provision failed: {e}"));
-    st.provisioning.store(false, std::sync::atomic::Ordering::Relaxed);
+    st.provisioning
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     if let Ok(rep) = &res {
         crate::state::save_provision_report_cache(rep);
     }
@@ -254,7 +261,11 @@ pub async fn install_llamacpp_channel(
 ) -> Result<crate::llamacpp_install::InstallStatus, String> {
     let st = (*state).clone();
     let cfg = st.config();
-    let channel_config = cfg.llamacpp_channels.get(&channel).cloned().unwrap_or_default();
+    let channel_config = cfg
+        .llamacpp_channels
+        .get(&channel)
+        .cloned()
+        .unwrap_or_default();
     let destination = PathBuf::from(channel_config.dir);
     let github_token = (!cfg.github_token.trim().is_empty()).then_some(cfg.github_token);
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -285,9 +296,18 @@ pub async fn install_llamacpp_channel(
     let devices = crate::llamacpp_install::list_devices(&exe).unwrap_or_default();
     Ok(crate::llamacpp_install::InstallStatus {
         installed: true,
-        tag: cfg.llamacpp_channels.get(&channel).and_then(|c| c.installed_tag.clone()),
-        version: cfg.llamacpp_channels.get(&channel).and_then(|c| c.version.clone()),
-        executable: cfg.llamacpp_channels.get(&channel).and_then(|c| c.executable.clone()),
+        tag: cfg
+            .llamacpp_channels
+            .get(&channel)
+            .and_then(|c| c.installed_tag.clone()),
+        version: cfg
+            .llamacpp_channels
+            .get(&channel)
+            .and_then(|c| c.version.clone()),
+        executable: cfg
+            .llamacpp_channels
+            .get(&channel)
+            .and_then(|c| c.executable.clone()),
         gpu: crate::llamacpp_install::windows_gpu_snapshot(),
         cuda_available: devices
             .iter()
@@ -354,7 +374,8 @@ pub async fn update_vllm(
     let cfg = st.config();
     let distro = st.resolve_distro();
     let venv = cfg.venv_dir.clone();
-    st.provisioning.store(true, std::sync::atomic::Ordering::Relaxed);
+    st.provisioning
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<UpdateVllmResult, String> {
         let on_log = |phase: &str, line: &str| {
             let _ = app.emit(
@@ -423,7 +444,8 @@ pub async fn update_vllm(
     })
     .await
     .map_err(|e| format!("update vllm task error: {e}"))?;
-    st.provisioning.store(false, std::sync::atomic::Ordering::Relaxed);
+    st.provisioning
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     if let Ok(res) = &res {
         // Keep the cached provision report in sync so the Dashboard reports
         // the version that is actually installed now.
@@ -474,7 +496,10 @@ pub async fn github_access(
 ) -> Result<crate::llamacpp_install::GithubAccess, String> {
     let token = state.config().github_token;
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(crate::llamacpp_install::test_github_access(crate::state::LlamaCppChannel::Upstream, Some(&token)))
+        Ok(crate::llamacpp_install::test_github_access(
+            crate::state::LlamaCppChannel::Upstream,
+            Some(&token),
+        ))
     })
     .await
     .map_err(|e| format!("GitHub access task error: {e}"))?
@@ -821,7 +846,10 @@ async fn hydrate_gguf_variants(
             let is_gguf_repo = id_lower.ends_with("-gguf")
                 || id_lower.contains(".gguf")
                 || id_lower.contains("_gguf");
-            let has_gguf_variant = model.variants.iter().any(|v| v.variant.format == QuantFormat::GGUF);
+            let has_gguf_variant = model
+                .variants
+                .iter()
+                .any(|v| v.variant.format == QuantFormat::GGUF);
             if !has_gguf_variant && !is_gguf_repo && model.gguf_sources.is_empty() {
                 return None;
             }
@@ -846,18 +874,19 @@ async fn hydrate_gguf_variants(
     let futures = jobs.into_iter().map(|(idx, repo)| {
         let sem = Arc::clone(&sem);
         let token = token.clone();
-        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = (usize, Vec<QuantVariant>)> + Send>> =
-            Box::pin(async move {
-                let variants = hf::verified_gguf_variants(
-                    &st.http,
-                    &repo,
-                    &sem,
-                    Some(&st.quant_cache),
-                    token.as_deref(),
-                )
-                .await;
-                (idx, variants)
-            });
+        let fut: std::pin::Pin<
+            Box<dyn std::future::Future<Output = (usize, Vec<QuantVariant>)> + Send>,
+        > = Box::pin(async move {
+            let variants = hf::verified_gguf_variants(
+                &st.http,
+                &repo,
+                &sem,
+                Some(&st.quant_cache),
+                token.as_deref(),
+            )
+            .await;
+            (idx, variants)
+        });
         fut
     });
 
@@ -883,8 +912,6 @@ async fn hydrate_gguf_variants(
         apply_best_variant(model);
     }
 }
-
-
 
 async fn process_records_with_fit(
     st: &AppState,
@@ -966,20 +993,25 @@ async fn process_records_with_fit(
                     &r.tags,
                 );
 
-                let (comp_score, _details, explanation) = if let Some(best_vwf) = final_variants.get(best_variant_idx) {
-                    crate::recommendation::calculate_composite_score(
-                        &best_vwf.fit,
-                        &r,
-                        &cat,
-                        &family,
-                    )
-                } else {
-                    (0.0, Default::default(), crate::recommendation::RecommendationExplanation {
-                        headline: format!("Model from {}", family.family_name),
-                        highlights: vec![],
-                        trade_offs: vec!["No compatible quant variants found".into()],
-                    })
-                };
+                let (comp_score, _details, explanation) =
+                    if let Some(best_vwf) = final_variants.get(best_variant_idx) {
+                        crate::recommendation::calculate_composite_score(
+                            &best_vwf.fit,
+                            &r,
+                            &cat,
+                            &family,
+                        )
+                    } else {
+                        (
+                            0.0,
+                            Default::default(),
+                            crate::recommendation::RecommendationExplanation {
+                                headline: format!("Model from {}", family.family_name),
+                                highlights: vec![],
+                                trade_offs: vec!["No compatible quant variants found".into()],
+                            },
+                        )
+                    };
 
                 let pub_tier = crate::hf_discovery::PublisherRegistry::get_tier(&r.id);
                 let pub_str = match pub_tier {
@@ -1030,7 +1062,11 @@ async fn process_records_with_fit(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.trending_score.partial_cmp(&a.trending_score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.trending_score
+                    .partial_cmp(&a.trending_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| b.downloads.cmp(&a.downloads))
     });
 
@@ -1044,12 +1080,17 @@ pub async fn discovery_feed(
     force_refresh: Option<bool>,
 ) -> Result<Vec<ModelWithFit>, String> {
     let st = (*state).clone();
-    let cat_enum = crate::hf_discovery::DiscoveryCategory::from_str_loose(category.as_deref().unwrap_or("for_you"));
+    let cat_enum = crate::hf_discovery::DiscoveryCategory::from_str_loose(
+        category.as_deref().unwrap_or("for_you"),
+    );
     let bypass = force_refresh.unwrap_or(false);
 
     // 1. Check discovery cache if not forcing refresh
     if !bypass {
-        if let Some(cached_records) = st.discovery_cache.get_feed(&cat_enum, std::time::Duration::from_secs(1800)) {
+        if let Some(cached_records) = st
+            .discovery_cache
+            .get_feed(&cat_enum, std::time::Duration::from_secs(1800))
+        {
             let scored = process_records_with_fit(&st, cached_records, cat_enum.clone()).await;
             if !scored.is_empty() {
                 return Ok(scored);
@@ -1093,7 +1134,10 @@ pub async fn discovery_feed(
             for m in &mut out {
                 m.notes.push("Loaded from offline catalog fallback".into());
                 if m.explanation.is_none() {
-                    m.explanation = Some(format!("Curated recommendation for {}", cat_enum.display_name()));
+                    m.explanation = Some(format!(
+                        "Curated recommendation for {}",
+                        cat_enum.display_name()
+                    ));
                 }
             }
             Ok(out)
@@ -1133,7 +1177,8 @@ pub async fn search_models_with_fit_impl(
     let parsed = crate::hf_discovery::parse_search_query(q);
 
     // 1. Search local curated database
-    let mut local_results = crate::llmfit_adapter::search_models_local(&parsed.clean_text, 25, &specs, &config);
+    let mut local_results =
+        crate::llmfit_adapter::search_models_local(&parsed.clean_text, 25, &specs, &config);
     hydrate_gguf_variants(&st, &mut local_results, &hw, &mem).await;
 
     // 2. Concurrently search live Hugging Face
@@ -1144,7 +1189,8 @@ pub async fn search_models_with_fit_impl(
         20,
         token.as_deref(),
     )
-    .await {
+    .await
+    {
         Ok(records) => records,
         Err(e) => {
             if local_results.is_empty() {
@@ -1173,7 +1219,10 @@ pub async fn search_models_with_fit_impl(
 
     // Exact matches go first
     if let Some(exact) = &parsed.exact_repo_id {
-        if let Some(pos) = hf_scored.iter().position(|m| m.id.eq_ignore_ascii_case(exact)) {
+        if let Some(pos) = hf_scored
+            .iter()
+            .position(|m| m.id.eq_ignore_ascii_case(exact))
+        {
             let m = hf_scored.remove(pos);
             seen_ids.insert(m.id.to_ascii_lowercase());
             merged.push(m);
@@ -1197,7 +1246,9 @@ pub async fn search_models_with_fit_impl(
         let fmt_upper = fmt.to_ascii_uppercase();
         merged.retain(|m| {
             m.variants.iter().any(|v| {
-                format!("{:?}", v.variant.format).to_ascii_uppercase().contains(&fmt_upper)
+                format!("{:?}", v.variant.format)
+                    .to_ascii_uppercase()
+                    .contains(&fmt_upper)
                     || v.variant.label.to_ascii_uppercase().contains(&fmt_upper)
             })
         });
@@ -1206,14 +1257,14 @@ pub async fn search_models_with_fit_impl(
     if let Some(q_filter) = &parsed.quant_filter {
         let q_upper = q_filter.to_ascii_uppercase();
         merged.retain(|m| {
-            m.variants.iter().any(|v| v.variant.label.to_ascii_uppercase().contains(&q_upper))
+            m.variants
+                .iter()
+                .any(|v| v.variant.label.to_ascii_uppercase().contains(&q_upper))
         });
     }
 
     if let Some(max_params) = parsed.max_params_b {
-        merged.retain(|m| {
-            m.params_b.map(|p| p <= max_params * 1.25).unwrap_or(true)
-        });
+        merged.retain(|m| m.params_b.map(|p| p <= max_params * 1.25).unwrap_or(true));
     }
 
     // Sort by composite score
@@ -1680,19 +1731,13 @@ async fn analyze_context_fit_inner(
                     .map(str::trim)
                     .filter(|m| !m.is_empty());
                 if let Some(draft) = draft_raw {
-                    let resolved = server::resolve_gguf_model_path(
-                        draft,
-                        &cfg.gguf_dir,
-                        &st.resolve_distro(),
-                    );
+                    let resolved =
+                        server::resolve_gguf_model_path(draft, &cfg.gguf_dir, &st.resolve_distro());
                     if let Some(path) = resolved {
                         let draft_size = std::fs::metadata(&path)
                             .ok()
                             .map(|m| m.len() as f64 / 1024.0 / 1024.0 / 1024.0);
-                        let file_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(draft);
+                        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or(draft);
                         if let Some(size) = draft_size {
                             report.warnings.push(format!(
                                 "Speculative decoding: Draft GGUF '{file_name}' ({spec_tokens} tokens) requires approx. {:.2} GiB weights (estimate) in addition to the main model.",
@@ -1981,9 +2026,7 @@ pub async fn servers_create(
     let gpu_mem_util = input
         .gpu_mem_util
         .unwrap_or(cfg.memory_settings.default_gpu_mem_util);
-    if backend_kind == crate::state::ServerBackend::Vllm
-        && !(0.10..=0.95).contains(&gpu_mem_util)
-    {
+    if backend_kind == crate::state::ServerBackend::Vllm && !(0.10..=0.95).contains(&gpu_mem_util) {
         return Err("vLLM GPU memory utilization must be between 0.10 and 0.95".into());
     }
 
@@ -2024,7 +2067,11 @@ pub async fn servers_create(
         None
     };
 
-    let requested_max_len = input.max_model_len.clone().into_inner().filter(|len| *len > 0);
+    let requested_max_len = input
+        .max_model_len
+        .clone()
+        .into_inner()
+        .filter(|len| *len > 0);
     let max_model_len = if backend_kind == crate::state::ServerBackend::Llamacpp {
         None
     } else if let Some(len) = requested_max_len {
@@ -2063,7 +2110,10 @@ pub async fn servers_create(
             .max_context_cap
             .map(|cap| cap.min(declared_limit))
             .unwrap_or(declared_limit);
-        Some(fit.map(|len| len.min(configured_limit)).unwrap_or(configured_limit))
+        Some(
+            fit.map(|len| len.min(configured_limit))
+                .unwrap_or(configured_limit),
+        )
     };
     let params_b = stats.as_ref().and_then(|stats| stats.params_b);
 
@@ -2094,8 +2144,16 @@ pub async fn servers_create(
             .filter(|value| !value.is_empty() && value != "auto"),
         enforce_eager: input.enforce_eager.unwrap_or(true),
         params_b,
-        swap_space_gb: input.swap_space_gb.clone().into_inner().filter(|value| *value > 0),
-        cpu_offload_gb: input.cpu_offload_gb.clone().into_inner().filter(|value| *value > 0),
+        swap_space_gb: input
+            .swap_space_gb
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
+        cpu_offload_gb: input
+            .cpu_offload_gb
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
         was_running: false,
         model_path: input
             .model_path
@@ -2107,11 +2165,23 @@ pub async fn servers_create(
             .clone()
             .into_inner()
             .filter(|value| !value.trim().is_empty()),
-        ctx_size: input.ctx_size.clone().into_inner().filter(|value| *value > 0),
+        ctx_size: input
+            .ctx_size
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
         n_gpu_layers: input.n_gpu_layers.clone().into_inner(),
-        n_cpu_moe: input.n_cpu_moe.clone().into_inner().filter(|value| *value > 0),
+        n_cpu_moe: input
+            .n_cpu_moe
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
         fit: input.fit.unwrap_or(true),
-        fit_target: input.fit_target.clone().into_inner().filter(|value| *value > 0),
+        fit_target: input
+            .fit_target
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
         device: input
             .device
             .clone()
@@ -2124,17 +2194,23 @@ pub async fn servers_create(
             .filter(|value| !value.trim().is_empty()),
         log_verbosity: input.log_verbosity.clone().into_inner(),
         flash_attn: input.flash_attn.unwrap_or(true),
-        cache_type_k: input
-            .cache_type_k
+        cache_type_k: input.cache_type_k.clone().unwrap_or_else(|| "q8_0".into()),
+        cache_type_v: input.cache_type_v.clone().unwrap_or_else(|| "q8_0".into()),
+        threads: input
+            .threads
             .clone()
-            .unwrap_or_else(|| "q8_0".into()),
-        cache_type_v: input
-            .cache_type_v
+            .into_inner()
+            .filter(|value| *value > 0),
+        batch_size: input
+            .batch_size
             .clone()
-            .unwrap_or_else(|| "q8_0".into()),
-        threads: input.threads.clone().into_inner().filter(|value| *value > 0),
-        batch_size: input.batch_size.clone().into_inner().filter(|value| *value > 0),
-        ubatch_size: input.ubatch_size.clone().into_inner().filter(|value| *value > 0),
+            .into_inner()
+            .filter(|value| *value > 0),
+        ubatch_size: input
+            .ubatch_size
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0),
         parallel: input.parallel.unwrap_or(0),
         jinja: input.jinja.unwrap_or(true),
         no_kv_offload: input.no_kv_offload.unwrap_or(false),
@@ -2164,7 +2240,9 @@ pub async fn servers_create(
     for (name, value) in &def.env {
         server::validate_env_name(name)?;
         if value == crate::state::SECRET_PLACEHOLDER {
-            return Err("secret placeholders are only valid when updating an existing server".into());
+            return Err(
+                "secret placeholders are only valid when updating an existing server".into(),
+            );
         }
     }
     if def.api_key.as_deref() == Some(crate::state::SECRET_PLACEHOLDER) {
@@ -2247,7 +2325,7 @@ pub struct ServerEnvInput {
 }
 
 #[tauri::command]
-pub fn servers_update_env(
+pub async fn servers_update_env(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
     input: ServerEnvInput,
@@ -2275,217 +2353,225 @@ pub fn servers_update_env(
     *cfg = next;
     if input.restart.unwrap_or(false) {
         drop(cfg);
-        server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || {
+            server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn servers_update(
+pub async fn servers_update(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
     input: ServerInput,
 ) -> Result<ServerDef, String> {
     let st = (*state).clone();
-    let mut cfg = st.config.lock().unwrap();
     let id = input
         .id
         .clone()
         .ok_or_else(|| "id is required".to_string())?;
     validate_server_id(&id)?;
-    let idx = cfg.servers.iter().position(|s| s.id == id).ok_or("Server not found")?;
-    let existing_ports: Vec<u16> = cfg.servers.iter().filter(|s| s.id != id).map(|s| s.port).collect();
-    let original = cfg.servers[idx].clone();
-    let mut updated = original.clone();
-    let previous_model = updated.model_id.clone();
+    let (updated, original) = {
+        let mut cfg = st.config.lock().unwrap();
+        let idx = cfg
+            .servers
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or("Server not found")?;
+        let existing_ports: Vec<u16> = cfg
+            .servers
+            .iter()
+            .filter(|s| s.id != id)
+            .map(|s| s.port)
+            .collect();
+        let original = cfg.servers[idx].clone();
+        let mut updated = original.clone();
+        let previous_model = updated.model_id.clone();
 
-    if let Some(value) = input.backend.clone() {
-        updated.backend = value;
-    }
-    let backend_kind = updated.backend_kind()?;
-    if let Some(value) = input.llamacpp_channel {
-        updated.llamacpp_channel = value;
-    }
-    if let Some(value) = input.name.clone() {
-        updated.name = value;
-    }
-    if let Some(value) = input.model_id.clone() {
-        updated.model_id = value;
-    }
-    if let Some(value) = input.task.clone() {
-        updated.task = value;
-    }
-    if let Some(value) = input.port {
-        if existing_ports.contains(&value) {
-            return Err(format!("port {value} already used by another server"));
+        if let Some(value) = input.backend.clone() {
+            updated.backend = value;
         }
-        if value != updated.port
-            && std::net::TcpListener::bind(("127.0.0.1", value)).is_err()
+        let backend_kind = updated.backend_kind()?;
+        if let Some(value) = input.llamacpp_channel {
+            updated.llamacpp_channel = value;
+        }
+        if let Some(value) = input.name.clone() {
+            updated.name = value;
+        }
+        if let Some(value) = input.model_id.clone() {
+            updated.model_id = value;
+        }
+        if let Some(value) = input.task.clone() {
+            updated.task = value;
+        }
+        if let Some(value) = input.port {
+            if existing_ports.contains(&value) {
+                return Err(format!("port {value} already used by another server"));
+            }
+            if value != updated.port && std::net::TcpListener::bind(("127.0.0.1", value)).is_err() {
+                return Err(format!("port {value} is in use"));
+            }
+            updated.port = value;
+        }
+        if let Some(value) = input.gpu_mem_util {
+            updated.gpu_mem_util = value;
+        }
+        if backend_kind == crate::state::ServerBackend::Vllm
+            && !(0.10..=0.95).contains(&updated.gpu_mem_util)
         {
-            return Err(format!("port {value} is in use"));
+            return Err("vLLM GPU memory utilization must be between 0.10 and 0.95".into());
         }
-        updated.port = value;
-    }
-    if let Some(value) = input.gpu_mem_util {
-        updated.gpu_mem_util = value;
-    }
-    if backend_kind == crate::state::ServerBackend::Vllm
-        && !(0.10..=0.95).contains(&updated.gpu_mem_util)
-    {
-        return Err("vLLM GPU memory utilization must be between 0.10 and 0.95".into());
-    }
-    updated.max_model_len = input
-        .max_model_len
-        .clone()
-        .into_inner()
-        .filter(|len| *len > 0);
-    if let Some(value) = input.quant.clone() {
-        updated.quant = if backend_kind == crate::state::ServerBackend::Vllm {
-            value.to_ascii_lowercase()
-        } else {
-            value
-        };
-    }
-    updated.served_model_name = input
-        .served_model_name
-        .clone()
-        .into_inner()
-        .filter(|value| !value.trim().is_empty());
-    updated.kv_cache_dtype = input
-        .kv_cache_dtype
-        .clone()
-        .into_inner()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty() && value != "auto");
-    if let Some(value) = input.enforce_eager {
-        updated.enforce_eager = value;
-    }
-    updated.swap_space_gb = input
-        .swap_space_gb
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.cpu_offload_gb = input
-        .cpu_offload_gb
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.model_path = input
-        .model_path
-        .clone()
-        .into_inner()
-        .filter(|value| !value.trim().is_empty());
-    updated.mmproj_path = input
-        .mmproj_path
-        .clone()
-        .into_inner()
-        .filter(|value| !value.trim().is_empty());
-    updated.ctx_size = input
-        .ctx_size
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.n_gpu_layers = input.n_gpu_layers.clone().into_inner();
-    updated.n_cpu_moe = input
-        .n_cpu_moe
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    if let Some(value) = input.fit {
-        updated.fit = value;
-    }
-    updated.fit_target = input
-        .fit_target
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.device = input
-        .device
-        .clone()
-        .into_inner()
-        .filter(|value| !value.trim().is_empty());
-    if input.clear_api_key.unwrap_or(false) {
-        updated.api_key = None;
-    } else if let Some(value) = input.api_key.clone().into_inner() {
-        if value != crate::state::SECRET_PLACEHOLDER {
-            updated.api_key = (!value.trim().is_empty()).then(|| value.trim().to_string());
+        updated.max_model_len = input
+            .max_model_len
+            .clone()
+            .into_inner()
+            .filter(|len| *len > 0);
+        if let Some(value) = input.quant.clone() {
+            updated.quant = if backend_kind == crate::state::ServerBackend::Vllm {
+                value.to_ascii_lowercase()
+            } else {
+                value
+            };
         }
-    }
-    updated.log_verbosity = input.log_verbosity.clone().into_inner();
-    if let Some(value) = input.flash_attn {
-        updated.flash_attn = value;
-    }
-    updated.cache_type_k = input
-        .cache_type_k
-        .clone()
-        .unwrap_or_else(|| "q8_0".into());
-    updated.cache_type_v = input
-        .cache_type_v
-        .clone()
-        .unwrap_or_else(|| "q8_0".into());
-    updated.threads = input
-        .threads
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.batch_size = input
-        .batch_size
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.ubatch_size = input
-        .ubatch_size
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.parallel = input.parallel.unwrap_or(0);
-    if let Some(value) = input.jinja {
-        updated.jinja = value;
-    }
-    if let Some(value) = input.no_kv_offload {
-        updated.no_kv_offload = value;
-    }
-    updated.metrics = input.metrics.unwrap_or(true);
-    updated.extra_args = input.extra_args.clone().into_inner().unwrap_or_default();
-    if let Some(env) = input.env.clone().into_inner() {
-        updated.env = env;
-        crate::state::merge_server_secret_placeholders(&mut updated, Some(&original));
-    }
-    for (name, value) in &updated.env {
-        server::validate_env_name(name)?;
-        if value == crate::state::SECRET_PLACEHOLDER {
-            return Err("secret placeholders could not be restored for this server".into());
+        updated.served_model_name = input
+            .served_model_name
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty());
+        updated.kv_cache_dtype = input
+            .kv_cache_dtype
+            .clone()
+            .into_inner()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty() && value != "auto");
+        if let Some(value) = input.enforce_eager {
+            updated.enforce_eager = value;
         }
-    }
-    if updated.model_id != previous_model {
-        updated.params_b = None;
-        updated.max_model_len = None;
-    }
-    if let Some(enabled) = input.speculative_enabled {
-        updated.speculative_enabled = enabled;
-    }
-    updated.speculative_model = input
-        .speculative_model
-        .clone()
-        .into_inner()
-        .filter(|value| !value.trim().is_empty());
-    updated.speculative_model_path = input
-        .speculative_model_path
-        .clone()
-        .into_inner()
-        .filter(|value| !value.trim().is_empty());
-    updated.speculative_num_tokens = input
-        .speculative_num_tokens
-        .clone()
-        .into_inner()
-        .filter(|value| *value > 0);
-    updated.normalize_for_backend()?;
+        updated.swap_space_gb = input
+            .swap_space_gb
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.cpu_offload_gb = input
+            .cpu_offload_gb
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.model_path = input
+            .model_path
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty());
+        updated.mmproj_path = input
+            .mmproj_path
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty());
+        updated.ctx_size = input
+            .ctx_size
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.n_gpu_layers = input.n_gpu_layers.clone().into_inner();
+        updated.n_cpu_moe = input
+            .n_cpu_moe
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        if let Some(value) = input.fit {
+            updated.fit = value;
+        }
+        updated.fit_target = input
+            .fit_target
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.device = input
+            .device
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty());
+        if input.clear_api_key.unwrap_or(false) {
+            updated.api_key = None;
+        } else if let Some(value) = input.api_key.clone().into_inner() {
+            if value != crate::state::SECRET_PLACEHOLDER {
+                updated.api_key = (!value.trim().is_empty()).then(|| value.trim().to_string());
+            }
+        }
+        updated.log_verbosity = input.log_verbosity.clone().into_inner();
+        if let Some(value) = input.flash_attn {
+            updated.flash_attn = value;
+        }
+        updated.cache_type_k = input.cache_type_k.clone().unwrap_or_else(|| "q8_0".into());
+        updated.cache_type_v = input.cache_type_v.clone().unwrap_or_else(|| "q8_0".into());
+        updated.threads = input
+            .threads
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.batch_size = input
+            .batch_size
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.ubatch_size = input
+            .ubatch_size
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.parallel = input.parallel.unwrap_or(0);
+        if let Some(value) = input.jinja {
+            updated.jinja = value;
+        }
+        if let Some(value) = input.no_kv_offload {
+            updated.no_kv_offload = value;
+        }
+        updated.metrics = input.metrics.unwrap_or(true);
+        updated.extra_args = input.extra_args.clone().into_inner().unwrap_or_default();
+        if let Some(env) = input.env.clone().into_inner() {
+            updated.env = env;
+            crate::state::merge_server_secret_placeholders(&mut updated, Some(&original));
+        }
+        for (name, value) in &updated.env {
+            server::validate_env_name(name)?;
+            if value == crate::state::SECRET_PLACEHOLDER {
+                return Err("secret placeholders could not be restored for this server".into());
+            }
+        }
+        if updated.model_id != previous_model {
+            updated.params_b = None;
+            updated.max_model_len = None;
+        }
+        if let Some(enabled) = input.speculative_enabled {
+            updated.speculative_enabled = enabled;
+        }
+        updated.speculative_model = input
+            .speculative_model
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty());
+        updated.speculative_model_path = input
+            .speculative_model_path
+            .clone()
+            .into_inner()
+            .filter(|value| !value.trim().is_empty());
+        updated.speculative_num_tokens = input
+            .speculative_num_tokens
+            .clone()
+            .into_inner()
+            .filter(|value| *value > 0);
+        updated.normalize_for_backend()?;
 
-    let mut next = cfg.clone();
-    next.servers[idx] = updated.clone();
-    next.save().map_err(|e| e.to_string())?;
-    *cfg = next;
-    drop(cfg);
+        let mut next = cfg.clone();
+        next.servers[idx] = updated.clone();
+        next.save().map_err(|e| e.to_string())?;
+        *cfg = next;
+        drop(cfg);
+        (updated, original)
+    };
 
     let live_active = st
         .servers
@@ -2498,7 +2584,11 @@ pub fn servers_update(
         })
         .unwrap_or(false);
     if input.restart.unwrap_or(false) || (live_active && updated != original) {
-        server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || {
+            server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     }
     Ok(crate::state::redact_server_def(&updated))
 }
@@ -2637,6 +2727,13 @@ pub async fn servers_chat_stream(
     temperature: Option<f32>,
 ) -> Result<(), String> {
     let st = (*state).clone();
+    {
+        let mut requests = st.chat_cancels.lock().unwrap();
+        if requests.contains_key(&request_id) {
+            return Err(format!("chat request {request_id} is already running"));
+        }
+        requests.insert(request_id.clone(), Arc::new(tokio::sync::Notify::new()));
+    }
     tokio::spawn(async move {
         server::chat_stream(Some(app), st, request_id, server_id, messages, temperature).await;
     });
@@ -2666,20 +2763,26 @@ pub fn conversations_save(
     state: State<'_, Arc<AppState>>,
     conversation: crate::state::Conversation,
 ) -> Result<(), String> {
-    let mut convs = state.conversations.lock().unwrap();
-    if let Some(pos) = convs.iter().position(|c| c.id == conversation.id) {
-        convs[pos] = conversation;
-    } else {
-        convs.insert(0, conversation);
-    }
-    crate::state::Conversation::save_all(&convs)
+    let updated = {
+        let mut convs = state.conversations.lock().unwrap();
+        if let Some(pos) = convs.iter().position(|c| c.id == conversation.id) {
+            convs[pos] = conversation;
+        } else {
+            convs.insert(0, conversation);
+        }
+        convs.clone()
+    };
+    crate::state::Conversation::save_all(&updated)
 }
 
 #[tauri::command]
 pub fn conversations_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    let mut convs = state.conversations.lock().unwrap();
-    convs.retain(|c| c.id != id);
-    crate::state::Conversation::save_all(&convs)
+    let updated = {
+        let mut convs = state.conversations.lock().unwrap();
+        convs.retain(|c| c.id != id);
+        convs.clone()
+    };
+    crate::state::Conversation::save_all(&updated)
 }
 
 #[tauri::command]
@@ -2833,10 +2936,7 @@ fn validate_imported_wsl_path(path: &str) -> Result<(), String> {
 
 fn validate_server_id(id: &str) -> Result<(), String> {
     let id = id.trim();
-    if id.is_empty()
-        || id.len() > 128
-        || id.chars().any(|ch| ch.is_control() || ch == '\0')
-    {
+    if id.is_empty() || id.len() > 128 || id.chars().any(|ch| ch.is_control() || ch == '\0') {
         return Err("server id must be 1-128 printable characters".into());
     }
     Ok(())
@@ -2865,13 +2965,13 @@ fn validate_advanced_settings(adv: &crate::state::AdvancedSettings) -> Result<()
     {
         return Err("an API key is required before binding vLLM to a non-loopback host".into());
     }
-    if !matches!(adv.log_level.as_str(), "INFO" | "DEBUG" | "WARNING" | "ERROR") {
+    if !matches!(
+        adv.log_level.as_str(),
+        "INFO" | "DEBUG" | "WARNING" | "ERROR"
+    ) {
         return Err("log_level must be INFO, DEBUG, WARNING, or ERROR".into());
     }
-    if !adv
-        .kv_cache_dtype
-        .trim()
-        .is_empty()
+    if !adv.kv_cache_dtype.trim().is_empty()
         && !adv
             .kv_cache_dtype
             .trim()
@@ -2881,7 +2981,8 @@ fn validate_advanced_settings(adv: &crate::state::AdvancedSettings) -> Result<()
         return Err("kv_cache_dtype contains unsupported characters".into());
     }
     if let Some(extra) = &adv.extra_vllm_args {
-        shlex::split(extra).ok_or_else(|| "extra_vllm_args has invalid shell quoting".to_string())?;
+        shlex::split(extra)
+            .ok_or_else(|| "extra_vllm_args has invalid shell quoting".to_string())?;
     }
     if let Some(custom) = &adv.custom_env_vars {
         for line in custom.lines() {
@@ -3103,10 +3204,7 @@ pub fn config_import(
 ) -> Result<PublicSettings, String> {
     let pkg: crate::state::ConfigExportPackage = serde_json::from_str(&json)
         .map_err(|e| format!("Invalid configuration JSON format: {e}"))?;
-    if !pkg
-        .schema
-        .starts_with("local-llm-panel/config-export/")
-    {
+    if !pkg.schema.starts_with("local-llm-panel/config-export/") {
         return Err(format!("Unsupported configuration schema: {}", pkg.schema));
     }
 
@@ -3140,24 +3238,34 @@ pub fn config_import(
     for mut server in pkg.servers {
         validate_server_id(&server.id)?;
         server.was_running = false;
-        let previous = previous_servers.iter().find(|candidate| candidate.id == server.id);
+        let previous = previous_servers
+            .iter()
+            .find(|candidate| candidate.id == server.id);
         crate::state::merge_server_secret_placeholders(&mut server, previous);
         if !secrets_omitted {
             server.api_key = previous.and_then(|candidate| candidate.api_key.clone());
-            server.env = previous.map(|candidate| candidate.env.clone()).unwrap_or_default();
+            server.env = previous
+                .map(|candidate| candidate.env.clone())
+                .unwrap_or_default();
         }
         server.normalize_for_backend()?;
         if imported_servers
             .iter()
             .any(|candidate: &crate::state::ServerDef| candidate.id == server.id)
         {
-            return Err(format!("configuration contains duplicate server id {}", server.id));
+            return Err(format!(
+                "configuration contains duplicate server id {}",
+                server.id
+            ));
         }
         if imported_servers
             .iter()
             .any(|candidate: &crate::state::ServerDef| candidate.port == server.port)
         {
-            return Err(format!("configuration contains duplicate server port {}", server.port));
+            return Err(format!(
+                "configuration contains duplicate server port {}",
+                server.port
+            ));
         }
         imported_servers.push(server);
     }
@@ -3187,7 +3295,10 @@ pub fn server_recipe_parse(json: String) -> Result<crate::state::ServerRecipe, S
     let recipe: crate::state::ServerRecipe =
         serde_json::from_str(&json).map_err(|e| format!("Invalid server recipe JSON: {e}"))?;
     if !recipe.schema.starts_with("local-llm-panel/server-recipe/") {
-        return Err(format!("Unsupported server recipe schema: {}", recipe.schema));
+        return Err(format!(
+            "Unsupported server recipe schema: {}",
+            recipe.schema
+        ));
     }
     if recipe.model_id.trim().is_empty() || recipe.port == 0 {
         return Err("Recipe must include a model_id and a non-zero port".into());
@@ -3453,8 +3564,11 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
             }
         }
 
-        let mut local =
-            scan_imported_local_folders(&distro, &st.config().imported_local_models, &running_servers);
+        let mut local = scan_imported_local_folders(
+            &distro,
+            &st.config().imported_local_models,
+            &running_servers,
+        );
         local.extend(scan_native_gguf_library(
             &st.config().gguf_dir,
             &running_servers,
@@ -3478,16 +3592,19 @@ fn scan_native_gguf_library(root: &str, running_servers: &[(String, String)]) ->
         if files.is_empty() {
             continue;
         }
-        let main_file = files
-            .first()
-            .map(|p| p.to_string_lossy().into_owned());
+        let main_file = files.first().map(|p| p.to_string_lossy().into_owned());
         let size_mb = files
             .iter()
             .filter_map(|p| p.metadata().ok())
             .map(|m| m.len())
             .sum::<u64>()
             / (1024 * 1024);
+        let file_name = files
+            .first()
+            .and_then(|path| path.file_name())
+            .unwrap_or_default();
         let model_id = repo.file_name().to_string_lossy().into_owned();
+        let params_b = crate::estimate::parse_params_from_name(&model_id);
         let in_use_server = running_servers
             .iter()
             .find(|(_, model)| model == &model_id)
@@ -3496,8 +3613,9 @@ fn scan_native_gguf_library(root: &str, running_servers: &[(String, String)]) ->
             model_id,
             size_mb,
             files: files.len(),
-            quant: Some("GGUF".into()),
-            params_b: None,
+            quant: crate::hf::parse_gguf_quant_label(&file_name.to_string_lossy())
+                .or_else(|| Some("GGUF".into())),
+            params_b,
             installed: true,
             in_use: in_use_server.is_some(),
             in_use_server,
@@ -3578,7 +3696,11 @@ pub async fn download_start(
     crate::hf::validate_model_id(&repo_id).map_err(|e| e.to_string())?;
 
     if backend.eq_ignore_ascii_case("vllm") {
-        let mid = if model_id.is_empty() { repo_id.clone() } else { model_id.clone() };
+        let mid = if model_id.is_empty() {
+            repo_id.clone()
+        } else {
+            model_id.clone()
+        };
         hf::pull_model(&st, app, &mid).map_err(|e| e.to_string())?;
         Ok(format!("vllm-{}", crate::state::now_ms()))
     } else {
@@ -3591,8 +3713,8 @@ pub async fn download_start(
             .collect::<Result<_, _>>()?;
 
         let gguf_root = PathBuf::from(&st.config().gguf_dir);
-        let repo_leaf = repo_id.rsplit('/').next().unwrap_or("model");
-        let dest = gguf_root.join(repo_leaf).to_string_lossy().into_owned();
+        let repo_dir_name = repo_id.replace('/', "__");
+        let dest = gguf_root.join(repo_dir_name).to_string_lossy().into_owned();
         let token = st.hf_token();
 
         let job_id = st.download_manager.enqueue_gguf_job(
@@ -3619,7 +3741,9 @@ pub fn download_cancel(state: State<'_, Arc<AppState>>, job_id: String) -> Resul
 }
 
 #[tauri::command]
-pub fn download_queue_status(state: State<'_, Arc<AppState>>) -> Result<Vec<crate::download_manager::DownloadJob>, String> {
+pub fn download_queue_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::download_manager::DownloadJob>, String> {
     Ok(state.download_manager.list_jobs())
 }
 
@@ -3842,8 +3966,9 @@ pub async fn library_import_local(
             }
             std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
             let size_mb = target.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+            let model_id = file_name.to_string_lossy().trim_end_matches(".gguf").to_string();
             return Ok(LibraryEntry {
-                model_id: "imported".into(),
+                model_id,
                 size_mb,
                 files: 1,
                 quant: Some("GGUF".into()),
@@ -4843,7 +4968,9 @@ mod tests {
     #[tokio::test]
     async fn test_process_models_with_fit_empty() {
         let st = AppState::new();
-        let out = process_records_with_fit(&st, vec![], crate::hf_discovery::DiscoveryCategory::ForYou).await;
+        let out =
+            process_records_with_fit(&st, vec![], crate::hf_discovery::DiscoveryCategory::ForYou)
+                .await;
         assert!(out.is_empty());
     }
 
@@ -4905,7 +5032,9 @@ mod tests {
             gated: None,
         }];
 
-        let res = process_records_with_fit(&st, models, crate::hf_discovery::DiscoveryCategory::ForYou).await;
+        let res =
+            process_records_with_fit(&st, models, crate::hf_discovery::DiscoveryCategory::ForYou)
+                .await;
         assert_eq!(res.len(), 1);
         let variant = &res[0].variants[0];
         assert_eq!(variant.fit.extended_context, 2048);
@@ -5228,7 +5357,7 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
         assert_eq!(recipe.swap_space_gb, Some(2));
 
         let invalid_json = r#"{ "not": "a recipe" }"#;
-let err = server_recipe_parse(invalid_json.to_string());
+        let err = server_recipe_parse(invalid_json.to_string());
         assert!(err.is_err());
     }
 

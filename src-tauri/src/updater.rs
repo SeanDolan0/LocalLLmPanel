@@ -95,8 +95,14 @@ impl ParsedVersion {
 
         let mut parts = core.split('.');
         let major = parts.next()?.parse::<u64>().ok()?;
-        let minor = parts.next().and_then(|p| p.parse::<u64>().ok()).unwrap_or(0);
-        let patch = parts.next().and_then(|p| p.parse::<u64>().ok()).unwrap_or(0);
+        let minor = parts
+            .next()
+            .and_then(|p| p.parse::<u64>().ok())
+            .unwrap_or(0);
+        let patch = parts
+            .next()
+            .and_then(|p| p.parse::<u64>().ok())
+            .unwrap_or(0);
 
         Some(Self {
             major,
@@ -135,7 +141,11 @@ impl ParsedVersion {
 /// Also matches the corresponding `.sha256` checksum file if uploaded.
 pub fn select_release_asset(
     assets: &[GithubReleaseAsset],
-) -> (Option<&GithubReleaseAsset>, Option<&GithubReleaseAsset>, bool) {
+) -> (
+    Option<&GithubReleaseAsset>,
+    Option<&GithubReleaseAsset>,
+    bool,
+) {
     let mut installer: Option<&GithubReleaseAsset> = None;
     let mut standalone: Option<&GithubReleaseAsset> = None;
 
@@ -208,7 +218,11 @@ pub async fn fetch_latest_release(
         .await
         .context("Failed to parse GitHub release JSON")?;
 
-    let latest_version_str = release.tag_name.trim().trim_start_matches(['v', 'V']).to_string();
+    let latest_version_str = release
+        .tag_name
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .to_string();
     let latest_parsed = ParsedVersion::parse(&latest_version_str).unwrap_or(ParsedVersion {
         major: 0,
         minor: 0,
@@ -259,7 +273,10 @@ pub async fn download_and_install_update_impl(
 
     let download_url = match info.download_url {
         Some(url) => url,
-        None => bail!("No executable asset available for download in release {}", info.latest_version),
+        None => bail!(
+            "No executable asset available for download in release {}",
+            info.latest_version
+        ),
     };
     let is_installer = info.is_installer;
     let asset_name = info
@@ -296,7 +313,10 @@ pub async fn download_and_install_update_impl(
         req = req.bearer_auth(t.trim());
     }
 
-    let resp = req.send().await.context("Failed to connect to download URL")?;
+    let resp = req
+        .send()
+        .await
+        .context("Failed to connect to download URL")?;
     let resp = resp
         .error_for_status()
         .context("Download URL returned an error response")?;
@@ -349,8 +369,48 @@ pub async fn download_and_install_update_impl(
         .context("Failed to flush installer file to disk")?;
     drop(file);
 
-    // 2. Optional SHA256 checksum verification
-    if let Some(sha_url) = info.sha256_url {
+    // 2. Require SHA256 checksum verification before executing downloaded code.
+    let sha_url = info
+        .sha256_url
+        .ok_or_else(|| anyhow::anyhow!("Release does not provide a SHA256 checksum"))?;
+    let _ = app.emit(
+        "app-update-progress",
+        AppUpdateProgress {
+            percent: 100.0,
+            downloaded_bytes: downloaded,
+            total_bytes,
+            speed_bps: 0.0,
+            phase: "verifying".into(),
+            error: None,
+        },
+    );
+
+    let expected_hash = st
+        .http
+        .get(&sha_url)
+        .send()
+        .await
+        .context("Failed to download update checksum")?
+        .error_for_status()
+        .context("Update checksum URL returned an error")?
+        .text()
+        .await
+        .context("Failed to read update checksum")?
+        .split_whitespace()
+        .next()
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| anyhow::anyhow!("Update checksum is missing or malformed"))?;
+
+    let file_bytes = tokio::fs::read(&dest_file)
+        .await
+        .context("Failed to read downloaded file for hash calculation")?;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&file_bytes);
+    let computed = format!("{:x}", hasher.finalize()).to_ascii_lowercase();
+    if computed != expected_hash {
+        let err_msg = format!("Checksum mismatch: expected {expected_hash}, got {computed}");
         let _ = app.emit(
             "app-update-progress",
             AppUpdateProgress {
@@ -358,50 +418,11 @@ pub async fn download_and_install_update_impl(
                 downloaded_bytes: downloaded,
                 total_bytes,
                 speed_bps: 0.0,
-                phase: "verifying".into(),
-                error: None,
+                phase: "error".into(),
+                error: Some(err_msg.clone()),
             },
         );
-
-        if let Ok(expected_hash_text) = st.http.get(&sha_url).send().await {
-            if let Ok(text) = expected_hash_text.text().await {
-                let expected_hash = text
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-
-                if expected_hash.len() == 64 {
-                    // Compute file hash
-                    let file_bytes = tokio::fs::read(&dest_file)
-                        .await
-                        .context("Failed to read downloaded file for hash calculation")?;
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(&file_bytes);
-                    let computed = format!("{:x}", hasher.finalize()).to_ascii_lowercase();
-
-                    if computed != expected_hash {
-                        let err_msg = format!(
-                            "Checksum mismatch: expected {}, got {}",
-                            expected_hash, computed
-                        );
-                        let _ = app.emit(
-                            "app-update-progress",
-                            AppUpdateProgress {
-                                percent: 100.0,
-                                downloaded_bytes: downloaded,
-                                total_bytes,
-                                speed_bps: 0.0,
-                                phase: "error".into(),
-                                error: Some(err_msg.clone()),
-                            },
-                        );
-                        bail!(err_msg);
-                    }
-                }
-            }
-        }
+        bail!(err_msg);
     }
 
     let _ = app.emit(
@@ -434,7 +455,8 @@ pub async fn download_and_install_update_impl(
             launch_installer(&dest_file)?;
             Ok(UpdateLaunchResult {
                 success: true,
-                message: "Installer launched. You can exit Local LLM Panel to complete the update.".to_string(),
+                message: "Installer launched. You can exit Local LLM Panel to complete the update."
+                    .to_string(),
             })
         }
     } else {
@@ -468,6 +490,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $installer = $env:LOCALLLMPANEL_UPDATE_INSTALLER
 $appPid = [int]$env:LOCALLLMPANEL_UPDATE_PID
 $log = $env:LOCALLLMPANEL_UPDATE_LOG
+$appExe = $env:LOCALLLMPANEL_UPDATE_APP
 
 function Write-Log([string]$msg) {
   "[$(Get-Date -Format o)] $msg" | Out-File $log -Encoding utf8 -Append
@@ -480,13 +503,28 @@ while ((Get-Process -Id $appPid -ErrorAction SilentlyContinue) -and (Get-Date) -
 }
 Start-Sleep -Milliseconds 400
 
+if (-not (Test-Path $installer)) {
+  Write-Log "installer not found: $installer"
+  exit 2
+}
+
 Write-Log "app exited; running installer $installer /S"
-$p = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
-Write-Log "installer exit code: $($p.ExitCode)"
+try {
+  $p = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait -ErrorAction Stop
+  Write-Log "installer exit code: $($p.ExitCode)"
+  if ($p.ExitCode -ne 0) {
+    Write-Log "installer failed; not relaunching the old executable"
+    exit $p.ExitCode
+  }
+} catch {
+  Write-Log "installer launch failed: $($_.Exception.Message)"
+  exit 3
+}
 
 # Locate the installed executable for relaunch: prefer the value the
 # installer registered, then fall back to the known per-user install dirs.
 $candidates = New-Object System.Collections.Generic.List[string]
+$candidates.Add($appExe)
 foreach ($hive in 'HKCU:','HKLM:') {
   $reg = Get-ItemProperty "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Local LLM Panel" -ErrorAction SilentlyContinue
   if ($reg -and $reg.InstallLocation) {
@@ -501,10 +539,14 @@ $candidates.Add("${env:ProgramFiles(x86)}\Local LLM Panel\llm-panel.exe")
 $relaunched = $false
 foreach ($exe in $candidates) {
   if ($exe -and (Test-Path $exe)) {
-    Start-Process $exe | Out-Null
-    Write-Log "relaunched $exe"
-    $relaunched = $true
-    break
+    try {
+      Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -ErrorAction Stop | Out-Null
+      Write-Log "relaunched $exe"
+      $relaunched = $true
+      break
+    } catch {
+      Write-Log "failed to relaunch $exe`: $($_.Exception.Message)"
+    }
   }
 }
 if (-not $relaunched) {
@@ -512,13 +554,21 @@ if (-not $relaunched) {
 }
 Remove-Item $MyInvocation.MyCommand.Path -Force
 "#;
-    std::fs::write(&script, ps)
-        .with_context(|| format!("Failed to write update helper script at {}", script.display()))?;
+    std::fs::write(&script, ps).with_context(|| {
+        format!(
+            "Failed to write update helper script at {}",
+            script.display()
+        )
+    })?;
 
     let mut cmd = std::process::Command::new("powershell.exe");
     cmd.env("LOCALLLMPANEL_UPDATE_INSTALLER", path.as_os_str())
         .env("LOCALLLMPANEL_UPDATE_PID", std::process::id().to_string())
         .env("LOCALLLMPANEL_UPDATE_LOG", log.as_os_str())
+        .env(
+            "LOCALLLMPANEL_UPDATE_APP",
+            std::env::current_exe().context("Failed to determine the running app path")?,
+        )
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -548,16 +598,24 @@ fn launch_installer(path: &PathBuf) -> Result<()> {
     std::process::Command::new(path)
         .creation_flags(DETACHED_PROCESS)
         .spawn()
-        .with_context(|| format!("Failed to launch installer executable at {}", path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to launch installer executable at {}",
+                path.display()
+            )
+        })?;
 
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
 fn launch_installer(path: &PathBuf) -> Result<()> {
-    std::process::Command::new(path)
-        .spawn()
-        .with_context(|| format!("Failed to launch installer executable at {}", path.display()))?;
+    std::process::Command::new(path).spawn().with_context(|| {
+        format!(
+            "Failed to launch installer executable at {}",
+            path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -728,7 +786,10 @@ mod tests {
         assert_eq!(chosen.name, "Local.LLM.Panel_1.9.7_x64-setup.exe");
         assert!(is_installer);
         assert!(sha.is_some());
-        assert_eq!(sha.unwrap().name, "Local.LLM.Panel_1.9.7_x64-setup.exe.sha256");
+        assert_eq!(
+            sha.unwrap().name,
+            "Local.LLM.Panel_1.9.7_x64-setup.exe.sha256"
+        );
     }
 
     #[test]

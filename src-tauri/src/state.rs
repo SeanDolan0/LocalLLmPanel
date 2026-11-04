@@ -139,7 +139,7 @@ impl Conversation {
         let text = serde_json::to_string_pretty(convs).map_err(|e| format!("serialize: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        replace_file_atomic(&tmp, &path)?;
         Ok(())
     }
 }
@@ -181,7 +181,7 @@ impl BenchmarkRun {
         let text = serde_json::to_string_pretty(runs).map_err(|e| format!("serialize: {e}"))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
+        replace_file_atomic(&tmp, &path)?;
         Ok(())
     }
 }
@@ -399,7 +399,11 @@ impl ServerDef {
                 self.no_kv_offload = false;
                 self.extra_args.clear();
                 self.speculative_model_path = None;
-                if self.speculative_model.as_deref().map_or(false, |m| m.ends_with(".gguf") || m.contains('\\')) {
+                if self
+                    .speculative_model
+                    .as_deref()
+                    .map_or(false, |m| m.ends_with(".gguf") || m.contains('\\'))
+                {
                     self.speculative_model = None;
                     self.speculative_enabled = false;
                     self.speculative_num_tokens = None;
@@ -518,7 +522,11 @@ pub fn is_secret_placeholder(value: &str) -> bool {
 /// such as `FOO` can still carry a secret.
 pub fn redact_server_def(def: &ServerDef) -> ServerDef {
     let mut redacted = def.clone();
-    if redacted.api_key.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+    if redacted
+        .api_key
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
         redacted.api_key = Some(SECRET_PLACEHOLDER.to_string());
     }
     redacted.env = redacted
@@ -702,7 +710,11 @@ impl Default for AdvancedSettings {
 
 pub fn redact_advanced_settings(settings: &AdvancedSettings) -> AdvancedSettings {
     let mut redacted = settings.clone();
-    if redacted.api_key.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+    if redacted
+        .api_key
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
         redacted.api_key = Some(SECRET_PLACEHOLDER.to_string());
     }
     // Custom environment text is intentionally omitted: parsing it here would
@@ -940,7 +952,8 @@ impl PersistedConfig {
         }
         // Ensure default_env has the FlashInfer sampler disabled by default for existing configs.
         if cfg.default_env.is_empty() {
-            cfg.default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
+            cfg.default_env
+                .insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         }
         // Back-compat: migrate legacy single-install fields to Upstream channel config
         if cfg.llamacpp_channels.is_empty() {
@@ -1327,7 +1340,9 @@ impl AppState {
         }
         let discovery_cache = Arc::new(crate::hf_discovery::DiscoveryCache::new());
         let model_registry = Arc::new(crate::model_registry::ModelRegistry::new());
-        let download_manager = Arc::new(crate::download_manager::DownloadManager::new(Arc::clone(&model_registry)));
+        let download_manager = Arc::new(crate::download_manager::DownloadManager::new(Arc::clone(
+            &model_registry,
+        )));
         AppState {
             config: Mutex::new(config),
             servers: Mutex::new(BTreeMap::new()),
@@ -1441,10 +1456,8 @@ mod tests {
 
     #[test]
     fn atomic_replace_replaces_existing_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "llm-panel-config-replace-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("llm-panel-config-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let destination = dir.join("config.json");
@@ -1647,10 +1660,7 @@ mod tests {
             r#"{"backend":"llamacpp","id":"s","name":"s","model_id":"D:\\models\\Ternary-Bonsai-2-27B-PQ2_0.gguf","task":"instruct","port":8000,"gpu_mem_util":0.0,"quant":"GGUF"}"#,
         )
         .unwrap();
-        assert_eq!(
-            server.effective_model_name(),
-            "Ternary-Bonsai-2-27B-PQ2_0"
-        );
+        assert_eq!(server.effective_model_name(), "Ternary-Bonsai-2-27B-PQ2_0");
 
         // Split-shard files collapse onto the shared stem.
         server.model_id = "D:\\models\\Model-00001-of-00002.gguf".into();
@@ -2033,7 +2043,10 @@ mod tests {
         assert_eq!(recipe.swap_space_gb, Some(4));
         assert_eq!(recipe.kv_cache_dtype.as_deref(), Some("fp8_e4m3"));
         assert_eq!(recipe.speculative_enabled, true);
-        assert_eq!(recipe.speculative_model.as_deref(), Some("Qwen/Qwen2.5-0.5B-Instruct"));
+        assert_eq!(
+            recipe.speculative_model.as_deref(),
+            Some("Qwen/Qwen2.5-0.5B-Instruct")
+        );
         assert_eq!(recipe.speculative_num_tokens, Some(5));
 
         let text = serde_json::to_string_pretty(&recipe).unwrap();
@@ -2058,8 +2071,8 @@ mod tests {
             .env
             .insert("CUSTOM_TOKEN".into(), "env_export_secret".into());
         secret_cfg.servers = vec![secret_server];
-        let secret_json = serde_json::to_string(&ConfigExportPackage::from_persisted(&secret_cfg))
-            .unwrap();
+        let secret_json =
+            serde_json::to_string(&ConfigExportPackage::from_persisted(&secret_cfg)).unwrap();
         for secret in [
             "hf_export_secret",
             "gh_export_secret",
@@ -2082,7 +2095,10 @@ mod tests {
         redacted = redact_server_def(&redacted);
         merge_server_secret_placeholders(&mut redacted, Some(&restored));
         assert_eq!(redacted.api_key, restored.api_key);
-        assert_eq!(redacted.env.get("CUSTOM_TOKEN"), restored.env.get("CUSTOM_TOKEN"));
+        assert_eq!(
+            redacted.env.get("CUSTOM_TOKEN"),
+            restored.env.get("CUSTOM_TOKEN")
+        );
     }
 
     #[test]
@@ -2143,7 +2159,10 @@ mod tests {
         }"#;
         let s: ServerDef = serde_json::from_str(json).unwrap();
         assert_eq!(s.env.get("CUSTOM_VAR"), Some(&"custom_value".to_string()));
-        assert_eq!(s.env.get("VLLM_USE_FLASHINFER_SAMPLER"), Some(&"0".to_string()));
+        assert_eq!(
+            s.env.get("VLLM_USE_FLASHINFER_SAMPLER"),
+            Some(&"0".to_string())
+        );
 
         let serialized = serde_json::to_string(&s).unwrap();
         let deserialized: ServerDef = serde_json::from_str(&serialized).unwrap();
@@ -2154,7 +2173,10 @@ mod tests {
     fn test_persistedconfig_default_env() {
         use super::PersistedConfig;
         let cfg = PersistedConfig::default();
-        assert_eq!(cfg.default_env.get("VLLM_USE_FLASHINFER_SAMPLER"), Some(&"0".to_string()));
+        assert_eq!(
+            cfg.default_env.get("VLLM_USE_FLASHINFER_SAMPLER"),
+            Some(&"0".to_string())
+        );
     }
 
     #[test]
@@ -2305,7 +2327,10 @@ mod tests {
         // clears speculative_model_path (GGUF only) and retains speculative_model and tokens
         def.normalize_for_backend().unwrap();
         assert_eq!(def.speculative_enabled, true);
-        assert_eq!(def.speculative_model.as_deref(), Some("Qwen/Qwen2.5-0.5B-Instruct"));
+        assert_eq!(
+            def.speculative_model.as_deref(),
+            Some("Qwen/Qwen2.5-0.5B-Instruct")
+        );
         assert_eq!(def.speculative_model_path, None);
         assert_eq!(def.speculative_num_tokens, Some(5));
 
