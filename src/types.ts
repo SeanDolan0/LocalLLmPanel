@@ -38,6 +38,21 @@ export interface ProvisionReport {
   bf16_supported: boolean;
 }
 
+export interface VllmUpdateResult {
+  previous_version: string | null;
+  version: string | null;
+}
+
+export interface LlamaCppUpdateStatus {
+  channel: LlamaCppChannel;
+  installed_tag: string | null;
+  latest_tag: string | null;
+  update_available: boolean;
+  cuda_version: string | null;
+  warning: string | null;
+  page_url: string;
+}
+
 export interface EnvStatus {
   wsl_ok: boolean;
   distro: string;
@@ -711,12 +726,17 @@ export interface UpdateLaunchResult {
 
 export interface LogicalGgufArtifact {
   quant: string;
+  quant_label?: string;
   files: string[];
+  shard_files?: string[];
   total_size_bytes: number;
   is_split: boolean;
   shard_count: number;
   has_mmproj: boolean;
   mmproj_files: string[];
+  companion_mmproj?: string | null;
+  repo_id?: string;
+  required_channel?: LlamaCppChannel;
 }
 
 export type DownloadState =

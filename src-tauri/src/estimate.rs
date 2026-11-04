@@ -67,10 +67,7 @@ pub fn kv_bytes_per_token_hybrid(
 
 /// Fallback estimate of KV-cache bytes per token when specific layer dims are missing.
 pub fn estimate_kv_bytes_per_token(params_b: f64) -> f64 {
-    if params_b <= 0.0 {
-        return 0.0;
-    }
-    if params_b <= 3.5 {
+    if params_b <= 0.0 || params_b <= 3.5 {
         32_768.0
     } else if params_b <= 10.0 {
         131_072.0

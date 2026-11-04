@@ -7,6 +7,7 @@ import Library from "./pages/Library";
 import Servers from "./pages/Servers";
 import Settings from "./pages/Settings";
 import UpdateModal from "./components/UpdateModal";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { api } from "./api";
 import type { AppUpdateInfo } from "./types";
 
@@ -118,13 +119,15 @@ export default function App() {
 
         {/* Main */}
         <main className="flex-1 overflow-y-auto">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/search" element={<Search />} />
-            <Route path="/library" element={<Library />} />
-            <Route path="/servers" element={<Servers />} />
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
+          <ErrorBoundary variant="page" dismissLabel="Back to search">
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/search" element={<Search />} />
+              <Route path="/library" element={<Library />} />
+              <Route path="/servers" element={<Servers />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </ErrorBoundary>
         </main>
 
         {/* Update Modal */}

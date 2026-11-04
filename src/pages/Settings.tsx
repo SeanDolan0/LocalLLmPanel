@@ -113,6 +113,10 @@ export default function Settings() {
   const [gwInstruct, setGwInstruct] = useState<string | null>(null);
   const [gwEmbed, setGwEmbed] = useState<string | null>(null);
   const [llamacppStatus, setLlamacppStatus] = useState<import("../types").LlamacppInstallStatus | null>(null);
+  const [llamacppUpdates, setLlamacppUpdates] = useState<import("../types").LlamaCppUpdateStatus[] | null>(null);
+  const [checkingLlamacppUpdates, setCheckingLlamacppUpdates] = useState(false);
+  const [installingChannel, setInstallingChannel] = useState<string | null>(null);
+  const [llamacppMsg, setLlamacppMsg] = useState<string | null>(null);
   const [githubMsg, setGithubMsg] = useState<string | null>(null);
   const [hfTokenDirty, setHfTokenDirty] = useState(false);
   const [githubTokenDirty, setGithubTokenDirty] = useState(false);
@@ -155,6 +159,42 @@ export default function Settings() {
       setTimeout(() => setImportExportMsg(null), 3000);
     } catch (e) {
       setErr(`Export failed: ${e}`);
+    }
+  };
+
+  const checkLlamacppUpdates = async () => {
+    setCheckingLlamacppUpdates(true);
+    setLlamacppMsg(null);
+    try {
+      setLlamacppUpdates(await api.llamacppCheckUpdates());
+    } catch (e) {
+      setLlamacppMsg(`Update check failed: ${e}`);
+    } finally {
+      setCheckingLlamacppUpdates(false);
+    }
+  };
+
+  const installLlamacppChannel = async (channel: "upstream" | "prism") => {
+    const label = channel === "prism" ? "PrismML" : "Upstream";
+    setInstallingChannel(channel);
+    setLlamacppMsg(null);
+    try {
+      await api.installLlamacppChannel(channel);
+      const fresh = await api.llamacppStatus().catch(() => null);
+      if (fresh) setLlamacppStatus(fresh);
+      // The install persisted new channel config to disk; pull just that slice
+      // (not the whole settings object) so unsaved edits elsewhere survive.
+      const cfg = await api.settingsGet().catch(() => null);
+      if (cfg) {
+        setS((prev) => (prev ? { ...prev, llamacpp_channels: cfg.llamacpp_channels } : prev));
+      }
+      setLlamacppUpdates(null);
+      setLlamacppMsg(`${label} llama.cpp installed/updated.`);
+      setTimeout(() => setLlamacppMsg(null), 5000);
+    } catch (e) {
+      setLlamacppMsg(`${label} install failed: ${e}`);
+    } finally {
+      setInstallingChannel(null);
     }
   };
 
@@ -206,6 +246,9 @@ export default function Settings() {
     api.llamacppStatus().then(setLlamacppStatus).catch(() => {});
     api.checkAppUpdate(false).then((info) => setUpdateInfo(info)).catch(() => {});
   }, []);
+
+  const upstreamUpdate = llamacppUpdates?.find((u) => u.channel === "upstream");
+  const prismUpdate = llamacppUpdates?.find((u) => u.channel === "prism");
 
   useEffect(() => {
     let cancelled = false;
@@ -918,24 +961,81 @@ export default function Settings() {
                   }
                 />
               </Field>
-              <div className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 text-xs text-slate-400">
-                <div className="flex items-center gap-2 text-sm text-slate-200">
-                  <span className={`h-2 w-2 rounded-full ${llamacppStatus?.cuda_available ? "bg-emerald-400" : "bg-amber-400"}`} />
-                  Native llama.cpp (Upstream): {llamacppStatus?.installed ? (llamacppStatus.cuda_available ? "CUDA ready" : "installed, CUDA device unavailable") : "not installed"}
+              <div className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 text-xs text-slate-400 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm text-slate-200 min-w-0">
+                    <span className={`h-2 w-2 rounded-full shrink-0 ${llamacppStatus?.cuda_available ? "bg-emerald-400" : "bg-amber-400"}`} />
+                    <span className="truncate">
+                      Native llama.cpp (Upstream): {llamacppStatus?.installed ? (llamacppStatus.cuda_available ? "CUDA ready" : "installed, CUDA device unavailable") : "not installed"}
+                      {s.llamacpp_channels?.upstream?.installed_tag ? ` (tag ${s.llamacpp_channels.upstream.installed_tag})` : ""}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Button variant="ghost" className="text-[11px]" onClick={checkLlamacppUpdates} disabled={checkingLlamacppUpdates}>
+                      {checkingLlamacppUpdates ? <Spinner label="checking…" /> : "Check for updates"}
+                    </Button>
+                    <Button variant="subtle" className="text-[11px]" onClick={() => installLlamacppChannel("upstream")} disabled={installingChannel !== null}>
+                      {installingChannel === "upstream" ? <Spinner label="installing…" /> : upstreamUpdate?.update_available && upstreamUpdate.latest_tag ? `Update to ${upstreamUpdate.latest_tag}` : "Install / Reinstall"}
+                    </Button>
+                  </div>
                 </div>
                 {llamacppStatus?.devices?.length ? (
                   <div className="mt-1">Devices: {llamacppStatus.devices.map((d) => `${d.id} (${d.name})`).join(", ")}</div>
                 ) : (
                   <div className="mt-1">Install a CUDA build; Vulkan/CPU archives are not selected by this app.</div>
                 )}
+                {upstreamUpdate && (
+                  <div className="text-[11px]">
+                    {upstreamUpdate.latest_tag ? (
+                      upstreamUpdate.update_available ? (
+                        <span className="text-amber-300">Update available: {upstreamUpdate.installed_tag ?? "not installed"} → {upstreamUpdate.latest_tag}{upstreamUpdate.cuda_version ? ` (CUDA ${upstreamUpdate.cuda_version})` : ""}</span>
+                      ) : (
+                        <span className="text-emerald-300">Up to date (latest {upstreamUpdate.latest_tag})</span>
+                      )
+                    ) : (
+                      <span className="text-rose-300">{upstreamUpdate.warning ?? "Update check failed"}</span>
+                    )}
+                    {upstreamUpdate.warning && upstreamUpdate.latest_tag && (
+                      <div className="text-amber-300/80 mt-0.5">{upstreamUpdate.warning}</div>
+                    )}
+                  </div>
+                )}
               </div>
-              <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
-                <div className="flex items-center gap-2 text-sm text-indigo-200">
-                  <span className="h-2 w-2 rounded-full bg-indigo-400" />
-                  PrismML Channel: {s.llamacpp_channels?.prism?.installed_tag ? "installed" : "not installed"}
+              <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm text-indigo-200 min-w-0">
+                    <span className="h-2 w-2 rounded-full shrink-0 bg-indigo-400" />
+                    <span className="truncate">
+                      PrismML Channel: {s.llamacpp_channels?.prism?.installed_tag ? `installed (tag ${s.llamacpp_channels.prism.installed_tag})` : "not installed"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Button variant="subtle" className="text-[11px]" onClick={() => installLlamacppChannel("prism")} disabled={installingChannel !== null}>
+                      {installingChannel === "prism" ? <Spinner label="installing…" /> : prismUpdate?.update_available && prismUpdate.latest_tag && s.llamacpp_channels?.prism?.installed_tag ? `Update to ${prismUpdate.latest_tag}` : "Install / Reinstall"}
+                    </Button>
+                  </div>
                 </div>
                 <div className="mt-1 text-slate-400">Supports ternary quant formats (PQ2_0, PTQ1_0) and Hadamard activation transform for Bonsai 2 models.</div>
+                {prismUpdate && (
+                  <div className="text-[11px]">
+                    {prismUpdate.latest_tag ? (
+                      prismUpdate.update_available && s.llamacpp_channels?.prism?.installed_tag ? (
+                        <span className="text-amber-300">Update available: {prismUpdate.installed_tag} → {prismUpdate.latest_tag}{prismUpdate.cuda_version ? ` (CUDA ${prismUpdate.cuda_version})` : ""}</span>
+                      ) : (
+                        <span className="text-emerald-300">Up to date (latest {prismUpdate.latest_tag})</span>
+                      )
+                    ) : (
+                      <span className="text-rose-300">{prismUpdate.warning ?? "Update check failed"}</span>
+                    )}
+                    {prismUpdate.warning && prismUpdate.latest_tag && (
+                      <div className="text-amber-300/80 mt-0.5">{prismUpdate.warning}</div>
+                    )}
+                  </div>
+                )}
               </div>
+              {llamacppMsg && (
+                <div className="sm:col-span-2 text-[11px] text-slate-300">{llamacppMsg}</div>
+              )}
 
               <div className="sm:col-span-2">
                 <label className="flex items-start gap-3 cursor-pointer select-none rounded-lg border border-edge bg-surface/60 p-3 hover:bg-surface/80 transition-colors">

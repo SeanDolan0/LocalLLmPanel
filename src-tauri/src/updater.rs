@@ -261,6 +261,7 @@ pub async fn download_and_install_update_impl(
         Some(url) => url,
         None => bail!("No executable asset available for download in release {}", info.latest_version),
     };
+    let is_installer = info.is_installer;
     let asset_name = info
         .asset_name
         .unwrap_or_else(|| "LocalLLMPanel-setup.exe".into());
@@ -403,7 +404,6 @@ pub async fn download_and_install_update_impl(
         }
     }
 
-    // 3. Mark ready and launch
     let _ = app.emit(
         "app-update-progress",
         AppUpdateProgress {
@@ -416,14 +416,128 @@ pub async fn download_and_install_update_impl(
         },
     );
 
-    // Spawn detached installer process
-    launch_installer(&dest_file)?;
+    if is_installer {
+        // Silent NSIS update: a detached PowerShell helper waits for this
+        // process to exit (exiting triggers RunEvent::Exit, which stops every
+        // AI server first), runs the installer with /S, then relaunches the
+        // installed binary. The UI never needs to stay open for questions.
+        #[cfg(target_os = "windows")]
+        {
+            launch_silent_installer_and_exit(&app, &dest_file)?;
+            return Ok(UpdateLaunchResult {
+                success: true,
+                message: "Update downloaded. Local LLM Panel will close now; the updater will install it silently in the background and relaunch it automatically.".to_string(),
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            launch_installer(&dest_file)?;
+            Ok(UpdateLaunchResult {
+                success: true,
+                message: "Installer launched. You can exit Local LLM Panel to complete the update.".to_string(),
+            })
+        }
+    } else {
+        // Portable standalone binary: it cannot replace the running process,
+        // so fall back to letting the user restart.
+        launch_installer(&dest_file)?;
+        Ok(UpdateLaunchResult {
+            success: true,
+            message: "Standalone executable launched. Close Local LLM Panel and run it to apply the update.".to_string(),
+        })
+    }
+}
 
-    Ok(UpdateLaunchResult {
-        success: true,
-        message: "Installer launched. You can exit Local LLM Panel to complete the update."
-            .to_string(),
-    })
+#[cfg(target_os = "windows")]
+fn launch_silent_installer_and_exit(app: &AppHandle, path: &PathBuf) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let temp_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    let script = temp_dir.join(format!("apply-update-{}.ps1", std::process::id()));
+    let log = temp_dir.join("update-apply.log");
+
+    // Environment variables carry the parameters so paths with spaces or odd
+    // characters never need quoting inside the script.
+    let ps = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$installer = $env:LOCALLLMPANEL_UPDATE_INSTALLER
+$appPid = [int]$env:LOCALLLMPANEL_UPDATE_PID
+$log = $env:LOCALLLMPANEL_UPDATE_LOG
+
+function Write-Log([string]$msg) {
+  "[$(Get-Date -Format o)] $msg" | Out-File $log -Encoding utf8 -Append
+}
+
+Write-Log "update helper started; waiting for pid $appPid to exit"
+$deadline = (Get-Date).AddSeconds(240)
+while ((Get-Process -Id $appPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+  Start-Sleep -Milliseconds 400
+}
+Start-Sleep -Milliseconds 400
+
+Write-Log "app exited; running installer $installer /S"
+$p = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+Write-Log "installer exit code: $($p.ExitCode)"
+
+# Locate the installed executable for relaunch: prefer the value the
+# installer registered, then fall back to the known per-user install dirs.
+$candidates = New-Object System.Collections.Generic.List[string]
+foreach ($hive in 'HKCU:','HKLM:') {
+  $reg = Get-ItemProperty "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Local LLM Panel" -ErrorAction SilentlyContinue
+  if ($reg -and $reg.InstallLocation) {
+    $candidates.Add((Join-Path $reg.InstallLocation.Trim('"') 'llm-panel.exe'))
+  }
+}
+$candidates.Add("$env:LOCALAPPDATA\Local LLM Panel\llm-panel.exe")
+$candidates.Add("$env:LOCALAPPDATA\Programs\Local LLM Panel\llm-panel.exe")
+$candidates.Add("${env:ProgramFiles}\Local LLM Panel\llm-panel.exe")
+$candidates.Add("${env:ProgramFiles(x86)}\Local LLM Panel\llm-panel.exe")
+
+$relaunched = $false
+foreach ($exe in $candidates) {
+  if ($exe -and (Test-Path $exe)) {
+    Start-Process $exe | Out-Null
+    Write-Log "relaunched $exe"
+    $relaunched = $true
+    break
+  }
+}
+if (-not $relaunched) {
+  Write-Log "could not locate installed llm-panel.exe; user must start it manually"
+}
+Remove-Item $MyInvocation.MyCommand.Path -Force
+"#;
+    std::fs::write(&script, ps)
+        .with_context(|| format!("Failed to write update helper script at {}", script.display()))?;
+
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.env("LOCALLLMPANEL_UPDATE_INSTALLER", path.as_os_str())
+        .env("LOCALLLMPANEL_UPDATE_PID", std::process::id().to_string())
+        .env("LOCALLLMPANEL_UPDATE_LOG", log.as_os_str())
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&script)
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+    cmd.spawn()
+        .with_context(|| format!("Failed to launch update helper at {}", script.display()))?;
+
+    // Give the helper a moment to start (it waits for this process to die),
+    // then exit. app.exit() triggers RunEvent::Exit, whose handler stops all
+    // AI servers (vLLM/llama.cpp) before the process disappears.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    app.exit(0);
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

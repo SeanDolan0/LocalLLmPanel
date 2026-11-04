@@ -313,7 +313,12 @@ pub async fn enrich(
             .trim_end_matches("-GGUF")
             .trim_end_matches("-gguf");
         let org = model_id.split('/').next().unwrap_or("");
-        let candidates = [format!("{org}/{clean_base}"), clean_base.to_string()];
+        let mut candidates = Vec::new();
+        if let Some(inferred) = crate::model_intelligence::infer_base_model_id(model_id) {
+            candidates.push(inferred);
+        }
+        candidates.push(format!("{org}/{clean_base}"));
+        candidates.push(clean_base.to_string());
         for cand in candidates {
             if cand != model_id {
                 if let Some(c) = fetch_raw(client, &cand, "config.json", token).await {
@@ -419,7 +424,15 @@ pub async fn enrich(
             } else {
                 (estimate::DEFAULT_CONTEXT, "generic default", true)
             };
-        let pb = estimate::parse_params_from_name(model_id);
+        let mut pb = estimate::parse_params_from_name(model_id);
+        if pb.is_none() {
+            let fam_info = crate::model_intelligence::infer_model_family(model_id, None, &[]);
+            if let Some(p_class) = &fam_info.parameter_class {
+                if let Some(num_str) = p_class.strip_suffix('B') {
+                    pb = num_str.parse::<f64>().ok();
+                }
+            }
+        }
         (
             pb,
             context,
@@ -1098,13 +1111,38 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
 
     std::thread::spawn(move || {
         let script = format!(
-            "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\n{}cd \"$venv_dir/..\" && . \"$venv_dir/bin/activate\" && HF_HUB_DISABLE_TQDM=1 {}{}hf download {} 2>&1 || echo __HF_PULL_FAILED__",
-            crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
-            venv_literal,
-            home_env,
-            offline_env,
-            token_env,
-            crate::wsl::shell_quote_wsl(&mid),
+            r#"{tilde_snippet}
+venv_dir=$(__llm_panel_expand_tilde {venv_literal})
+{home_env}if [ ! -d "$venv_dir" ]; then
+    echo "Python virtual environment not found at $venv_dir. Please complete WSL environment setup in Settings." >&2
+    echo __HF_PULL_FAILED__
+    exit 1
+fi
+cd "$venv_dir/.."
+if [ -f "$venv_dir/bin/activate" ]; then
+    . "$venv_dir/bin/activate"
+fi
+
+DOWNLOAD_CMD=""
+if command -v hf >/dev/null 2>&1; then
+    DOWNLOAD_CMD="hf download"
+elif command -v huggingface-cli >/dev/null 2>&1; then
+    DOWNLOAD_CMD="huggingface-cli download"
+elif [ -x "$venv_dir/bin/python" ]; then
+    DOWNLOAD_CMD="\"$venv_dir/bin/python\" -m huggingface_hub.cli.core download"
+else
+    echo "Neither 'hf' nor 'huggingface-cli' found in virtual environment. Please run environment provisioning in Settings." >&2
+    echo __HF_PULL_FAILED__
+    exit 1
+fi
+
+HF_HUB_DISABLE_TQDM=1 {offline_env}{token_env}$DOWNLOAD_CMD {model_arg} 2>&1 || echo __HF_PULL_FAILED__"#,
+            tilde_snippet = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            venv_literal = venv_literal,
+            home_env = home_env,
+            offline_env = offline_env,
+            token_env = token_env,
+            model_arg = crate::wsl::shell_quote_wsl(&mid),
         );
         let model_ev = model_id.clone();
         let app_ev = app.clone();
@@ -1146,16 +1184,24 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
         };
         let err_msg = if state_label == "failed" {
             let clean_err: String = out.stderr.chars().filter(|c| *c != '\u{0}').collect();
-            let clean_err = clean_err.trim();
-            if !clean_err.is_empty() {
-                Some(clean_err.to_string())
+            let err_lines: Vec<&str> = clean_err
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.contains("__HF_PULL_FAILED__"))
+                .collect();
+            if let Some(first_or_last) = err_lines.last() {
+                Some(first_or_last.to_string())
             } else {
                 let clean_out: String = out.stdout.chars().filter(|c| *c != '\u{0}').collect();
-                let last_line = clean_out.lines().last().unwrap_or("").trim();
-                if !last_line.is_empty() {
+                let out_lines: Vec<&str> = clean_out
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.contains("__HF_PULL_FAILED__"))
+                    .collect();
+                if let Some(last_line) = out_lines.last() {
                     Some(last_line.to_string())
                 } else {
-                    Some("Download failed".to_string())
+                    Some("Download failed. Check WSL and Python environment status in Settings.".to_string())
                 }
             }
         } else {

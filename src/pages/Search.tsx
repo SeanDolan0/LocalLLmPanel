@@ -10,6 +10,7 @@ import {
   fmtTokPerSec,
 } from "../api";
 import { Badge, Button, inputCls, Spinner } from "../ui";
+import ErrorBoundary from "../components/ErrorBoundary";
 import type {
   DiscoveryCategory,
   DownloadJob,
@@ -661,22 +662,41 @@ export default function Search() {
     return ids;
   }, [recommended, results, selectedModel]);
 
+  const isGgufRepoId = useCallback(
+    (repoId: string) => {
+      const lower = repoId.toLowerCase();
+      return (
+        ggufRepoIds.has(lower) ||
+        lower.endsWith("-gguf") ||
+        lower.includes(".gguf") ||
+        lower.includes("/gguf-") ||
+        lower.includes("_gguf") ||
+        lower.includes("-gguf-")
+      );
+    },
+    [ggufRepoIds]
+  );
+
   const pull = async (repoId: string, quant?: string) => {
     if (isModelInstalled(repoId)) return;
     try {
-      if (ggufRepoIds.has(repoId.toLowerCase())) {
+      if (isGgufRepoId(repoId)) {
         const artifacts = await api.inspectModelArtifacts(repoId).catch(() => []);
-        const target = artifacts.find(
-          (a) => !quant || a.quant.toLowerCase() === quant.toLowerCase()
-        );
-        if (target && target.files.length > 0) {
-          await api.downloadStart(repoId, repoId, target.quant, target.files, "llamacpp");
+        const target = artifacts.find((a) => {
+          const q = (a.quant || a.quant_label || "").toLowerCase();
+          return !quant || q === quant.toLowerCase();
+        });
+        const targetFiles = target?.files || target?.shard_files || [];
+        const targetQuant = target?.quant || target?.quant_label || quant || "GGUF";
+
+        if (target && targetFiles.length > 0) {
+          await api.downloadStart(repoId, repoId, targetQuant, targetFiles, "llamacpp");
           refreshQueue();
           return;
         }
         const files = await api.ggufFiles(repoId).catch(() => []);
         const targets = files.filter(
-          (f) => !f.is_mmproj && (!quant || f.quant === quant)
+          (f) => !f.is_mmproj && (!quant || (f.quant && f.quant.toLowerCase() === quant.toLowerCase()))
         );
         if (targets.length > 0) {
           await api.downloadStart(
@@ -689,8 +709,7 @@ export default function Search() {
           refreshQueue();
           return;
         }
-        // Fallback to vLLM native download if no GGUF files exist in this repository
-        await api.pullModel(repoId);
+        throw new Error(`No downloadable GGUF files found in repository ${repoId}`);
       } else {
         await api.pullModel(repoId);
       }
@@ -1328,16 +1347,23 @@ export default function Search() {
 
       {/* Model Details & Discovered Quant Variants Modal */}
       {selectedModel && (
-        <ModelDetailModal
-          model={selectedModel}
-          onClose={() => setSelectedModel(null)}
-          pulls={pulls}
-          onPull={pull}
-          onCancelPull={cancelPull}
-          onDeploy={deploy}
-          totalVramMb={env?.gpu?.vram_total_mb ?? null}
-          isModelInstalled={isModelInstalled}
-        />
+        <ErrorBoundary
+          key={selectedModel.id}
+          variant="inline"
+          dismissLabel="Close details"
+          onDismiss={() => setSelectedModel(null)}
+        >
+          <ModelDetailModal
+            model={selectedModel}
+            onClose={() => setSelectedModel(null)}
+            pulls={pulls}
+            onPull={pull}
+            onCancelPull={cancelPull}
+            onDeploy={deploy}
+            totalVramMb={env?.gpu?.vram_total_mb ?? null}
+            isModelInstalled={isModelInstalled}
+          />
+        </ErrorBoundary>
       )}
     </div>
   );
@@ -1704,21 +1730,78 @@ function ModelDetailModal({
   totalVramMb: number | null;
   isModelInstalled?: (modelId?: string | null) => boolean;
 }) {
-  const sortedVariants = useMemo(() => {
-    return [...model.variants].sort((a, b) => b.fit.score - a.fit.score);
-  }, [model.variants]);
-
-  const hasGguf = sortedVariants.some(
-    (vwf) => vwf.variant.format === "GGUF" || vwf.fit.format_support === "Experimental"
-  );
-
   const [repoArtifactsMap, setRepoArtifactsMap] = useState<Record<string, LogicalGgufArtifact[]>>({});
+
+  const allVariants = useMemo(() => {
+    const existing = [...(model.variants ?? [])];
+    const existingLabels = new Set(
+      existing.map((v) => `${(v?.variant?.repo_id ?? "").toLowerCase()}:${(v?.variant?.label ?? "").toLowerCase()}`)
+    );
+
+    // If any GGUF artifacts were discovered that aren't yet in model.variants, include them
+    for (const [repoLower, artifacts] of Object.entries(repoArtifactsMap)) {
+      for (const art of artifacts) {
+        const qLabel = art.quant || art.quant_label;
+        if (!qLabel) continue;
+        const key = `${repoLower}:${qLabel.toLowerCase()}`;
+        if (!existingLabels.has(key)) {
+          const files = art.files || art.shard_files || [];
+          const primaryFile = files[0] ?? null;
+          const weightGb = (art.total_size_bytes || 0) / (1024 * 1024 * 1024);
+          const vramTotalGb = (totalVramMb ?? 16384) / 1024;
+          const vramPct = Math.min(255, Math.round((weightGb / Math.max(1, vramTotalGb)) * 100));
+          const verdict: FitVerdict = vramPct <= 75 ? "Comfortable" : vramPct <= 95 ? "Constrained" : "DoesNotFit";
+
+          existing.push({
+            variant: {
+              repo_id: art.repo_id || repoLower,
+              format: "GGUF",
+              label: qLabel,
+              weight_bytes: art.total_size_bytes,
+              params_b: model.params_b ?? null,
+              gguf_file: primaryFile,
+              vllm_native: false,
+              required_channel: art.required_channel || "upstream",
+            },
+            fit: {
+              verdict,
+              run_mode: vramPct <= 95 ? "Gpu" : "CpuOffload",
+              score: vramPct <= 75 ? 90 : vramPct <= 95 ? 65 : 20,
+              weight_gb: weightGb,
+              vram_context: model.context ?? 4096,
+              extended_context: model.context ?? 4096,
+              native_context: model.context ?? 4096,
+              usable_context: model.context ?? 4096,
+              swap_space_gb: 0,
+              cpu_offload_gb: vramPct > 95 ? Math.ceil(weightGb) : 0,
+              est_tok_s: null,
+              measured_tok_s: null,
+              vram_pct: vramPct,
+              ram_pct: 0,
+              format_support: "Experimental",
+              reason: `Discovered from ${art.repo_id || repoLower}`,
+              notes: [],
+            },
+          });
+          existingLabels.add(key);
+        }
+      }
+    }
+
+    return existing
+      .filter((vwf) => vwf && vwf.variant && vwf.fit)
+      .sort((a, b) => (b.fit?.score ?? 0) - (a.fit?.score ?? 0));
+  }, [model.variants, model.params_b, model.context, repoArtifactsMap, totalVramMb]);
+
+  const hasGguf = allVariants.some(
+    (vwf) => vwf.variant.format === "GGUF" || vwf.fit?.format_support === "Experimental"
+  );
 
   useEffect(() => {
     const ggufRepos = Array.from(
       new Set(
-        model.variants
-          .filter((v) => v.variant.format === "GGUF")
+        (model.variants ?? [])
+          .filter((v) => v?.variant?.format === "GGUF")
           .map((v) => v.variant.repo_id)
       )
     );
@@ -1751,7 +1834,7 @@ function ModelDetailModal({
           <div className="space-y-1 min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-lg font-bold text-slate-100 truncate">
-                {model.id.split("/").pop()}
+                {(model.id ?? "unknown").split("/").pop()}
               </h2>
               {model.publisher_tier && (
                 <span
@@ -1883,19 +1966,19 @@ function ModelDetailModal({
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               <div className="rounded-lg bg-surface-2/70 p-2 text-center">
                 <div className="text-[10px] text-slate-500 uppercase">Quality (Benchmark)</div>
-                <div className="text-base font-bold text-slate-200 mt-0.5">{model.score_components.quality.toFixed(1)}</div>
+                <div className="text-base font-bold text-slate-200 mt-0.5">{(model.score_components.quality ?? 0).toFixed(1)}</div>
               </div>
               <div className="rounded-lg bg-surface-2/70 p-2 text-center">
                 <div className="text-[10px] text-slate-500 uppercase">Speed (Tokens/sec)</div>
-                <div className="text-base font-bold text-cyan-300 mt-0.5">{model.score_components.speed.toFixed(1)}</div>
+                <div className="text-base font-bold text-cyan-300 mt-0.5">{(model.score_components.speed ?? 0).toFixed(1)}</div>
               </div>
               <div className="rounded-lg bg-surface-2/70 p-2 text-center">
                 <div className="text-[10px] text-slate-500 uppercase">Fit (Hardware Headroom)</div>
-                <div className="text-base font-bold text-emerald-300 mt-0.5">{model.score_components.fit.toFixed(1)}</div>
+                <div className="text-base font-bold text-emerald-300 mt-0.5">{(model.score_components.fit ?? 0).toFixed(1)}</div>
               </div>
               <div className="rounded-lg bg-surface-2/70 p-2 text-center">
                 <div className="text-[10px] text-slate-500 uppercase">Context (Capacity)</div>
-                <div className="text-base font-bold text-indigo-300 mt-0.5">{model.score_components.context.toFixed(1)}</div>
+                <div className="text-base font-bold text-indigo-300 mt-0.5">{(model.score_components.context ?? 0).toFixed(1)}</div>
               </div>
             </div>
 
@@ -1918,7 +2001,7 @@ function ModelDetailModal({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
             <div>
               <h3 className="text-sm font-semibold text-slate-200">
-                Discovered Quantization Variants ({sortedVariants.length})
+                Discovered Quantization Variants ({allVariants.length})
               </h3>
               <p className="text-xs text-slate-400">
                 Sorted by hardware fit score for your GPU. Select any variant to pull or deploy.
@@ -1944,28 +2027,34 @@ function ModelDetailModal({
             </div>
           )}
 
-          {sortedVariants.length === 0 ? (
+          {allVariants.length === 0 ? (
             <div className="rounded-xl border border-edge bg-surface-3/30 p-6 text-center text-sm text-slate-400">
               No specific quantization variants discovered. Deploying will use the default baseline format.
             </div>
           ) : (
             <div className="space-y-2.5 max-h-[48vh] overflow-y-auto pr-1">
-              {sortedVariants.map((vwf, idx) => {
+              {allVariants.map((vwf, idx) => {
                 const { variant, fit } = vwf;
                 const best = getBestVariant(model);
                 const isBest = vwf === best;
-                const isGguf = variant.format === "GGUF" || fit.format_support === "Experimental";
+                const repoIdLower = (variant.repo_id ?? "").toLowerCase();
+                const isGguf = variant.format === "GGUF" || fit?.format_support === "Experimental";
                 const requiresPrism = variant.required_channel === "prism";
                 const pullState = pulls[variant.repo_id] || (isBest ? pulls[model.id] : undefined);
-                const tokS = fit.measured_tok_s ?? fit.est_tok_s;
+                const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
 
-                const repoArtifacts = repoArtifactsMap[variant.repo_id.toLowerCase()] || [];
-                const matchingArtifact = repoArtifacts.find(
-                  (a) =>
-                    a.quant.toLowerCase() === variant.label.toLowerCase() ||
-                    (variant.format === "GGUF" && a.quant.toLowerCase() === (variant.format || "").toLowerCase())
-                );
-                const isExternalQuantizer = variant.repo_id.toLowerCase() !== model.id.toLowerCase();
+                const repoArtifacts = repoArtifactsMap[repoIdLower] || [];
+                const matchingArtifact = repoArtifacts.find((a) => {
+                  const q = (a.quant || a.quant_label || "").toLowerCase();
+                  const vLabel = (variant.label || "").toLowerCase();
+                  const vFmt = (variant.format || "").toLowerCase();
+                  return q === vLabel || (variant.format === "GGUF" && (q === vFmt || !vLabel));
+                });
+                const isExternalQuantizer = repoIdLower !== (model.id ?? "").toLowerCase();
+                const matchingFiles = matchingArtifact?.files || matchingArtifact?.shard_files || (variant.gguf_file ? [variant.gguf_file] : []);
+                const matchingQuant = matchingArtifact?.quant || matchingArtifact?.quant_label || variant.label || "GGUF";
+                const shardCount = matchingArtifact?.shard_count ?? matchingFiles.length;
+                const hasMmproj = matchingArtifact?.has_mmproj ?? !!matchingArtifact?.companion_mmproj;
 
                 return (
                   <div
@@ -1991,7 +2080,7 @@ function ModelDetailModal({
                               className="inline-flex items-center gap-1 rounded bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 text-[10px] text-indigo-300 font-medium"
                               title={`Community quantizer: ${variant.repo_id}`}
                             >
-                              via {variant.repo_id.split("/")[0]}
+                              via {(variant.repo_id ?? "").split("/")[0]}
                             </span>
                           )}
                           {isBest && (
@@ -2032,16 +2121,16 @@ function ModelDetailModal({
 
                         {matchingArtifact && (
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                            {matchingArtifact.is_split ? (
+                            {matchingArtifact.is_split || shardCount > 1 ? (
                               <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[10px] text-amber-200 font-medium">
-                                📦 Multi-shard: {matchingArtifact.shard_count} files ({fmtBytes(matchingArtifact.total_size_bytes)})
+                                📦 Multi-shard: {shardCount} files ({fmtBytes(matchingArtifact.total_size_bytes)})
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 rounded bg-surface-2 border border-edge px-1.5 py-0.5 text-[10px] text-slate-300">
                                 Exact size: {fmtBytes(matchingArtifact.total_size_bytes)}
                               </span>
                             )}
-                            {matchingArtifact.has_mmproj && (
+                            {hasMmproj && (
                               <span className="inline-flex items-center gap-1 rounded bg-purple-500/15 border border-purple-500/30 px-1.5 py-0.5 text-[10px] text-purple-200">
                                 👁️ Includes mmproj companion
                               </span>
@@ -2054,7 +2143,7 @@ function ModelDetailModal({
                           <div className="rounded bg-surface-2/60 p-2">
                             <div className="text-[10px] text-slate-500">Weight & VRAM</div>
                             <div className="font-semibold text-slate-200">
-                              {fit.weight_gb.toFixed(1)} GB
+                              {(fit.weight_gb ?? 0).toFixed(1)} GB
                               <span className={`ml-1 text-[11px] ${fit.vram_pct > 90 ? "text-amber-400 font-bold" : "text-slate-400"}`}>
                                 ({fit.vram_pct}%)
                               </span>
@@ -2118,24 +2207,10 @@ function ModelDetailModal({
                           <PullStateButton
                             pullState={pullState}
                             targetId={variant.repo_id}
-                            quant={variant.format === "GGUF" ? variant.label : undefined}
+                            quant={variant.format === "GGUF" ? matchingQuant : undefined}
                             isInstalled={isModelInstalled ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id) : false}
-                            onPull={(_id, q) => {
-                              if (variant.format === "GGUF") {
-                                if (matchingArtifact && matchingArtifact.files.length > 0) {
-                                  api.downloadStart(
-                                    model.id,
-                                    variant.repo_id,
-                                    matchingArtifact.quant,
-                                    matchingArtifact.files,
-                                    "llamacpp"
-                                  ).catch((err) => console.error(err));
-                                } else {
-                                  onPull(variant.repo_id, q);
-                                }
-                              } else {
-                                api.pullModel(variant.repo_id || model.id).catch((err) => console.error(err));
-                              }
+                            onPull={(_id, _q) => {
+                              onPull(variant.repo_id || model.id, matchingQuant);
                             }}
                             onCancelPull={onCancelPull}
                             pullButtonClassName="text-xs px-2.5 py-1"

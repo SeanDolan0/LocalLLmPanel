@@ -125,8 +125,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::env_status,
             commands::provision,
+            commands::update_vllm,
             commands::install_llamacpp,
             commands::install_llamacpp_channel,
+            commands::llamacpp_check_updates,
             commands::llamacpp_status,
             commands::github_access,
             commands::clear_github_token,

@@ -115,6 +115,17 @@ pub fn score_variant(
     channel_installed: Option<crate::state::LlamaCppChannel>,
 ) -> FitResult {
     let params_b = variant.params_b.or(arch.params_b).unwrap_or(0.0);
+    let params_b = if params_b <= 0.0 && variant.weight_bytes.unwrap_or(0) > 0 {
+        let wb = variant.weight_bytes.unwrap() as f64 / (1024.0 * 1024.0 * 1024.0);
+        let bpp = estimate::bytes_per_param(&variant.quant_str);
+        if bpp > 0.0 {
+            (wb / bpp).max(0.5)
+        } else {
+            params_b
+        }
+    } else {
+        params_b
+    };
     
     // Determine format support based on channel availability
     let format_support = if variant.is_gguf {

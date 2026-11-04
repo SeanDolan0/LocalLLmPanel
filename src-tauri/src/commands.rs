@@ -297,6 +297,145 @@ pub async fn install_llamacpp_channel(
 }
 
 #[tauri::command]
+pub async fn llamacpp_check_updates(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::llamacpp_install::LlamaCppUpdateStatus>, String> {
+    let cfg = state.config();
+    let token = {
+        let t = cfg.github_token.trim().to_string();
+        (!t.is_empty()).then_some(t)
+    };
+    let upstream = cfg
+        .llamacpp_channels
+        .get(&crate::state::LlamaCppChannel::Upstream)
+        .cloned()
+        .unwrap_or_default();
+    let prism = cfg
+        .llamacpp_channels
+        .get(&crate::state::LlamaCppChannel::Prism)
+        .cloned()
+        .unwrap_or_default();
+    // reqwest::blocking must not run on the async runtime, so hand the whole
+    // check to a blocking thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::with_capacity(2);
+        for (channel, cfg_channel) in [
+            (crate::state::LlamaCppChannel::Upstream, upstream),
+            (crate::state::LlamaCppChannel::Prism, prism),
+        ] {
+            out.push(crate::llamacpp_install::check_update(
+                channel,
+                cfg_channel.installed_tag.as_deref(),
+                token.as_deref(),
+            ));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("llamacpp update check task error: {e}"))?
+}
+
+#[derive(Serialize)]
+pub struct UpdateVllmResult {
+    pub previous_version: Option<String>,
+    pub version: Option<String>,
+}
+
+/// Upgrade vLLM (and huggingface_hub) inside the provisioned WSL venv to the
+/// latest CUDA wheels, then re-verify the import. Emits `wsl-log` events with
+/// phase "vllm-update" so the Dashboard log panel can render the output.
+#[tauri::command]
+pub async fn update_vllm(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<UpdateVllmResult, String> {
+    let st = (*state).clone();
+    let app = app.clone();
+    let cfg = st.config();
+    let distro = st.resolve_distro();
+    let venv = cfg.venv_dir.clone();
+    st.provisioning.store(true, std::sync::atomic::Ordering::Relaxed);
+    let res = tauri::async_runtime::spawn_blocking(move || -> Result<UpdateVllmResult, String> {
+        let on_log = |phase: &str, line: &str| {
+            let _ = app.emit(
+                "wsl-log",
+                serde_json::json!({ "phase": phase, "line": line }),
+            );
+        };
+        let venv_assignment = format!(
+            "{}venv_dir=$(__llm_panel_expand_tilde {})",
+            crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            crate::wsl::shell_quote_wsl(&venv)
+        );
+        let version_of = |distro: &str| -> Option<String> {
+            let out = crate::wsl::run_script(
+                distro,
+                &format!(
+                    "{venv_assignment}\n\"$venv_dir/bin/python\" -c 'import vllm; print(vllm.__version__)' 2>/dev/null || true"
+                ),
+            );
+            let v = out.stdout.trim().to_string();
+            (!v.is_empty()).then_some(v)
+        };
+        let previous_version = version_of(&distro);
+        on_log("vllm-update", "upgrading vllm + huggingface_hub to the latest CUDA wheels.");
+        let mut out = crate::wsl::run_script_stream(
+            &distro,
+            &format!(
+                "{venv_assignment}\nexport PATH=\"$HOME/.local/bin:$PATH\"; cd ~ && uv pip install --python \"$venv_dir/bin/python\" -U vllm 'huggingface_hub[cli]' 2>&1"
+            ),
+            |l| on_log("vllm-update", l),
+        );
+        if !out.ok {
+            on_log("vllm-update", "uv path failed, falling back to the venv's pip.");
+            let fallback = crate::wsl::run_script_stream(
+                &distro,
+                &format!(
+                    "{venv_assignment}\n\"$venv_dir/bin/python\" -m pip install -U vllm 'huggingface_hub[cli]' 2>&1"
+                ),
+                |l| on_log("vllm-update", l),
+            );
+            if fallback.ok {
+                out = fallback;
+            } else {
+                return Err(format!(
+                    "vllm upgrade failed (uv: {}; pip: {})",
+                    out.combined().trim(),
+                    fallback.combined().trim()
+                ));
+            }
+        }
+        let version = version_of(&distro);
+        if version.is_none() {
+            return Err(format!(
+                "vllm upgrade appeared to succeed but the venv can no longer import vllm: {}",
+                out.combined().trim()
+            ));
+        }
+        on_log(
+            "vllm-update",
+            &format!("vllm updated: {} -> {}", previous_version.as_deref().unwrap_or("not installed"), version.as_deref().unwrap_or("?")),
+        );
+        Ok(UpdateVllmResult {
+            previous_version,
+            version,
+        })
+    })
+    .await
+    .map_err(|e| format!("update vllm task error: {e}"))?;
+    st.provisioning.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(res) = &res {
+        // Keep the cached provision report in sync so the Dashboard reports
+        // the version that is actually installed now.
+        if let Some(mut cached) = crate::state::load_provision_report_cache() {
+            cached.vllm_version = res.version.clone();
+            crate::state::save_provision_report_cache(&cached);
+        }
+    }
+    res
+}
+
+#[tauri::command]
 pub async fn llamacpp_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::llamacpp_install::InstallStatus, String> {
@@ -678,7 +817,12 @@ async fn hydrate_gguf_variants(
         .iter()
         .enumerate()
         .filter_map(|(idx, model)| {
-            if !model.variants.iter().any(|v| v.variant.format == QuantFormat::GGUF) {
+            let id_lower = model.id.to_ascii_lowercase();
+            let is_gguf_repo = id_lower.ends_with("-gguf")
+                || id_lower.contains(".gguf")
+                || id_lower.contains("_gguf");
+            let has_gguf_variant = model.variants.iter().any(|v| v.variant.format == QuantFormat::GGUF);
+            if !has_gguf_variant && !is_gguf_repo && model.gguf_sources.is_empty() {
                 return None;
             }
             // Prefer the declared GGUF publisher; otherwise trust the id only
@@ -689,11 +833,11 @@ async fn hydrate_gguf_variants(
                 .first()
                 .map(|s| s.repo.clone())
                 .or_else(|| {
-                    model
-                        .id
-                        .to_ascii_lowercase()
-                        .ends_with("-gguf")
-                        .then(|| model.id.clone())
+                    if is_gguf_repo {
+                        Some(model.id.clone())
+                    } else {
+                        None
+                    }
                 })?;
             Some((idx, repo))
         })
@@ -926,7 +1070,10 @@ pub async fn discovery_feed(
     match live_result {
         Ok(records) if !records.is_empty() => {
             st.discovery_cache.set_feed(&cat_enum, records.clone());
-            let scored = process_records_with_fit(&st, records, cat_enum).await;
+            let mut scored = process_records_with_fit(&st, records, cat_enum).await;
+            let hw = search_hardware_profile(&st);
+            let mem = st.config().memory_settings;
+            hydrate_gguf_variants(&st, &mut scored, &hw, &mem).await;
             Ok(scored)
         }
         _ => {
@@ -1000,7 +1147,9 @@ pub async fn search_models_with_fit(
         } else {
             crate::hf_discovery::DiscoveryCategory::ForYou
         };
-        process_records_with_fit(&st, hf_records, cat).await
+        let mut scored = process_records_with_fit(&st, hf_records, cat).await;
+        hydrate_gguf_variants(&st, &mut scored, &hw, &mem).await;
+        scored
     } else {
         Vec::new()
     };

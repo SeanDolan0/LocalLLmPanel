@@ -138,7 +138,7 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
                   {progress.phase === "verifying"
                     ? "Verifying checksum (SHA256)..."
                     : progress.phase === "ready"
-                    ? "Launching installer..."
+                    ? "Installing silently & restarting..."
                     : "Downloading update..."}
                 </span>
                 <span className="text-indigo-300">{progress.percent.toFixed(1)}%</span>
@@ -162,7 +162,7 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
           {/* Success notice */}
           {launchSuccess && (
             <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3.5 text-xs text-emerald-300 space-y-1">
-              <div className="font-semibold text-emerald-200">✓ Installer Launched</div>
+              <div className="font-semibold text-emerald-200">✓ Restarting to finish the update</div>
               <div>{launchSuccess}</div>
             </div>
           )}
@@ -197,7 +197,7 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
                 disabled={downloading || !info.download_url}
                 className="text-xs"
               >
-                {downloading ? "Downloading..." : "Download & Install"}
+                {downloading ? "Updating..." : "Update Now"}
               </Button>
             )}
           </div>

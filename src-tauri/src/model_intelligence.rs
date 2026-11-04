@@ -15,9 +15,19 @@ use crate::state::LlamaCppChannel;
 pub struct LogicalGgufArtifact {
     pub repo_id: String,
     pub quant_label: String,
+    #[serde(default)]
+    pub quant: String,
     pub total_size_bytes: u64,
     pub shard_files: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
     pub is_split: bool,
+    #[serde(default)]
+    pub shard_count: usize,
+    #[serde(default)]
+    pub has_mmproj: bool,
+    #[serde(default)]
+    pub mmproj_files: Vec<String>,
     pub companion_mmproj: Option<String>,
     pub required_channel: LlamaCppChannel,
 }
@@ -57,6 +67,9 @@ pub fn group_gguf_repo_files(
         let total_size_bytes = shard_list.iter().map(|f| f.size_bytes).sum();
         let shard_files: Vec<String> = shard_list.iter().map(|f| f.path.clone()).collect();
         let is_split = shard_files.len() > 1;
+        let shard_count = shard_files.len();
+        let has_mmproj = mmproj_file.is_some();
+        let mmproj_files = mmproj_file.clone().into_iter().collect();
 
         let required_channel = if hf::quant_requires_prism_channel(&quant_label) {
             LlamaCppChannel::Prism
@@ -66,10 +79,15 @@ pub fn group_gguf_repo_files(
 
         artifacts.push(LogicalGgufArtifact {
             repo_id: repo_id.to_string(),
-            quant_label,
+            quant_label: quant_label.clone(),
+            quant: quant_label,
             total_size_bytes,
-            shard_files,
+            shard_files: shard_files.clone(),
+            files: shard_files,
             is_split,
+            shard_count,
+            has_mmproj,
+            mmproj_files,
             companion_mmproj: mmproj_file.clone(),
             required_channel,
         });
@@ -271,9 +289,13 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         let q4 = &artifacts[0];
         assert_eq!(q4.quant_label, "Q4_K_M");
+        assert_eq!(q4.quant, "Q4_K_M");
         assert_eq!(q4.shard_files.len(), 3);
+        assert_eq!(q4.files.len(), 3);
+        assert_eq!(q4.shard_count, 3);
         assert_eq!(q4.total_size_bytes, 14_500_000_000);
         assert!(q4.is_split);
+        assert!(q4.has_mmproj);
         assert_eq!(q4.companion_mmproj.as_deref(), Some("mmproj-f16.gguf"));
     }
 

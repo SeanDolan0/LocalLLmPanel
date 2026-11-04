@@ -34,6 +34,8 @@ import type {
   BenchmarkErrorPayload,
   LlamacppInstallStatus,
   LlamaCppChannel,
+  LlamaCppUpdateStatus,
+  VllmUpdateResult,
   GgufRepoFile,
   AppUpdateInfo,
   AppUpdateProgress,
@@ -63,6 +65,9 @@ export const api = {
   installLlamacpp: () => invoke<LlamacppInstallStatus>("install_llamacpp"),
   installLlamacppChannel: (channel: LlamaCppChannel) =>
     invoke<LlamacppInstallStatus>("install_llamacpp_channel", { channel }),
+  llamacppCheckUpdates: () =>
+    invoke<LlamaCppUpdateStatus[]>("llamacpp_check_updates"),
+  updateVllm: () => invoke<VllmUpdateResult>("update_vllm"),
   llamacppStatus: () => invoke<LlamacppInstallStatus>("llamacpp_status"),
   searchModelsWithFit: (query: string) =>
     invoke<ModelWithFit[]>("search_models_with_fit", { query }),

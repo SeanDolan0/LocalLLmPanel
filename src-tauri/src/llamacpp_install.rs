@@ -608,6 +608,81 @@ fn latest_release_for_channel(channel: LlamaCppChannel, token: Option<&str>) -> 
     Ok(selection)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LlamaCppUpdateStatus {
+    pub channel: LlamaCppChannel,
+    pub installed_tag: Option<String>,
+    pub latest_tag: Option<String>,
+    pub update_available: bool,
+    pub cuda_version: Option<String>,
+    pub warning: Option<String>,
+    pub page_url: String,
+}
+
+/// Extract the largest digit run in a tag (e.g. "b11081" -> 11081, "v2.0.0" -> 100)
+/// so tags of different digit-length compare correctly. String comparison would
+/// rank "b9999" above "b10000".
+fn tag_number(tag: &str) -> Option<u64> {
+    let mut best: Option<u64> = None;
+    let mut run = String::new();
+    for ch in tag.chars() {
+        if ch.is_ascii_digit() {
+            run.push(ch);
+        } else if !run.is_empty() {
+            if let Ok(n) = run.parse::<u64>() {
+                best = Some(best.map_or(n, |b| b.max(n)));
+            }
+            run.clear();
+        }
+    }
+    if !run.is_empty() {
+        if let Ok(n) = run.parse::<u64>() {
+            best = Some(best.map_or(n, |b| b.max(n)));
+        }
+    }
+    best
+}
+
+/// Check whether the installed tag is behind the latest usable release for the
+/// machine's CUDA driver. Downloads nothing beyond the release metadata JSON.
+/// Network/selection failures are reported in `warning` with `latest_tag: None`
+/// so the UI can still render the installed state.
+pub fn check_update(
+    channel: LlamaCppChannel,
+    installed_tag: Option<&str>,
+    token: Option<&str>,
+) -> LlamaCppUpdateStatus {
+    let config = ChannelConfig::for_channel(channel);
+    let page_url = config.page_url.to_string();
+    match latest_release_for_channel(channel, token) {
+        Ok(selection) => {
+            let latest = selection.tag.clone();
+            let update_available = match (installed_tag.map(tag_number).flatten(), tag_number(&latest)) {
+                (Some(inst), Some(lat)) => lat > inst,
+                _ => installed_tag != Some(latest.as_str()),
+            };
+            LlamaCppUpdateStatus {
+                channel,
+                installed_tag: installed_tag.map(str::to_string),
+                latest_tag: Some(latest),
+                update_available,
+                cuda_version: Some(selection.candidate.version.to_string()),
+                warning: selection.warning,
+                page_url,
+            }
+        }
+        Err(e) => LlamaCppUpdateStatus {
+            channel,
+            installed_tag: installed_tag.map(str::to_string),
+            latest_tag: None,
+            update_available: false,
+            cuda_version: None,
+            warning: Some(format!("update check failed: {e}")),
+            page_url,
+        },
+    }
+}
+
 fn select_release_for_channel(
     channel: LlamaCppChannel,
     releases: &[Release],

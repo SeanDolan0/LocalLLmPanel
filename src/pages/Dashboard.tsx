@@ -13,6 +13,8 @@ export default function Dashboard() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [installingLlamacpp, setInstallingLlamacpp] = useState(false);
   const [llamacppErr, setLlamacppErr] = useState<string | null>(null);
+  const [updatingVllm, setUpdatingVllm] = useState(false);
+  const [vllmUpdateMsg, setVllmUpdateMsg] = useState<string | null>(null);
   const [flashInferReady, setFlashInferReady] = useState<FlashInferReady | null>(null);
   const [checkingFlashInfer, setCheckingFlashInfer] = useState(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -113,6 +115,24 @@ export default function Dashboard() {
       setLlamacppErr(String(e));
     } finally {
       setInstallingLlamacpp(false);
+    }
+  };
+
+  const updateVllm = async () => {
+    setUpdatingVllm(true);
+    setVllmUpdateMsg(null);
+    setProvisionErr(null);
+    setLogs([]);
+    try {
+      const res = await api.updateVllm();
+      setVllmUpdateMsg(
+        `vLLM ${res.previous_version ?? "not installed"} → ${res.version ?? "unknown"}`
+      );
+    } catch (e) {
+      setVllmUpdateMsg(`vLLM update failed: ${e}`);
+    } finally {
+      setUpdatingVllm(false);
+      refresh();
     }
   };
 
@@ -367,7 +387,7 @@ export default function Dashboard() {
                   {provisioning
                     ? "waiting for output…"
                     : env?.provisioned
-                      ? "Provisioned ✓ — re-run to upgrade vLLM or repair."
+                      ? "Provisioned ✓ — re-run to verify / repair. To upgrade vLLM, use “Update vLLM” below."
                       : "Run “Provision WSL” — first run installs apt basics, a uv venv (CPython 3.12) and vLLM CUDA wheels."}
                 </span>
               ) : (
@@ -383,13 +403,21 @@ export default function Dashboard() {
             {env?.provisioned && !provisioning && (
               <div className="mt-3 flex gap-2">
                 <Button variant="subtle" onClick={runProvision}>
-                  Re-run setup (upgrade / repair)
+                  Re-run setup (verify / repair)
+                </Button>
+                <Button variant="subtle" onClick={updateVllm} disabled={updatingVllm}>
+                  {updatingVllm ? <Spinner label="Updating vLLM…" /> : "Update vLLM"}
                 </Button>
                 {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
                   <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
                     {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
                   </Button>
                 )}
+              </div>
+            )}
+            {(updatingVllm || vllmUpdateMsg) && (
+              <div className="mt-2 text-[11px] text-slate-400">
+                {updatingVllm ? "Upgrading vLLM in WSL — this can take a few minutes on first run…" : vllmUpdateMsg}
               </div>
             )}
           </Card>
