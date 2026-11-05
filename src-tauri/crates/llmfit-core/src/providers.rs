@@ -13,14 +13,12 @@ use std::sync::OnceLock;
 
 /// A runtime provider that can serve LLM models locally.
 pub trait ModelProvider {
-
     /// Whether the provider service is reachable right now.
     fn is_available(&self) -> bool;
 
     /// Return the set of model name stems that are currently installed.
     /// Names are normalised lowercase, e.g. "llama3.1:8b".
     fn installed_models(&self) -> HashSet<String>;
-
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +332,6 @@ fn build_installed_set(models: Vec<OllamaModel>) -> (HashSet<String>, usize) {
 }
 
 impl ModelProvider for OllamaProvider {
-
     fn is_available(&self) -> bool {
         ureq::get(&self.api_url("tags"))
             .config()
@@ -348,7 +345,6 @@ impl ModelProvider for OllamaProvider {
         let (set, _) = self.installed_models_counted();
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -813,7 +809,6 @@ fn dirs_hf_cache_all() -> Vec<std::path::PathBuf> {
 }
 
 impl ModelProvider for MlxProvider {
-
     fn is_available(&self) -> bool {
         if !cfg!(target_os = "macos") {
             return false;
@@ -847,7 +842,6 @@ impl ModelProvider for MlxProvider {
         }
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,7 +1163,6 @@ fn probe_llama_server(base_url: &str) -> bool {
 }
 
 impl ModelProvider for LlamaCppProvider {
-
     fn is_available(&self) -> bool {
         self.llama_cli.is_some() || self.llama_server.is_some() || self.server_running
     }
@@ -1178,7 +1171,6 @@ impl ModelProvider for LlamaCppProvider {
         let (set, _) = self.installed_models_counted();
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,7 +1375,6 @@ impl DockerModelRunnerProvider {
 }
 
 impl ModelProvider for DockerModelRunnerProvider {
-
     fn is_available(&self) -> bool {
         let Ok(resp) = ureq::get(&self.models_url())
             .config()
@@ -1418,7 +1409,6 @@ impl ModelProvider for DockerModelRunnerProvider {
         let (set, _) = self.installed_models_counted();
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1705,7 +1695,6 @@ impl LmStudioProvider {
 }
 
 impl ModelProvider for LmStudioProvider {
-
     fn is_available(&self) -> bool {
         // Report available only when the native /api/v0 API confirms LM Studio,
         // matching the identity gate used for model import.
@@ -1720,7 +1709,6 @@ impl ModelProvider for LmStudioProvider {
         let (set, _) = self.installed_models_counted();
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,7 +1879,6 @@ impl VllmProvider {
 }
 
 impl ModelProvider for VllmProvider {
-
     fn is_available(&self) -> bool {
         let Ok(resp) = ureq::get(&self.models_url())
             .config()
@@ -1919,7 +1906,6 @@ impl ModelProvider for VllmProvider {
         let (set, _) = self.installed_models_counted();
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -2170,7 +2156,6 @@ fn parse_ramalama_store(json: &[u8]) -> Option<(HashSet<String>, usize)> {
 }
 
 impl ModelProvider for RamaLamaProvider {
-
     fn is_available(&self) -> bool {
         ureq::get(&self.models_url())
             .config()
@@ -2184,7 +2169,6 @@ impl ModelProvider for RamaLamaProvider {
         let (set, _) = self.installed_models_counted();
         set
     }
-
 }
 
 // ---------------------------------------------------------------------------

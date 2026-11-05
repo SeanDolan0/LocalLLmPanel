@@ -1,11 +1,11 @@
 //! Local model registry: durable inventory of discovered, downloading,
 //! and installed model artifacts (both native GGUF and WSL vLLM models).
 
+use crate::state::CONFIG_DIR_NAME;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use crate::state::CONFIG_DIR_NAME;
 
 pub const REGISTRY_FILE_NAME: &str = "model_registry.json";
 

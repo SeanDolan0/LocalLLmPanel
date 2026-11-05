@@ -32,7 +32,13 @@ pub fn provision_all(
     let mut effective_distro = if distros.contains(&distro.to_string()) {
         distro.to_string()
     } else {
-        on_log("distro", &format!("distro '{}' not found, installing dedicated distro…", distro));
+        on_log(
+            "distro",
+            &format!(
+                "distro '{}' not found, installing dedicated distro…",
+                distro
+            ),
+        );
         let installed = wsl::ensure_app_distro(|msg| on_log("distro", msg))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         on_log("distro", &format!("using dedicated distro '{}'", installed));
@@ -41,7 +47,13 @@ pub fn provision_all(
 
     // If the effective distro isn't apt-based (e.g., docker-desktop), install dedicated
     if !wsl::is_apt_distro(&effective_distro) {
-        on_log("distro", &format!("distro '{}' is not apt-based, installing dedicated distro…", effective_distro));
+        on_log(
+            "distro",
+            &format!(
+                "distro '{}' is not apt-based, installing dedicated distro…",
+                effective_distro
+            ),
+        );
         let installed = wsl::ensure_app_distro(|msg| on_log("distro", msg))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         on_log("distro", &format!("using dedicated distro '{}'", installed));
@@ -345,10 +357,7 @@ fn phase_verify(
 /// This installs gcc, python3.12-dev, ninja-build, and the CUDA toolkit from NVIDIA's WSL-Ubuntu repo.
 /// Must be run as root (via wsl --user root) because apt needs root.
 /// Returns the phase name if successful, or an error if the user cancels or it fails.
-pub fn phase_cuda_build_tools(
-    distro: &str,
-    on_log: &mut impl FnMut(&str, &str),
-) -> Result<String> {
+pub fn phase_cuda_build_tools(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
     on_log("cuda-tools", "Checking for existing CUDA build tools…");
 
     // Check what's already installed
@@ -367,18 +376,29 @@ pub fn phase_cuda_build_tools(
     let mut ninja = false;
     let mut python_dev = false;
     for line in check.stdout.lines() {
-        if line.starts_with("nvcc=yes") { nvcc = true; }
-        else if line.starts_with("gcc=yes") { gcc = true; }
-        else if line.starts_with("ninja=yes") { ninja = true; }
-        else if line.starts_with("python_dev=yes") { python_dev = true; }
+        if line.starts_with("nvcc=yes") {
+            nvcc = true;
+        } else if line.starts_with("gcc=yes") {
+            gcc = true;
+        } else if line.starts_with("ninja=yes") {
+            ninja = true;
+        } else if line.starts_with("python_dev=yes") {
+            python_dev = true;
+        }
     }
 
     if nvcc && gcc && ninja && python_dev {
-        on_log("cuda-tools", "All CUDA build tools already installed (skipping).");
+        on_log(
+            "cuda-tools",
+            "All CUDA build tools already installed (skipping).",
+        );
         return Ok("cuda-tools".into());
     }
 
-    on_log("cuda-tools", "Installing CUDA build tools (gcc, python3.12-dev, ninja-build, CUDA toolkit)…");
+    on_log(
+        "cuda-tools",
+        "Installing CUDA build tools (gcc, python3.12-dev, ninja-build, CUDA toolkit)…",
+    );
     on_log("cuda-tools", "⚠ This downloads several GB and may take 5-15 minutes. First FlashInfer JIT compile will be slow.");
 
     // Get PyTorch CUDA version to match toolkit version
@@ -393,7 +413,10 @@ pub fn phase_cuda_build_tools(
         "12"
     };
 
-    on_log("cuda-tools", &format!("Targeting CUDA toolkit major version: {cuda_major} (matching PyTorch)"));
+    on_log(
+        "cuda-tools",
+        &format!("Targeting CUDA toolkit major version: {cuda_major} (matching PyTorch)"),
+    );
 
     // Install basic build tools first (gcc, python3.12-dev, ninja-build)
     let apt_script = format!(
@@ -406,10 +429,16 @@ pub fn phase_cuda_build_tools(
     );
     let out = wsl::run_script_root(distro, &apt_script);
     if !out.ok {
-        on_log("cuda-tools", &format!("Failed to install base build tools: {}", out.combined()));
+        on_log(
+            "cuda-tools",
+            &format!("Failed to install base build tools: {}", out.combined()),
+        );
         bail!("CUDA build tools installation failed: {}", out.combined());
     }
-    on_log("cuda-tools", "Base build tools (gcc, python3.12-dev, ninja-build) installed.");
+    on_log(
+        "cuda-tools",
+        "Base build tools (gcc, python3.12-dev, ninja-build) installed.",
+    );
 
     // Add NVIDIA CUDA repository for WSL-Ubuntu
     let repo_script = format!(
@@ -426,10 +455,19 @@ pub fn phase_cuda_build_tools(
         apt-get install -y -qq cuda-toolkit-{cuda_major}-0
         "#
     );
-    on_log("cuda-tools", "Adding NVIDIA CUDA repository and installing CUDA toolkit…");
+    on_log(
+        "cuda-tools",
+        "Adding NVIDIA CUDA repository and installing CUDA toolkit…",
+    );
     let out = wsl::run_script_root(distro, &repo_script);
     if !out.ok {
-        on_log("cuda-tools", &format!("CUDA toolkit install failed (may need manual intervention): {}", out.combined()));
+        on_log(
+            "cuda-tools",
+            &format!(
+                "CUDA toolkit install failed (may need manual intervention): {}",
+                out.combined()
+            ),
+        );
         // Don't bail - base tools are installed, user can retry
     } else {
         on_log("cuda-tools", "CUDA toolkit installed successfully.");
@@ -438,7 +476,13 @@ pub fn phase_cuda_build_tools(
     // Verify nvcc is now available
     let verify = wsl::run_script(distro, "which nvcc && nvcc --version | head -1");
     if verify.ok && verify.stdout.contains("nvcc") {
-        on_log("cuda-tools", &format!("nvcc verified: {}", verify.stdout.lines().next().unwrap_or("ok")));
+        on_log(
+            "cuda-tools",
+            &format!(
+                "nvcc verified: {}",
+                verify.stdout.lines().next().unwrap_or("ok")
+            ),
+        );
     } else {
         on_log("cuda-tools", "WARNING: nvcc not found in PATH after install. May need shell restart or manual PATH setup.");
     }

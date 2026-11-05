@@ -28,59 +28,422 @@ struct QuantSpec {
 }
 
 const QUANT_SPECS: &[(&str, QuantSpec)] = &[
-    ("F32", QuantSpec { bpp: 4.0, bytes_per_param: 0.5, speed: 1.0, penalty: -5.0 }),
-    ("F16", QuantSpec { bpp: 2.0, bytes_per_param: 2.0, speed: 0.6, penalty: 0.0 }),
-    ("BF16", QuantSpec { bpp: 2.0, bytes_per_param: 2.0, speed: 0.6, penalty: 0.0 }),
-    ("Q8_0", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
-    ("Q6_K", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
-    ("Q5_K_M", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
-    ("Q4_K_M", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
-    ("Q4_0", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
-    ("Q3_K_M", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
-    ("Q2_K", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
+    (
+        "F32",
+        QuantSpec {
+            bpp: 4.0,
+            bytes_per_param: 0.5,
+            speed: 1.0,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "F16",
+        QuantSpec {
+            bpp: 2.0,
+            bytes_per_param: 2.0,
+            speed: 0.6,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "BF16",
+        QuantSpec {
+            bpp: 2.0,
+            bytes_per_param: 2.0,
+            speed: 0.6,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "Q8_0",
+        QuantSpec {
+            bpp: 1.05,
+            bytes_per_param: 1.0,
+            speed: 0.8,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "Q6_K",
+        QuantSpec {
+            bpp: 0.80,
+            bytes_per_param: 0.75,
+            speed: 0.95,
+            penalty: -1.0,
+        },
+    ),
+    (
+        "Q5_K_M",
+        QuantSpec {
+            bpp: 0.68,
+            bytes_per_param: 0.625,
+            speed: 1.0,
+            penalty: -2.0,
+        },
+    ),
+    (
+        "Q4_K_M",
+        QuantSpec {
+            bpp: 0.58,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "Q4_0",
+        QuantSpec {
+            bpp: 0.58,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "Q3_K_M",
+        QuantSpec {
+            bpp: 0.48,
+            bytes_per_param: 0.375,
+            speed: 1.25,
+            penalty: -8.0,
+        },
+    ),
+    (
+        "Q2_K",
+        QuantSpec {
+            bpp: 0.37,
+            bytes_per_param: 0.25,
+            speed: 1.35,
+            penalty: -12.0,
+        },
+    ),
     // Native ternary (1.58-bit): i2_s / ggml TQ1_0/TQ2_0. Whole-model
     // bytes/param derived from released GGUFs (BitNet-2B-4T ~1.2 GB,
     // Falcon3-10B-1.58bit ~4.0 GB) — f16 embeddings dominate the ~2-bit linears.
     // Native-trained ternary retains far more quality than naive 2-bit PTQ.
-    ("I2_S", QuantSpec { bpp: 0.42, bytes_per_param: 0.40, speed: 1.3, penalty: -6.0 }),
-    ("TQ2_0", QuantSpec { bpp: 0.42, bytes_per_param: 0.40, speed: 1.3, penalty: -6.0 }),
-    ("TQ1_0", QuantSpec { bpp: 0.42, bytes_per_param: 0.40, speed: 1.3, penalty: -6.0 }),
-    ("UD-Q2_K_XL", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
-    ("UD-Q2_K_L", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
-    ("UD-Q2_K_M", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
-    ("UD-Q2_K_S", QuantSpec { bpp: 0.37, bytes_per_param: 0.25, speed: 1.35, penalty: -12.0 }),
-    ("UD-Q3_K_XL", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
-    ("UD-Q3_K_L", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
-    ("UD-Q3_K_M", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
-    ("UD-Q3_K_S", QuantSpec { bpp: 0.48, bytes_per_param: 0.375, speed: 1.25, penalty: -8.0 }),
-    ("UD-Q4_K_XL", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
-    ("UD-Q4_K_L", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
-    ("UD-Q4_K_M", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
-    ("UD-Q4_K_S", QuantSpec { bpp: 0.58, bytes_per_param: 0.5, speed: 1.15, penalty: -5.0 }),
-    ("UD-Q5_K_XL", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
-    ("UD-Q5_K_L", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
-    ("UD-Q5_K_M", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
-    ("UD-Q5_K_S", QuantSpec { bpp: 0.68, bytes_per_param: 0.625, speed: 1.0, penalty: -2.0 }),
-    ("UD-Q6_K_XL", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
-    ("UD-Q6_K_L", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
-    ("UD-Q6_K_M", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
-    ("UD-Q6_K_S", QuantSpec { bpp: 0.80, bytes_per_param: 0.75, speed: 0.95, penalty: -1.0 }),
-    ("UD-Q8_K_XL", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
-    ("UD-Q8_K_L", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
-    ("UD-Q8_K_M", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
-    ("UD-Q8_K_S", QuantSpec { bpp: 1.05, bytes_per_param: 1.0, speed: 0.8, penalty: 0.0 }),
-    ("mlx-4bit", QuantSpec { bpp: 0.55, bytes_per_param: 0.5, speed: 1.15, penalty: -4.0 }),
-    ("mlx-8bit", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
-    ("AWQ-4bit", QuantSpec { bpp: 0.5, bytes_per_param: 0.5, speed: 1.2, penalty: -3.0 }),
-    ("AWQ-8bit", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
-    ("GPTQ-Int4", QuantSpec { bpp: 0.5, bytes_per_param: 0.5, speed: 1.2, penalty: -3.0 }),
-    ("GPTQ-Int8", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
-    ("AutoRound-4bit", QuantSpec { bpp: 0.5, bytes_per_param: 0.5, speed: 1.2, penalty: -3.0 }),
-    ("AutoRound-8bit", QuantSpec { bpp: 1.0, bytes_per_param: 1.0, speed: 0.85, penalty: 0.0 }),
+    (
+        "I2_S",
+        QuantSpec {
+            bpp: 0.42,
+            bytes_per_param: 0.40,
+            speed: 1.3,
+            penalty: -6.0,
+        },
+    ),
+    (
+        "TQ2_0",
+        QuantSpec {
+            bpp: 0.42,
+            bytes_per_param: 0.40,
+            speed: 1.3,
+            penalty: -6.0,
+        },
+    ),
+    (
+        "TQ1_0",
+        QuantSpec {
+            bpp: 0.42,
+            bytes_per_param: 0.40,
+            speed: 1.3,
+            penalty: -6.0,
+        },
+    ),
+    (
+        "UD-Q2_K_XL",
+        QuantSpec {
+            bpp: 0.37,
+            bytes_per_param: 0.25,
+            speed: 1.35,
+            penalty: -12.0,
+        },
+    ),
+    (
+        "UD-Q2_K_L",
+        QuantSpec {
+            bpp: 0.37,
+            bytes_per_param: 0.25,
+            speed: 1.35,
+            penalty: -12.0,
+        },
+    ),
+    (
+        "UD-Q2_K_M",
+        QuantSpec {
+            bpp: 0.37,
+            bytes_per_param: 0.25,
+            speed: 1.35,
+            penalty: -12.0,
+        },
+    ),
+    (
+        "UD-Q2_K_S",
+        QuantSpec {
+            bpp: 0.37,
+            bytes_per_param: 0.25,
+            speed: 1.35,
+            penalty: -12.0,
+        },
+    ),
+    (
+        "UD-Q3_K_XL",
+        QuantSpec {
+            bpp: 0.48,
+            bytes_per_param: 0.375,
+            speed: 1.25,
+            penalty: -8.0,
+        },
+    ),
+    (
+        "UD-Q3_K_L",
+        QuantSpec {
+            bpp: 0.48,
+            bytes_per_param: 0.375,
+            speed: 1.25,
+            penalty: -8.0,
+        },
+    ),
+    (
+        "UD-Q3_K_M",
+        QuantSpec {
+            bpp: 0.48,
+            bytes_per_param: 0.375,
+            speed: 1.25,
+            penalty: -8.0,
+        },
+    ),
+    (
+        "UD-Q3_K_S",
+        QuantSpec {
+            bpp: 0.48,
+            bytes_per_param: 0.375,
+            speed: 1.25,
+            penalty: -8.0,
+        },
+    ),
+    (
+        "UD-Q4_K_XL",
+        QuantSpec {
+            bpp: 0.58,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "UD-Q4_K_L",
+        QuantSpec {
+            bpp: 0.58,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "UD-Q4_K_M",
+        QuantSpec {
+            bpp: 0.58,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "UD-Q4_K_S",
+        QuantSpec {
+            bpp: 0.58,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -5.0,
+        },
+    ),
+    (
+        "UD-Q5_K_XL",
+        QuantSpec {
+            bpp: 0.68,
+            bytes_per_param: 0.625,
+            speed: 1.0,
+            penalty: -2.0,
+        },
+    ),
+    (
+        "UD-Q5_K_L",
+        QuantSpec {
+            bpp: 0.68,
+            bytes_per_param: 0.625,
+            speed: 1.0,
+            penalty: -2.0,
+        },
+    ),
+    (
+        "UD-Q5_K_M",
+        QuantSpec {
+            bpp: 0.68,
+            bytes_per_param: 0.625,
+            speed: 1.0,
+            penalty: -2.0,
+        },
+    ),
+    (
+        "UD-Q5_K_S",
+        QuantSpec {
+            bpp: 0.68,
+            bytes_per_param: 0.625,
+            speed: 1.0,
+            penalty: -2.0,
+        },
+    ),
+    (
+        "UD-Q6_K_XL",
+        QuantSpec {
+            bpp: 0.80,
+            bytes_per_param: 0.75,
+            speed: 0.95,
+            penalty: -1.0,
+        },
+    ),
+    (
+        "UD-Q6_K_L",
+        QuantSpec {
+            bpp: 0.80,
+            bytes_per_param: 0.75,
+            speed: 0.95,
+            penalty: -1.0,
+        },
+    ),
+    (
+        "UD-Q6_K_M",
+        QuantSpec {
+            bpp: 0.80,
+            bytes_per_param: 0.75,
+            speed: 0.95,
+            penalty: -1.0,
+        },
+    ),
+    (
+        "UD-Q6_K_S",
+        QuantSpec {
+            bpp: 0.80,
+            bytes_per_param: 0.75,
+            speed: 0.95,
+            penalty: -1.0,
+        },
+    ),
+    (
+        "UD-Q8_K_XL",
+        QuantSpec {
+            bpp: 1.05,
+            bytes_per_param: 1.0,
+            speed: 0.8,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "UD-Q8_K_L",
+        QuantSpec {
+            bpp: 1.05,
+            bytes_per_param: 1.0,
+            speed: 0.8,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "UD-Q8_K_M",
+        QuantSpec {
+            bpp: 1.05,
+            bytes_per_param: 1.0,
+            speed: 0.8,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "UD-Q8_K_S",
+        QuantSpec {
+            bpp: 1.05,
+            bytes_per_param: 1.0,
+            speed: 0.8,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "mlx-4bit",
+        QuantSpec {
+            bpp: 0.55,
+            bytes_per_param: 0.5,
+            speed: 1.15,
+            penalty: -4.0,
+        },
+    ),
+    (
+        "mlx-8bit",
+        QuantSpec {
+            bpp: 1.0,
+            bytes_per_param: 1.0,
+            speed: 0.85,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "AWQ-4bit",
+        QuantSpec {
+            bpp: 0.5,
+            bytes_per_param: 0.5,
+            speed: 1.2,
+            penalty: -3.0,
+        },
+    ),
+    (
+        "AWQ-8bit",
+        QuantSpec {
+            bpp: 1.0,
+            bytes_per_param: 1.0,
+            speed: 0.85,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "GPTQ-Int4",
+        QuantSpec {
+            bpp: 0.5,
+            bytes_per_param: 0.5,
+            speed: 1.2,
+            penalty: -3.0,
+        },
+    ),
+    (
+        "GPTQ-Int8",
+        QuantSpec {
+            bpp: 1.0,
+            bytes_per_param: 1.0,
+            speed: 0.85,
+            penalty: 0.0,
+        },
+    ),
+    (
+        "AutoRound-4bit",
+        QuantSpec {
+            bpp: 0.5,
+            bytes_per_param: 0.5,
+            speed: 1.2,
+            penalty: -3.0,
+        },
+    ),
+    (
+        "AutoRound-8bit",
+        QuantSpec {
+            bpp: 1.0,
+            bytes_per_param: 1.0,
+            speed: 0.85,
+            penalty: 0.0,
+        },
+    ),
 ];
 
 fn quant_spec(quant: &str) -> Option<&'static QuantSpec> {
-    QUANT_SPECS.iter().find(|(label, _)| *label == quant).map(|(_, spec)| spec)
+    QUANT_SPECS
+        .iter()
+        .find(|(label, _)| *label == quant)
+        .map(|(_, spec)| spec)
 }
 
 /// Bytes per parameter for each quantization level.

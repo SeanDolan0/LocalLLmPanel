@@ -145,17 +145,23 @@ pub fn ensure_app_distro(mut on_log: impl FnMut(&str)) -> Result<String, String>
         return Ok(APP_DISTRO_NAME.to_string());
     }
 
-    on_log(&format!("installing dedicated distro '{}'…", APP_DISTRO_NAME));
+    on_log(&format!(
+        "installing dedicated distro '{}'…",
+        APP_DISTRO_NAME
+    ));
     let mut cmd = wsl_command();
-    cmd.env("WSL_UTF8", "1")
-        .args([
-            "--install",
-            "-d", "Ubuntu-22.04",
-            "--name", APP_DISTRO_NAME,
-            "--web-download",
-            "--no-launch",
-        ]);
-    let out = cmd.output().map_err(|e| format!("spawn wsl --install: {e}"))?;
+    cmd.env("WSL_UTF8", "1").args([
+        "--install",
+        "-d",
+        "Ubuntu-22.04",
+        "--name",
+        APP_DISTRO_NAME,
+        "--web-download",
+        "--no-launch",
+    ]);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("spawn wsl --install: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!("wsl --install failed: {}", err));
@@ -221,7 +227,10 @@ pub fn detect_default_distro() -> Option<String> {
             if clean.starts_with('*') {
                 let name = clean.trim_start_matches('*').trim();
                 let name = name.split_whitespace().next().unwrap_or("").trim();
-                if !name.is_empty() && is_apt_distro(name) && installed_distros().contains(&name.to_string()) {
+                if !name.is_empty()
+                    && is_apt_distro(name)
+                    && installed_distros().contains(&name.to_string())
+                {
                     return Some(name.to_string());
                 }
             }
@@ -490,7 +499,8 @@ pub fn run_script_stream(distro: &str, script: &str, mut on_line: impl FnMut(&st
                 for &b in &chunk[..n] {
                     if b == b'\n' || b == b'\r' {
                         if !buf.is_empty() {
-                            let _ = tx_err.send((false, String::from_utf8_lossy(&buf).into_owned()));
+                            let _ =
+                                tx_err.send((false, String::from_utf8_lossy(&buf).into_owned()));
                             buf.clear();
                         }
                     } else {
@@ -693,7 +703,10 @@ pub fn spawn_script_via_stdin(
     let write_cmd = format!("cat > {}", shell_quote_wsl(&script_path));
     let chmod_cmd = format!("chmod 700 {}", shell_quote_wsl(&script_path));
     let exec_cmd = format!("bash -l {}", shell_quote_wsl(&script_path));
-    let full_cmd = format!("{} && {} && {} && {}", mkdir_cmd, write_cmd, chmod_cmd, exec_cmd);
+    let full_cmd = format!(
+        "{} && {} && {} && {}",
+        mkdir_cmd, write_cmd, chmod_cmd, exec_cmd
+    );
 
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
@@ -821,7 +834,9 @@ impl Drop for WslChild {
             let _ = self.kill();
         }
         self.join();
-        if let (Some(distro), Some(script_path)) = (self.distro.as_deref(), self.script_path.as_deref()) {
+        if let (Some(distro), Some(script_path)) =
+            (self.distro.as_deref(), self.script_path.as_deref())
+        {
             let cleanup = format!("rm -f -- {}", shell_quote_wsl(script_path));
             let _ = run_script(distro, &cleanup);
         }
@@ -947,7 +962,10 @@ mod tests {
         assert!(!verbose_state_is_running(legacy, "Ubuntu-24.04"));
 
         assert!(!verbose_state_is_running("", "Ubuntu"));
-        assert!(!verbose_state_is_running("  NAME   STATE   VERSION\n", "Ubuntu"));
+        assert!(!verbose_state_is_running(
+            "  NAME   STATE   VERSION\n",
+            "Ubuntu"
+        ));
     }
 
     #[test]

@@ -3,9 +3,9 @@
 use anyhow::{anyhow, Context, Result};
 use regex_lite::Regex;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -53,13 +53,19 @@ impl ChannelConfig {
         let repo = fork.repo.trim();
         let label = format!("'{}' ({})", fork.id, repo);
         let parse_main_regex = Regex::new(&fork.asset_regex).with_context(|| {
-            format!("fork {} has an invalid asset regex: {}", fork.id, fork.asset_regex)
+            format!(
+                "fork {} has an invalid asset regex: {}",
+                fork.id, fork.asset_regex
+            )
         })?;
         let parse_runtime_regex = if fork.runtime_regex.trim().is_empty() {
             None
         } else {
             Some(Regex::new(&fork.runtime_regex).with_context(|| {
-                format!("fork {} has an invalid runtime regex: {}", fork.id, fork.runtime_regex)
+                format!(
+                    "fork {} has an invalid runtime regex: {}",
+                    fork.id, fork.runtime_regex
+                )
             })?)
         };
         Ok(ChannelConfig {
@@ -167,7 +173,11 @@ fn parse_runtime_channel(name: &str, config: &ChannelConfig) -> Option<CudaVersi
     ))
 }
 
-fn diagnostic_channel(assets: &[Asset], driver: Option<CudaVersion>, config: &ChannelConfig) -> Vec<String> {
+fn diagnostic_channel(
+    assets: &[Asset],
+    driver: Option<CudaVersion>,
+    config: &ChannelConfig,
+) -> Vec<String> {
     let mut lines = vec![format!(
         "No suitable Windows x64 CUDA archive found for {} (driver CUDA: {}).",
         config.label,
@@ -250,9 +260,11 @@ pub fn install_for_channel(
     let tag = selection.tag;
     let main = selection.candidate.main;
     let runtime = selection.candidate.runtime;
-    let install_dir = destination.join(format!("{}-{}-cuda-{}", fork.id, tag, selection.candidate.version).to_lowercase());
+    let install_dir = destination
+        .join(format!("{}-{}-cuda-{}", fork.id, tag, selection.candidate.version).to_lowercase());
     std::fs::create_dir_all(&install_dir)?;
-    let temp = destination.join(format!(".llamacpp-{}-{}.zip", fork.id, std::process::id()).to_lowercase());
+    let temp = destination
+        .join(format!(".llamacpp-{}-{}.zip", fork.id, std::process::id()).to_lowercase());
     let download_label = selection.warning.as_ref().map_or_else(
         || format!("downloading {}", main.name),
         |warning| format!("downloading {} ({warning})", main.name),
@@ -266,8 +278,9 @@ pub fn install_for_channel(
         let _ = std::fs::remove_file(&temp);
 
         if let Some(runtime) = runtime {
-            let runtime_zip =
-                destination.join(format!(".llamacpp-{}-cudart-{}.zip", fork.id, std::process::id()).to_lowercase());
+            let runtime_zip = destination.join(
+                format!(".llamacpp-{}-cudart-{}.zip", fork.id, std::process::id()).to_lowercase(),
+            );
             let runtime_result = (|| {
                 download(
                     &runtime.browser_download_url,
@@ -697,10 +710,11 @@ pub fn check_update(
     match latest_release_for_channel(&config, token) {
         Ok(selection) => {
             let latest = selection.tag.clone();
-            let update_available = match (installed_tag.map(tag_number).flatten(), tag_number(&latest)) {
-                (Some(inst), Some(lat)) => lat > inst,
-                _ => installed_tag != Some(latest.as_str()),
-            };
+            let update_available =
+                match (installed_tag.map(tag_number).flatten(), tag_number(&latest)) {
+                    (Some(inst), Some(lat)) => lat > inst,
+                    _ => installed_tag != Some(latest.as_str()),
+                };
             LlamaCppUpdateStatus {
                 channel: fork.id.clone(),
                 installed_tag: installed_tag.map(str::to_string),
@@ -820,7 +834,6 @@ pub fn parse_devices(output: &str) -> Vec<LlamaDevice> {
         })
         .collect()
 }
-
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
@@ -990,8 +1003,13 @@ mod tests {
             name: "llama-b123-bin-win-cuda-12.4-x64.zip".into(),
             browser_download_url: "old".into(),
         }];
-        let selected =
-            choose_assets_for_machine(&upstream_fork(), &assets, Some(CudaVersion(12, 4)), Some((12, 0))).unwrap();
+        let selected = choose_assets_for_machine(
+            &upstream_fork(),
+            &assets,
+            Some(CudaVersion(12, 4)),
+            Some((12, 0)),
+        )
+        .unwrap();
         assert!(selected.warning.is_some());
     }
 
@@ -1011,8 +1029,13 @@ mod tests {
                 browser_download_url: "rt".into(),
             },
         ];
-        let selected =
-            choose_assets_for_machine(&upstream_fork(), &assets, Some(CudaVersion(13, 3)), Some((8, 9))).unwrap();
+        let selected = choose_assets_for_machine(
+            &upstream_fork(),
+            &assets,
+            Some(CudaVersion(13, 3)),
+            Some((8, 9)),
+        )
+        .unwrap();
         assert_eq!(selected.candidate.version, CudaVersion(13, 3));
         assert_eq!(
             selected.candidate.runtime.unwrap().browser_download_url,
@@ -1032,10 +1055,18 @@ mod tests {
                 browser_download_url: "https://example.com/prism-rt.zip".into(),
             },
         ];
-        let selected =
-            choose_assets_for_machine(&prism_fork(), &assets, Some(CudaVersion(13, 3)), Some((12, 0))).unwrap();
+        let selected = choose_assets_for_machine(
+            &prism_fork(),
+            &assets,
+            Some(CudaVersion(13, 3)),
+            Some((12, 0)),
+        )
+        .unwrap();
         assert_eq!(selected.candidate.version, CudaVersion(13, 3));
-        assert_eq!(selected.candidate.main.name, "llama-prism-b10709-9a9394a-bin-win-cuda-13.3-x64.zip");
+        assert_eq!(
+            selected.candidate.main.name,
+            "llama-prism-b10709-9a9394a-bin-win-cuda-13.3-x64.zip"
+        );
         assert_eq!(selected.tag, "b10709-9a9394a");
     }
 
@@ -1059,7 +1090,9 @@ mod tests {
     #[test]
     fn github_requests_never_inherit_hf_tokens() {
         let client = github_client().unwrap();
-        let anonymous = github_request(&client, &upstream_api(), None).build().unwrap();
+        let anonymous = github_request(&client, &upstream_api(), None)
+            .build()
+            .unwrap();
         assert!(anonymous.headers().get("Authorization").is_none());
         let blank = github_request(&client, &upstream_api(), Some(" \t "))
             .build()
@@ -1165,7 +1198,8 @@ mod tests {
             },
         ];
         let config = super::ChannelConfig::for_fork(&upstream_fork()).unwrap();
-        let selection = select_release_for_channel(&config, &releases, Some(CudaVersion(13, 3)), None).unwrap();
+        let selection =
+            select_release_for_channel(&config, &releases, Some(CudaVersion(13, 3)), None).unwrap();
         assert_eq!(selection.tag, "b1");
         assert!(selection.warning.unwrap().contains("b2"));
     }
@@ -1226,10 +1260,14 @@ mod tests {
             },
         ];
         let selected =
-            choose_assets_for_machine(&fork, &assets, Some(CudaVersion(12, 8)), Some((12, 0))).unwrap();
+            choose_assets_for_machine(&fork, &assets, Some(CudaVersion(12, 8)), Some((12, 0)))
+                .unwrap();
         assert_eq!(selected.candidate.main.browser_download_url, "main");
         assert_eq!(selected.candidate.version, CudaVersion(12, 8));
-        assert_eq!(selected.candidate.runtime.unwrap().browser_download_url, "runtime");
+        assert_eq!(
+            selected.candidate.runtime.unwrap().browser_download_url,
+            "runtime"
+        );
         assert_eq!(selected.tag, "x1-b1");
     }
 
@@ -1255,7 +1293,11 @@ mod tests {
 
         // Builtin forks must pass validation too.
         for builtin in builtin_llamacpp_forks() {
-            assert!(validate_llamacpp_fork(&builtin).is_ok(), "{} invalid", builtin.id);
+            assert!(
+                validate_llamacpp_fork(&builtin).is_ok(),
+                "{} invalid",
+                builtin.id
+            );
         }
     }
 }

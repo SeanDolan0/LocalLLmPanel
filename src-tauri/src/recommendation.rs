@@ -4,10 +4,10 @@
 //! - Multi-feed discovery across categories
 //! - Offline fallback integration
 
-use serde::{Deserialize, Serialize};
 use crate::fit::{self, FitResult};
 use crate::hf_discovery::{DiscoveryCategory, HfModelRecord, PublisherRegistry, PublisherTier};
 use crate::model_intelligence::ModelFamilyInfo;
+use serde::{Deserialize, Serialize};
 
 /// Detailed explanation of why a model is recommended and any relevant trade-offs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -21,11 +21,11 @@ pub struct RecommendationExplanation {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct CompositeScoreDetails {
     pub total_score: f64,
-    pub hardware_fit_score: f64, // 0 - 100
+    pub hardware_fit_score: f64,   // 0 - 100
     pub task_relevance_score: f64, // 0 - 100
-    pub quality_score: f64, // 0 - 100
-    pub freshness_score: f64, // 0 - 100
-    pub popularity_score: f64, // 0 - 100
+    pub quality_score: f64,        // 0 - 100
+    pub freshness_score: f64,      // 0 - 100
+    pub popularity_score: f64,     // 0 - 100
 }
 
 /// Compute composite score for a model candidate.
@@ -56,14 +56,26 @@ pub fn calculate_composite_score(
     // 2. Task Relevance Score (0-100)
     let task_score = match category {
         DiscoveryCategory::ForYou => {
-            if family.is_embedding { 40.0 } else { 90.0 }
+            if family.is_embedding {
+                40.0
+            } else {
+                90.0
+            }
         }
         DiscoveryCategory::NewTrending => 90.0,
         DiscoveryCategory::Coding => {
-            if family.is_coding { 100.0 } else { 30.0 }
+            if family.is_coding {
+                100.0
+            } else {
+                30.0
+            }
         }
         DiscoveryCategory::Reasoning => {
-            if family.is_reasoning { 100.0 } else { 35.0 }
+            if family.is_reasoning {
+                100.0
+            } else {
+                35.0
+            }
         }
         DiscoveryCategory::GeneralChat => {
             if !family.is_coding && !family.is_embedding && !family.is_reasoning {
@@ -86,10 +98,18 @@ pub fn calculate_composite_score(
             }
         }
         DiscoveryCategory::Embeddings => {
-            if family.is_embedding { 100.0 } else { 10.0 }
+            if family.is_embedding {
+                100.0
+            } else {
+                10.0
+            }
         }
         DiscoveryCategory::Vision => {
-            if family.is_multimodal { 100.0 } else { 15.0 }
+            if family.is_multimodal {
+                100.0
+            } else {
+                15.0
+            }
         }
     };
 
@@ -156,15 +176,24 @@ pub fn calculate_composite_score(
 
     match best_fit.run_mode {
         fit::RunMode::Gpu => {
-            highlights.push(format!("Fits 100% in GPU VRAM (using ~{}% VRAM)", best_fit.vram_pct));
+            highlights.push(format!(
+                "Fits 100% in GPU VRAM (using ~{}% VRAM)",
+                best_fit.vram_pct
+            ));
         }
         fit::RunMode::GpuRamSwap => {
             highlights.push("GPU accelerated with system RAM swap for extended context".into());
-            trade_offs.push(format!("Requires ~{} GB system RAM swap for full context", best_fit.swap_space_gb));
+            trade_offs.push(format!(
+                "Requires ~{} GB system RAM swap for full context",
+                best_fit.swap_space_gb
+            ));
         }
         fit::RunMode::CpuOffload => {
             highlights.push("Runs with partial CPU offload".into());
-            trade_offs.push(format!("Requires ~{} GB weight offload to CPU RAM (lower tok/s)", best_fit.cpu_offload_gb));
+            trade_offs.push(format!(
+                "Requires ~{} GB weight offload to CPU RAM (lower tok/s)",
+                best_fit.cpu_offload_gb
+            ));
         }
         fit::RunMode::DoesNotFit => {
             trade_offs.push("Model exceeds available GPU and system memory".into());
@@ -260,12 +289,8 @@ mod tests {
             is_embedding: false,
         };
 
-        let (score, details, explanation) = calculate_composite_score(
-            &fit,
-            &record,
-            &DiscoveryCategory::Coding,
-            &family,
-        );
+        let (score, details, explanation) =
+            calculate_composite_score(&fit, &record, &DiscoveryCategory::Coding, &family);
 
         assert!(score > 85.0);
         assert_eq!(details.quality_score, 100.0);

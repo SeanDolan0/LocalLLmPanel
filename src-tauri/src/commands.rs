@@ -173,9 +173,7 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             .iter()
             .any(|device| device.backend.eq_ignore_ascii_case("cuda"));
 
-        let upstream = cfg
-            .llamacpp_channels
-            .get("upstream");
+        let upstream = cfg.llamacpp_channels.get("upstream");
 
         EnvStatus {
             wsl_ok,
@@ -295,8 +293,10 @@ pub async fn install_llamacpp_channel(
     let (tag, exe, version, help) = result;
     let mut cfg = st.config.lock().unwrap();
     if !cfg.llamacpp_channels.contains_key(&channel) {
-        cfg.llamacpp_channels
-            .insert(channel.clone(), crate::state::LlamaCppChannelConfig::default());
+        cfg.llamacpp_channels.insert(
+            channel.clone(),
+            crate::state::LlamaCppChannelConfig::default(),
+        );
     }
     if let Some(ch) = cfg.llamacpp_channels.get_mut(&channel) {
         ch.installed_tag = Some(tag);
@@ -353,7 +353,11 @@ pub async fn llamacpp_fork_upsert(
     }
     fork.builtin = false;
     let mut cfg = state.config.lock().unwrap();
-    match cfg.llamacpp_forks.iter_mut().find(|existing| existing.id == fork.id) {
+    match cfg
+        .llamacpp_forks
+        .iter_mut()
+        .find(|existing| existing.id == fork.id)
+    {
         Some(existing) => *existing = fork.clone(),
         None => cfg.llamacpp_forks.push(fork.clone()),
     }
@@ -586,7 +590,10 @@ pub async fn github_access(
                 .expect("builtin upstream fork is always present")
         });
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(crate::llamacpp_install::test_github_access(&fork, Some(&token)))
+        Ok(crate::llamacpp_install::test_github_access(
+            &fork,
+            Some(&token),
+        ))
     })
     .await
     .map_err(|e| format!("GitHub access task error: {e}"))?
@@ -2986,12 +2993,8 @@ pub struct SettingsPatch {
     pub llamacpp_dir: Option<String>,
     pub gguf_dir: Option<String>,
     pub llamacpp_executable: Option<String>,
-    pub llamacpp_channels: Option<
-        std::collections::BTreeMap<
-            String,
-            crate::state::LlamaCppChannelConfig,
-        >,
-    >,
+    pub llamacpp_channels:
+        Option<std::collections::BTreeMap<String, crate::state::LlamaCppChannelConfig>>,
     pub hf_token: Option<String>,
     pub github_token: Option<String>,
     pub clear_hf_token: Option<bool>,
@@ -3129,10 +3132,7 @@ pub fn settings_set(
     }
     if let Some(channels) = patch.llamacpp_channels {
         next.llamacpp_channels = channels;
-        let upstream = next
-            .llamacpp_channels
-            .get("upstream")
-            .cloned();
+        let upstream = next.llamacpp_channels.get("upstream").cloned();
         if let Some(upstream) = upstream {
             if !upstream.dir.trim().is_empty() {
                 next.llamacpp_dir = upstream.dir.clone();
@@ -3837,9 +3837,7 @@ pub fn download_queue_status(
 }
 
 #[tauri::command]
-pub fn download_clear_completed(
-    state: State<'_, Arc<AppState>>,
-) -> Result<usize, String> {
+pub fn download_clear_completed(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
     Ok(state.download_manager.clear_completed())
 }
 

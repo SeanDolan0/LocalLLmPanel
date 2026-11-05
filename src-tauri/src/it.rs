@@ -116,10 +116,8 @@ struct TestConfigDir {
 
 impl TestConfigDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "local-llm-panel-it-config-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("local-llm-panel-it-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create isolated test config directory");
         let previous = std::env::var("LLM_TEST_CONFIG_DIR").ok();

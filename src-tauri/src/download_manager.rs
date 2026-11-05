@@ -110,7 +110,10 @@ impl DownloadManager {
 
     pub fn get_job_by_repo(&self, repo_id: &str) -> Option<DownloadJob> {
         let guard = self.jobs.lock().ok()?;
-        guard.values().find(|j| j.repo_id.eq_ignore_ascii_case(repo_id)).cloned()
+        guard
+            .values()
+            .find(|j| j.repo_id.eq_ignore_ascii_case(repo_id))
+            .cloned()
     }
 
     pub fn list_jobs(&self) -> Vec<DownloadJob> {
@@ -157,7 +160,10 @@ impl DownloadManager {
             };
             guard
                 .values()
-                .find(|j| j.repo_id.eq_ignore_ascii_case(repo_id) || j.model_id.eq_ignore_ascii_case(repo_id))
+                .find(|j| {
+                    j.repo_id.eq_ignore_ascii_case(repo_id)
+                        || j.model_id.eq_ignore_ascii_case(repo_id)
+                })
                 .map(|j| j.id.clone())
         };
 
@@ -208,7 +214,9 @@ impl DownloadManager {
                         || existing.status == DownloadStatus::Resolving
                         || existing.status == DownloadStatus::Queued)
                 {
-                    return Err(format!("Download already in progress for {repo_id} ({quant})"));
+                    return Err(format!(
+                        "Download already in progress for {repo_id} ({quant})"
+                    ));
                 }
             }
         }
@@ -352,7 +360,9 @@ impl DownloadManager {
         let dest_path = PathBuf::from(&destination_dir);
         if let Err(e) = std::fs::create_dir_all(&dest_path) {
             self.set_job_error(&job_id, format!("Cannot create folder: {e}"));
-            if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+            if let Some(j) = self.get_job(&job_id) {
+                emit_progress(&j);
+            }
             return;
         }
 
@@ -363,7 +373,9 @@ impl DownloadManager {
             Ok(c) => c,
             Err(e) => {
                 self.set_job_error(&job_id, format!("HTTP client error: {e}"));
-                if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                if let Some(j) = self.get_job(&job_id) {
+                    emit_progress(&j);
+                }
                 return;
             }
         };
@@ -382,7 +394,9 @@ impl DownloadManager {
                 Ok(resp) => extract_content_length(&resp),
                 Err(e) => {
                     self.set_job_error(&job_id, format!("Cannot reach {file_rel}: {e}"));
-                    if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                    if let Some(j) = self.get_job(&job_id) {
+                        emit_progress(&j);
+                    }
                     return;
                 }
             };
@@ -448,7 +462,9 @@ impl DownloadManager {
                 Ok(r) => r,
                 Err(e) => {
                     self.set_job_error(&job_id, format!("Transfer error {file_rel}: {e}"));
-                    if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                    if let Some(j) = self.get_job(&job_id) {
+                        emit_progress(&j);
+                    }
                     return;
                 }
             };
@@ -490,8 +506,13 @@ impl DownloadManager {
                     continue;
                 }
             } else if !resp.status().is_success() {
-                self.set_job_error(&job_id, format!("Server returned {}: {file_rel}", resp.status()));
-                if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                self.set_job_error(
+                    &job_id,
+                    format!("Server returned {}: {file_rel}", resp.status()),
+                );
+                if let Some(j) = self.get_job(&job_id) {
+                    emit_progress(&j);
+                }
                 return;
             }
 
@@ -505,7 +526,9 @@ impl DownloadManager {
                 Ok(f) => f,
                 Err(e) => {
                     self.set_job_error(&job_id, format!("Cannot write file {file_rel}: {e}"));
-                    if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                    if let Some(j) = self.get_job(&job_id) {
+                        emit_progress(&j);
+                    }
                     return;
                 }
             };
@@ -531,14 +554,18 @@ impl DownloadManager {
                     Err(e) => {
                         let _ = out_file.flush();
                         self.set_job_error(&job_id, format!("Read stream interrupted: {e}"));
-                        if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                        if let Some(j) = self.get_job(&job_id) {
+                            emit_progress(&j);
+                        }
                         return;
                     }
                 };
 
                 if let Err(e) = out_file.write_all(&buf[..n]) {
                     self.set_job_error(&job_id, format!("Disk write error: {e}"));
-                    if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                    if let Some(j) = self.get_job(&job_id) {
+                        emit_progress(&j);
+                    }
                     return;
                 }
 
@@ -580,7 +607,9 @@ impl DownloadManager {
                     &job_id,
                     format!("Shard size mismatch for {file_rel} ({shard_done} of {expected_file_size} bytes)"),
                 );
-                if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                if let Some(j) = self.get_job(&job_id) {
+                    emit_progress(&j);
+                }
                 return;
             }
 
@@ -588,7 +617,9 @@ impl DownloadManager {
             let _ = std::fs::remove_file(&target_final);
             if let Err(e) = std::fs::rename(&target_part, &target_final) {
                 self.set_job_error(&job_id, format!("Cannot finalize shard: {e}"));
-                if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
+                if let Some(j) = self.get_job(&job_id) {
+                    emit_progress(&j);
+                }
                 return;
             }
 

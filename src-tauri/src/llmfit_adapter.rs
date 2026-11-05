@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use llmfit_core::analysis::{self, InstalledIndex};
 use llmfit_core::fit::{
-    rank_models_by_fit, CalcConfig, FitLevel, InferenceRuntime, ModelFit,
-    RunMode as LlmfitRunMode, ScoreComponents,
+    rank_models_by_fit, CalcConfig, FitLevel, InferenceRuntime, ModelFit, RunMode as LlmfitRunMode,
+    ScoreComponents,
 };
 use llmfit_core::hardware::{GpuBackend, SystemSpecs};
 use llmfit_core::models::{LlmModel, ModelDatabase, UseCase};
@@ -654,9 +654,7 @@ mod tests {
         // present), so assert ordering and validity rather than a machine-specific
         // score value.
         assert!(recs[0].score.is_finite());
-        assert!(recs
-            .windows(2)
-            .all(|pair| pair[0].score >= pair[1].score));
+        assert!(recs.windows(2).all(|pair| pair[0].score >= pair[1].score));
 
         for m in &recs {
             assert!(!m.id.is_empty());

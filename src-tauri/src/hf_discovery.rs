@@ -68,14 +68,30 @@ impl DiscoveryCategory {
 
     pub fn description(&self) -> &'static str {
         match self {
-            DiscoveryCategory::ForYou => "Optimal balance of quality, speed, and context tailored for your hardware",
-            DiscoveryCategory::NewTrending => "Recently released and trending models gaining traction across the community",
-            DiscoveryCategory::Coding => "Models specialized for code generation, software engineering, and tool calling",
-            DiscoveryCategory::Reasoning => "Deep reasoning, mathematical problem solving, and step-by-step logic models",
-            DiscoveryCategory::GeneralChat => "Versatile conversational assistants for general instruction following",
-            DiscoveryCategory::SmallFast => "High-efficiency models prioritizing low memory footprint and high tok/s",
-            DiscoveryCategory::Embeddings => "Models for semantic search, vector indexing, and retrieval-augmented generation",
-            DiscoveryCategory::Vision => "Vision-language models capable of analyzing and understanding images",
+            DiscoveryCategory::ForYou => {
+                "Optimal balance of quality, speed, and context tailored for your hardware"
+            }
+            DiscoveryCategory::NewTrending => {
+                "Recently released and trending models gaining traction across the community"
+            }
+            DiscoveryCategory::Coding => {
+                "Models specialized for code generation, software engineering, and tool calling"
+            }
+            DiscoveryCategory::Reasoning => {
+                "Deep reasoning, mathematical problem solving, and step-by-step logic models"
+            }
+            DiscoveryCategory::GeneralChat => {
+                "Versatile conversational assistants for general instruction following"
+            }
+            DiscoveryCategory::SmallFast => {
+                "High-efficiency models prioritizing low memory footprint and high tok/s"
+            }
+            DiscoveryCategory::Embeddings => {
+                "Models for semantic search, vector indexing, and retrieval-augmented generation"
+            }
+            DiscoveryCategory::Vision => {
+                "Vision-language models capable of analyzing and understanding images"
+            }
         }
     }
 
@@ -146,9 +162,11 @@ pub fn parse_search_query(raw: &str) -> ParsedSearchQuery {
     let cleaned = clean_repo_query(trimmed);
 
     // 1. Check for exact repo ID (owner/model) without spaces
-    let is_exact = cleaned.contains('/') && !cleaned.contains(' ') && cleaned.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.')
-    });
+    let is_exact = cleaned.contains('/')
+        && !cleaned.contains(' ')
+        && cleaned
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.'));
     let is_url = trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("huggingface.co/")
@@ -189,7 +207,9 @@ pub fn parse_search_query(raw: &str) -> ParsedSearchQuery {
             format_filter = Some("FP8".to_string());
         } else if upper == "BNB" || upper == "BITSANDBYTES" {
             format_filter = Some("BNB".to_string());
-        } else if upper.starts_with("Q") && (upper.contains("_K_") || upper.contains("_0") || upper.contains("_1")) {
+        } else if upper.starts_with("Q")
+            && (upper.contains("_K_") || upper.contains("_0") || upper.contains("_1"))
+        {
             quant_filter = Some(upper);
         } else if upper.starts_with("IQ") {
             quant_filter = Some(upper);
@@ -312,7 +332,11 @@ pub struct PublisherRegistry;
 
 impl PublisherRegistry {
     pub fn get_tier(author_or_repo: &str) -> PublisherTier {
-        let author = author_or_repo.split('/').next().unwrap_or(author_or_repo).to_ascii_lowercase();
+        let author = author_or_repo
+            .split('/')
+            .next()
+            .unwrap_or(author_or_repo)
+            .to_ascii_lowercase();
 
         const OFFICIAL_ORGS: &[&str] = &[
             "meta-llama",
@@ -396,7 +420,7 @@ impl DiscoveryService {
     ) -> Result<Vec<HfModelRecord>> {
         let mut url = reqwest::Url::parse(HF_MODELS_API)
             .map_err(|e| anyhow!("Failed to parse HF URL: {e}"))?;
-        
+
         {
             let mut query_pairs = url.query_pairs_mut();
             for (k, v) in params {
@@ -451,8 +475,12 @@ impl DiscoveryService {
                     Self::query_models(client, &p1, token),
                     Self::query_models(client, &p2, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
             }
             DiscoveryCategory::NewTrending => {
                 // High trending score and recent releases
@@ -472,10 +500,14 @@ impl DiscoveryService {
                     Self::query_models(client, &p_trending, token),
                     Self::query_models(client, &p_created, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
                 if let Ok(list) = r2 {
                     // Filter newly created models to ensure basic quality (has some likes or downloads)
-                    let filtered = list.into_iter().filter(|m| m.likes >= 1 || m.downloads >= 5);
+                    let filtered = list
+                        .into_iter()
+                        .filter(|m| m.likes >= 1 || m.downloads >= 5);
                     records.extend(filtered);
                 }
             }
@@ -498,8 +530,12 @@ impl DiscoveryService {
                     Self::query_models(client, &p1, token),
                     Self::query_models(client, &p2, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
             }
             DiscoveryCategory::Reasoning => {
                 let p1 = [
@@ -520,8 +556,12 @@ impl DiscoveryService {
                     Self::query_models(client, &p1, token),
                     Self::query_models(client, &p2, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
             }
             DiscoveryCategory::GeneralChat => {
                 let p1 = [
@@ -541,8 +581,12 @@ impl DiscoveryService {
                     Self::query_models(client, &p1, token),
                     Self::query_models(client, &p2, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
             }
             DiscoveryCategory::SmallFast => {
                 let p1 = [
@@ -571,9 +615,15 @@ impl DiscoveryService {
                     Self::query_models(client, &p2, token),
                     Self::query_models(client, &p3, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
-                if let Ok(list) = r3 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r3 {
+                    records.extend(list);
+                }
             }
             DiscoveryCategory::Embeddings => {
                 let p1 = [
@@ -592,8 +642,12 @@ impl DiscoveryService {
                     Self::query_models(client, &p1, token),
                     Self::query_models(client, &p2, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
             }
             DiscoveryCategory::Vision => {
                 let p1 = [
@@ -612,8 +666,12 @@ impl DiscoveryService {
                     Self::query_models(client, &p1, token),
                     Self::query_models(client, &p2, token)
                 );
-                if let Ok(list) = r1 { records.extend(list); }
-                if let Ok(list) = r2 { records.extend(list); }
+                if let Ok(list) = r1 {
+                    records.extend(list);
+                }
+                if let Ok(list) = r2 {
+                    records.extend(list);
+                }
             }
         }
 
@@ -741,7 +799,11 @@ impl DiscoveryCache {
         }
     }
 
-    pub fn get_feed(&self, category: &DiscoveryCategory, max_age: Duration) -> Option<Vec<HfModelRecord>> {
+    pub fn get_feed(
+        &self,
+        category: &DiscoveryCategory,
+        max_age: Duration,
+    ) -> Option<Vec<HfModelRecord>> {
         let key = category.as_str();
         let guard = self.feeds.lock().ok()?;
         let entry = guard.get(key)?;
@@ -804,14 +866,20 @@ mod tests {
     #[test]
     fn test_parse_search_query_exact_repo_id() {
         let q = parse_search_query("Qwen/Qwen2.5-Coder-7B-Instruct");
-        assert_eq!(q.exact_repo_id.as_deref(), Some("Qwen/Qwen2.5-Coder-7B-Instruct"));
+        assert_eq!(
+            q.exact_repo_id.as_deref(),
+            Some("Qwen/Qwen2.5-Coder-7B-Instruct")
+        );
         assert!(!q.is_url);
     }
 
     #[test]
     fn test_parse_search_query_url() {
         let q = parse_search_query("https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct");
-        assert_eq!(q.exact_repo_id.as_deref(), Some("meta-llama/Llama-3.1-8B-Instruct"));
+        assert_eq!(
+            q.exact_repo_id.as_deref(),
+            Some("meta-llama/Llama-3.1-8B-Instruct")
+        );
         assert!(q.is_url);
     }
 
@@ -826,30 +894,68 @@ mod tests {
 
     #[test]
     fn test_publisher_tier_classification() {
-        assert_eq!(PublisherRegistry::get_tier("Qwen/Qwen2.5-7B"), PublisherTier::OfficialOrg);
-        assert_eq!(PublisherRegistry::get_tier("meta-llama/Llama-3.1-8B"), PublisherTier::OfficialOrg);
-        assert_eq!(PublisherRegistry::get_tier("bartowski/Qwen2.5-7B-GGUF"), PublisherTier::TrustedQuantizer);
-        assert_eq!(PublisherRegistry::get_tier("unsloth/Llama-3.1-8B-GGUF"), PublisherTier::TrustedQuantizer);
-        assert_eq!(PublisherRegistry::get_tier("some-random-user/my-model"), PublisherTier::Community);
+        assert_eq!(
+            PublisherRegistry::get_tier("Qwen/Qwen2.5-7B"),
+            PublisherTier::OfficialOrg
+        );
+        assert_eq!(
+            PublisherRegistry::get_tier("meta-llama/Llama-3.1-8B"),
+            PublisherTier::OfficialOrg
+        );
+        assert_eq!(
+            PublisherRegistry::get_tier("bartowski/Qwen2.5-7B-GGUF"),
+            PublisherTier::TrustedQuantizer
+        );
+        assert_eq!(
+            PublisherRegistry::get_tier("unsloth/Llama-3.1-8B-GGUF"),
+            PublisherTier::TrustedQuantizer
+        );
+        assert_eq!(
+            PublisherRegistry::get_tier("some-random-user/my-model"),
+            PublisherTier::Community
+        );
     }
 
     #[test]
     fn test_clean_repo_query_urls_and_spacing() {
-        assert_eq!(clean_repo_query("https://www.huggingface.co/XHToken/Spark-X2.6-4B-GGUF"), "XHToken/Spark-X2.6-4B-GGUF");
-        assert_eq!(clean_repo_query("https://hf.co/XHToken/Spark-X2.6-4B-GGUF"), "XHToken/Spark-X2.6-4B-GGUF");
-        assert_eq!(clean_repo_query("XHToken / Spark-X2.6-4B-GGUF"), "XHToken/Spark-X2.6-4B-GGUF");
+        assert_eq!(
+            clean_repo_query("https://www.huggingface.co/XHToken/Spark-X2.6-4B-GGUF"),
+            "XHToken/Spark-X2.6-4B-GGUF"
+        );
+        assert_eq!(
+            clean_repo_query("https://hf.co/XHToken/Spark-X2.6-4B-GGUF"),
+            "XHToken/Spark-X2.6-4B-GGUF"
+        );
+        assert_eq!(
+            clean_repo_query("XHToken / Spark-X2.6-4B-GGUF"),
+            "XHToken/Spark-X2.6-4B-GGUF"
+        );
         let parsed = parse_search_query("XHToken / Spark-X2.6-4B-GGUF");
-        assert_eq!(parsed.exact_repo_id.as_deref(), Some("XHToken/Spark-X2.6-4B-GGUF"));
+        assert_eq!(
+            parsed.exact_repo_id.as_deref(),
+            Some("XHToken/Spark-X2.6-4B-GGUF")
+        );
     }
 
     #[tokio::test]
     async fn test_search_xhtoken() {
         let st = std::sync::Arc::new(crate::state::AppState::new());
-        let results = crate::commands::search_models_with_fit_impl(&st, "XHToken/Spark-X2.6-4B-GGUF").await.unwrap();
-        assert!(!results.is_empty(), "Should return search results for XHToken/Spark-X2.6-4B-GGUF");
-        let exact = results.iter().find(|m| m.id.eq_ignore_ascii_case("XHToken/Spark-X2.6-4B-GGUF"));
+        let results =
+            crate::commands::search_models_with_fit_impl(&st, "XHToken/Spark-X2.6-4B-GGUF")
+                .await
+                .unwrap();
+        assert!(
+            !results.is_empty(),
+            "Should return search results for XHToken/Spark-X2.6-4B-GGUF"
+        );
+        let exact = results
+            .iter()
+            .find(|m| m.id.eq_ignore_ascii_case("XHToken/Spark-X2.6-4B-GGUF"));
         assert!(exact.is_some(), "Exact model should be in results");
         let m = exact.unwrap();
-        assert!(!m.variants.is_empty(), "Should discover GGUF variants for XHToken/Spark-X2.6-4B-GGUF");
+        assert!(
+            !m.variants.is_empty(),
+            "Should discover GGUF variants for XHToken/Spark-X2.6-4B-GGUF"
+        );
     }
 }

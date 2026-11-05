@@ -119,8 +119,12 @@ pub fn validate_llamacpp_fork(fork: &LlamaCppFork) -> Result<(), String> {
     let id = fork.id.trim();
     let id_ok = !id.is_empty()
         && id.len() <= 32
-        && id.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && id.chars()
+        && id
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id
+            .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !id_ok {
         return Err(
@@ -137,11 +141,14 @@ pub fn validate_llamacpp_fork(fork: &LlamaCppFork) -> Result<(), String> {
     let repo_ok = repo.split('/').count() == 2
         && repo.split('/').all(|part| {
             !part.is_empty()
-                && part.chars()
+                && part
+                    .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         });
     if !repo_ok {
-        return Err("fork repo must be a GitHub 'owner/name' path (e.g. ggml-org/llama.cpp)".into());
+        return Err(
+            "fork repo must be a GitHub 'owner/name' path (e.g. ggml-org/llama.cpp)".into(),
+        );
     }
     let asset_re = regex_lite::Regex::new(&fork.asset_regex)
         .map_err(|e| format!("asset regex is invalid: {e}"))?;
@@ -831,7 +838,8 @@ pub(crate) fn migrate_llamacpp_config(cfg: &mut PersistedConfig) {
         upstream.help = cfg.llamacpp_help.clone();
         upstream.executable = cfg.llamacpp_executable.clone();
         upstream.dir = cfg.llamacpp_dir.clone();
-        cfg.llamacpp_channels.insert("upstream".to_string(), upstream);
+        cfg.llamacpp_channels
+            .insert("upstream".to_string(), upstream);
     }
     // Forks that were built-in in older versions but no longer ship built-in
     // (e.g. PrismML) are converted to custom forks instead of being deleted,
@@ -852,7 +860,11 @@ pub(crate) fn migrate_llamacpp_config(cfg: &mut PersistedConfig) {
             cfg.llamacpp_forks.push(builtin);
         }
     }
-    let fork_ids: Vec<String> = cfg.llamacpp_forks.iter().map(|fork| fork.id.clone()).collect();
+    let fork_ids: Vec<String> = cfg
+        .llamacpp_forks
+        .iter()
+        .map(|fork| fork.id.clone())
+        .collect();
     for fork_id in fork_ids {
         if !cfg.llamacpp_channels.contains_key(&fork_id) {
             cfg.llamacpp_channels
@@ -1727,8 +1739,14 @@ mod tests {
         assert!(cfg.llamacpp_forks.iter().all(|f| f.builtin));
         crate::state::migrate_llamacpp_config(&mut cfg);
         assert_eq!(cfg.llamacpp_forks.len(), 1);
-        assert!(cfg.llamacpp_forks.iter().any(|f| f.id == "upstream" && f.builtin));
-        assert_eq!(cfg.llamacpp_channels["upstream"].installed_tag.as_deref(), Some("b12119"));
+        assert!(cfg
+            .llamacpp_forks
+            .iter()
+            .any(|f| f.id == "upstream" && f.builtin));
+        assert_eq!(
+            cfg.llamacpp_channels["upstream"].installed_tag.as_deref(),
+            Some("b12119")
+        );
 
         // A config carrying a custom fork keeps it and gets an install-state entry seeded.
         let mut cfg2 = PersistedConfig::default();
@@ -1783,12 +1801,25 @@ mod tests {
         let mut cfg: PersistedConfig = serde_json::from_str(stored).unwrap();
         crate::state::migrate_llamacpp_config(&mut cfg);
         // Upstream remains built-in; prism is retained but demoted to a custom fork.
-        assert!(cfg.llamacpp_forks.iter().any(|f| f.id == "upstream" && f.builtin));
-        let prism = cfg.llamacpp_forks.iter().find(|f| f.id == "prism").expect("prism kept");
+        assert!(cfg
+            .llamacpp_forks
+            .iter()
+            .any(|f| f.id == "upstream" && f.builtin));
+        let prism = cfg
+            .llamacpp_forks
+            .iter()
+            .find(|f| f.id == "prism")
+            .expect("prism kept");
         assert!(!prism.builtin, "prism must survive as a custom fork");
-        assert_eq!(prism.asset_regex, r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$");
+        assert_eq!(
+            prism.asset_regex,
+            r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$"
+        );
         // Install state is preserved so existing servers keep working.
-        assert_eq!(cfg.llamacpp_channels["prism"].installed_tag.as_deref(), Some("b10709-9a9394a"));
+        assert_eq!(
+            cfg.llamacpp_channels["prism"].installed_tag.as_deref(),
+            Some("b10709-9a9394a")
+        );
         assert_eq!(cfg.servers[0].llamacpp_channel, "prism");
 
         // Re-running migration (as on every app start) is stable.
@@ -1821,12 +1852,31 @@ mod tests {
         let text = serde_json::to_string(&cfg).unwrap();
         let mut reloaded: PersistedConfig = serde_json::from_str(&text).unwrap();
         crate::state::migrate_llamacpp_config(&mut reloaded);
-        let fork = reloaded.llamacpp_forks.iter().find(|f| f.id == "my-fork").expect("custom fork survived");
-        assert_eq!(fork.asset_regex, r"^my-llama-.*-win-cuda-(\d+)\.(\d+)-x64\.zip$");
+        let fork = reloaded
+            .llamacpp_forks
+            .iter()
+            .find(|f| f.id == "my-fork")
+            .expect("custom fork survived");
+        assert_eq!(
+            fork.asset_regex,
+            r"^my-llama-.*-win-cuda-(\d+)\.(\d+)-x64\.zip$"
+        );
         assert_eq!(fork.runtime_regex, "");
-        assert_eq!(reloaded.llamacpp_channels["my-fork"].installed_tag.as_deref(), Some("b1"));
+        assert_eq!(
+            reloaded.llamacpp_channels["my-fork"]
+                .installed_tag
+                .as_deref(),
+            Some("b1")
+        );
         // Built-ins are added, but never replace or drop user forks.
-        assert_eq!(reloaded.llamacpp_forks.iter().filter(|f| f.id == "upstream").count(), 1);
+        assert_eq!(
+            reloaded
+                .llamacpp_forks
+                .iter()
+                .filter(|f| f.id == "upstream")
+                .count(),
+            1
+        );
     }
 
     #[test]

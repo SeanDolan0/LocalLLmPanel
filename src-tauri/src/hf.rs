@@ -945,7 +945,11 @@ pub async fn verified_gguf_variants(
 
     let mut variants = check_gguf_repo(client, repo_id, sem, token).await;
     // Stable, human-friendly ordering: larger (higher precision) first.
-    variants.sort_by(|a, b| b.weight_bytes.unwrap_or(0).cmp(&a.weight_bytes.unwrap_or(0)));
+    variants.sort_by(|a, b| {
+        b.weight_bytes
+            .unwrap_or(0)
+            .cmp(&a.weight_bytes.unwrap_or(0))
+    });
 
     if let Some(c) = cache {
         if let Ok(mut guard) = c.lock() {
@@ -988,10 +992,10 @@ pub struct PullStatus {
     pub state: String, // downloading | complete | failed
     pub file: Option<String>,
     pub percent: Option<f64>,
-    pub speed_bps: Option<f64>, // bytes per second
-    pub eta_seconds: Option<f64>, // estimated time remaining in seconds
+    pub speed_bps: Option<f64>,        // bytes per second
+    pub eta_seconds: Option<f64>,      // estimated time remaining in seconds
     pub bytes_downloaded: Option<u64>, // bytes on disk for current file
-    pub bytes_total: Option<u64>, // total bytes for current file
+    pub bytes_total: Option<u64>,      // total bytes for current file
 }
 
 /// Parse a progress line from a tqdm progress bar (hf download).
@@ -1000,14 +1004,17 @@ pub struct PullStatus {
 /// Formats (with progress bars enabled, streamed via '\r' separators):
 ///   "Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"
 ///   "Downloading:  10%|██       | 500M/5.3G [00:12<01:48, 120MB/s]"
-fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>, Option<u64>, Option<u64>)> {
+fn parse_progress_line(
+    line: &str,
+) -> Option<(f64, Option<f64>, Option<f64>, Option<u64>, Option<u64>)> {
     // Look for percentage pattern like " 10%" or "100%"
     let percent_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").ok()?;
     let percent_match = percent_re.captures(line)?;
     let percent = percent_match.get(1)?.as_str().parse::<f64>().ok()?;
 
     // Look for speed pattern like "120MB/s", "1.5GB/s", "500KB/s", "1.5s/it"
-    let speed_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?B)/s|(\d+(?:\.\d+)?)\s*s/it").ok()?;
+    let speed_re =
+        regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?B)/s|(\d+(?:\.\d+)?)\s*s/it").ok()?;
     let speed_bps = speed_re.captures(line).and_then(|cap| {
         if let Some(bytes_match) = cap.get(1) {
             let val = bytes_match.as_str().parse::<f64>().ok()?;
@@ -1036,7 +1043,10 @@ fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>, Opt
     });
 
     // Look for downloaded/total bytes like "500M/5.3G" or "12.0k/1.0k"
-    let bytes_re = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)\s*([KMGT]?)(?:B)?\s*/\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:B)?").ok()?;
+    let bytes_re = regex_lite::Regex::new(
+        r"(\d+(?:\.\d+)?)\s*([KMGT]?)(?:B)?\s*/\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:B)?",
+    )
+    .ok()?;
     let (bytes_downloaded, bytes_total) = bytes_re
         .captures(line)
         .and_then(|cap| {
@@ -1058,11 +1068,20 @@ fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>, Opt
             }
             let dl_bytes = (dl * dl_u as f64) as u64;
             let tot_bytes = (tot * tot_u as f64) as u64;
-            Some((Some(dl_bytes), if tot_bytes > 0 { Some(tot_bytes) } else { None }))
+            Some((
+                Some(dl_bytes),
+                if tot_bytes > 0 { Some(tot_bytes) } else { None },
+            ))
         })
         .unwrap_or((None, None));
 
-    Some((percent, speed_bps, eta_seconds, bytes_downloaded, bytes_total))
+    Some((
+        percent,
+        speed_bps,
+        eta_seconds,
+        bytes_downloaded,
+        bytes_total,
+    ))
 }
 
 /// Start a background `hf download <model_id>` in the venv, streaming progress
@@ -1207,7 +1226,10 @@ fi
                 if let Some(last_line) = out_lines.last() {
                     Some(last_line.to_string())
                 } else {
-                    Some("Download failed. Check WSL and Python environment status in Settings.".to_string())
+                    Some(
+                        "Download failed. Check WSL and Python environment status in Settings."
+                            .to_string(),
+                    )
                 }
             }
         } else {
@@ -1219,7 +1241,11 @@ fi
                 model: model_id.clone(),
                 state: state_label.into(),
                 file: err_msg,
-                percent: if state_label == "complete" { Some(100.0) } else { None },
+                percent: if state_label == "complete" {
+                    Some(100.0)
+                } else {
+                    None
+                },
                 speed_bps: None,
                 eta_seconds: None,
                 bytes_downloaded: None,
@@ -1525,7 +1551,9 @@ mod tests {
     #[test]
     fn test_parse_progress_line_real_frames() {
         assert_eq!(
-            parse_progress_line("Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"),
+            parse_progress_line(
+                "Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 25.67it/s]"
+            ),
             Some((50.0, None, Some(0.0), None, None))
         );
         assert_eq!(

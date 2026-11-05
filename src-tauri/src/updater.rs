@@ -670,13 +670,17 @@ pub fn generate_updater_script(params: &UpdaterScriptParams) -> String {
     let log_str = params.log_path.to_string_lossy().replace('\'', "''");
     let status_str = params.status_path.to_string_lossy().replace('\'', "''");
     let install_dir_str = params.install_dir.to_string_lossy().replace('\'', "''");
-    let target_exe_str = params.target_executable.to_string_lossy().replace('\'', "''");
+    let target_exe_str = params
+        .target_executable
+        .to_string_lossy()
+        .replace('\'', "''");
     let version_str = params.expected_version.replace('\'', "''");
     let app_pid = params.app_pid;
     let skip_ui = if params.skip_ui {
         "$true".to_string()
     } else {
-        "($env:LOCALLLMPANEL_UPDATE_NO_UI -eq '1') -or ($env:CI -eq '1') -or ($env:TESTING -eq '1')".to_string()
+        "($env:LOCALLLMPANEL_UPDATE_NO_UI -eq '1') -or ($env:CI -eq '1') -or ($env:TESTING -eq '1')"
+            .to_string()
     };
 
     format!(
@@ -1244,7 +1248,9 @@ mod tests {
         assert!(script.contains("'/S'"));
         assert!(script.contains(r#""/D=$installDir""#));
         assert!(script.contains("$installerExitCode = $proc.ExitCode"));
-        assert!(script.contains("Fail-Update \"Installer failed with non-zero exit code: $installerExitCode\""));
+        assert!(script.contains(
+            "Fail-Update \"Installer failed with non-zero exit code: $installerExitCode\""
+        ));
         assert!(script.contains("Test-Path -LiteralPath $targetExe -PathType Leaf"));
         assert!(script.contains("Normalize-Ver $expectedVersion"));
         assert!(script.contains("Normalize-Ver $prodVersion"));
@@ -1274,7 +1280,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn test_failed_installer_exit_codes() {
-        let test_dir = std::env::temp_dir().join(format!("llm_update_test_fail_{}", std::process::id()));
+        let test_dir =
+            std::env::temp_dir().join(format!("llm_update_test_fail_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
 
@@ -1301,7 +1308,11 @@ mod tests {
         std::fs::write(&script, script_content).unwrap();
 
         let output = run_powershell_script(&script);
-        assert_eq!(output.status.code(), Some(42), "helper must propagate failed installer exit code");
+        assert_eq!(
+            output.status.code(),
+            Some(42),
+            "helper must propagate failed installer exit code"
+        );
 
         let status_json = read_status_json(&status);
         assert_eq!(status_json["status"], "failed");
@@ -1316,7 +1327,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn test_missing_installed_executable() {
-        let test_dir = std::env::temp_dir().join(format!("llm_update_test_missing_{}", std::process::id()));
+        let test_dir =
+            std::env::temp_dir().join(format!("llm_update_test_missing_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
 
@@ -1343,7 +1355,11 @@ mod tests {
         std::fs::write(&script, script_content).unwrap();
 
         let output = run_powershell_script(&script);
-        assert_eq!(output.status.code(), Some(4), "helper must exit 4 when installed executable is missing");
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "helper must exit 4 when installed executable is missing"
+        );
 
         let status_json = read_status_json(&status);
         assert_eq!(status_json["status"], "failed");
@@ -1358,7 +1374,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn test_installed_version_mismatch() {
-        let test_dir = std::env::temp_dir().join(format!("llm_update_test_mismatch_{}", std::process::id()));
+        let test_dir =
+            std::env::temp_dir().join(format!("llm_update_test_mismatch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
 
@@ -1388,14 +1405,20 @@ mod tests {
         std::fs::write(&script, script_content).unwrap();
 
         let output = run_powershell_script(&script);
-        assert_eq!(output.status.code(), Some(5), "helper must exit 5 on version mismatch");
+        assert_eq!(
+            output.status.code(),
+            Some(5),
+            "helper must exit 5 on version mismatch"
+        );
 
         let status_json = read_status_json(&status);
         assert_eq!(status_json["status"], "failed");
         assert_eq!(status_json["exitCode"], 5);
 
         let log_content = std::fs::read_to_string(&log).unwrap();
-        assert!(log_content.contains("Installed executable version does not match expected version"));
+        assert!(
+            log_content.contains("Installed executable version does not match expected version")
+        );
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -1403,7 +1426,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn test_successful_installation_and_relaunch() {
-        let test_dir = std::env::temp_dir().join(format!("llm_update_test_success_{}", std::process::id()));
+        let test_dir =
+            std::env::temp_dir().join(format!("llm_update_test_success_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
 
@@ -1413,7 +1437,10 @@ mod tests {
 
         let out = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-Command"])
-            .arg(format!("(Get-Item '{}').VersionInfo.ProductVersion", target_exe.display()))
+            .arg(format!(
+                "(Get-Item '{}').VersionInfo.ProductVersion",
+                target_exe.display()
+            ))
             .output()
             .unwrap();
         let raw_ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1441,7 +1468,11 @@ mod tests {
         std::fs::write(&script, script_content).unwrap();
 
         let output = run_powershell_script(&script);
-        assert_eq!(output.status.code(), Some(0), "helper must succeed and exit 0 when version matches");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "helper must succeed and exit 0 when version matches"
+        );
 
         let status_json = read_status_json(&status);
         assert_eq!(status_json["status"], "success");

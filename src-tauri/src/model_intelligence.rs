@@ -4,9 +4,9 @@
 //! - Model family and base model association
 //! - Robust quantization classification across GGUF, AWQ, GPTQ, FP8, BNB, and Safetensors
 
+use crate::hf::{self, GgufRepoFile, QuantFormat, QuantVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use crate::hf::{self, GgufRepoFile, QuantFormat, QuantVariant};
 
 /// Logical GGUF artifact option presented to the user.
 /// Shards (e.g. `00001-of-00003`) are grouped together so downloading downloads all parts.
@@ -33,10 +33,7 @@ pub struct LogicalGgufArtifact {
 }
 
 /// Group a list of raw GGUF repository files into logical, multi-shard-aware artifacts.
-pub fn group_gguf_repo_files(
-    repo_id: &str,
-    files: &[GgufRepoFile],
-) -> Vec<LogicalGgufArtifact> {
+pub fn group_gguf_repo_files(repo_id: &str, files: &[GgufRepoFile]) -> Vec<LogicalGgufArtifact> {
     // 1. Separate mmproj companions
     let mut mmproj_file = None;
     for file in files {
@@ -130,21 +127,29 @@ pub struct ModelFamilyInfo {
     pub is_embedding: bool,
 }
 
-pub fn infer_model_family(model_id: &str, pipeline_tag: Option<&str>, tags: &[String]) -> ModelFamilyInfo {
+pub fn infer_model_family(
+    model_id: &str,
+    pipeline_tag: Option<&str>,
+    tags: &[String],
+) -> ModelFamilyInfo {
     let lower = model_id.to_ascii_lowercase();
 
     let is_embedding = pipeline_tag == Some("feature-extraction")
         || lower.contains("embed")
         || lower.contains("bge")
         || lower.contains("gte")
-        || tags.iter().any(|t| t == "feature-extraction" || t == "sentence-similarity");
+        || tags
+            .iter()
+            .any(|t| t == "feature-extraction" || t == "sentence-similarity");
 
     let is_multimodal = pipeline_tag == Some("image-text-to-text")
         || lower.contains("vision")
         || lower.contains("-vl")
         || lower.contains("pixtral")
         || lower.contains("llava")
-        || tags.iter().any(|t| t == "image-text-to-text" || t == "multimodal");
+        || tags
+            .iter()
+            .any(|t| t == "image-text-to-text" || t == "multimodal");
 
     let is_coding = lower.contains("coder")
         || lower.contains("code")
@@ -202,7 +207,9 @@ pub fn infer_model_family(model_id: &str, pipeline_tag: Option<&str>, tags: &[St
 }
 
 fn extract_param_token(lower: &str) -> Option<String> {
-    for token in ["0.5b", "1.5b", "3b", "4b", "7b", "8b", "9b", "12b", "14b", "27b", "32b", "70b", "72b"] {
+    for token in [
+        "0.5b", "1.5b", "3b", "4b", "7b", "8b", "9b", "12b", "14b", "27b", "32b", "70b", "72b",
+    ] {
         if lower.contains(token) {
             return Some(token.to_ascii_uppercase());
         }
@@ -213,7 +220,11 @@ fn extract_param_token(lower: &str) -> Option<String> {
 /// Infer canonical base repository name from a quant repo name.
 pub fn infer_base_model_id(repo_id: &str) -> Option<String> {
     let lower = repo_id.to_ascii_lowercase();
-    if !lower.contains("-gguf") && !lower.contains("-awq") && !lower.contains("-gptq") && !lower.contains("-fp8") {
+    if !lower.contains("-gguf")
+        && !lower.contains("-awq")
+        && !lower.contains("-gptq")
+        && !lower.contains("-fp8")
+    {
         return None;
     }
 
@@ -221,10 +232,17 @@ pub fn infer_base_model_id(repo_id: &str) -> Option<String> {
     let mut base_name = repo_name.to_string();
 
     for suffix in [
-        "-GGUF", "-gguf", "-Gguf",
-        "-AWQ", "-awq",
-        "-GPTQ-Int4", "-GPTQ", "-gptq",
-        "-FP8-dynamic", "-FP8", "-fp8",
+        "-GGUF",
+        "-gguf",
+        "-Gguf",
+        "-AWQ",
+        "-awq",
+        "-GPTQ-Int4",
+        "-GPTQ",
+        "-gptq",
+        "-FP8-dynamic",
+        "-FP8",
+        "-fp8",
         "-bnb-4bit",
     ] {
         if let Some(stripped) = base_name.strip_suffix(suffix) {

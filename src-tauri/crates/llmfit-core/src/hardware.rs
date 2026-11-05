@@ -1858,10 +1858,7 @@ impl SystemSpecs {
             return Vec::new();
         }
 
-        let output = match silent_cmd("vulkaninfo")
-            .arg("--summary")
-            .output()
-        {
+        let output = match silent_cmd("vulkaninfo").arg("--summary").output() {
             Ok(o) if o.status.success() => o,
             _ => match silent_cmd("vulkaninfo").output() {
                 Ok(o) if o.status.success() => o,

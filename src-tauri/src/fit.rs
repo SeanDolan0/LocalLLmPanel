@@ -126,7 +126,7 @@ pub fn score_variant(
     } else {
         params_b
     };
-    
+
     // Determine format support based on channel availability
     let format_support = if variant.is_gguf {
         if variant.required_channel != "upstream" {
@@ -923,12 +923,28 @@ mod tests {
             head_dim: Some(128),
         };
         // With Prism channel installed, format_support = Native
-        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, Some("prism".to_string()));
+        let r = score_variant(
+            &hw,
+            &v,
+            &arch,
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+            Some("prism".to_string()),
+        );
         assert_eq!(r.format_support, FormatSupport::Native);
         // 6 GB + 2.5 GB overhead = 8.5 GB, VRAM ratio = 8.5/12.2 ≈ 0.69 → Constrained
         // But hybrid KV (16 full-attention layers) = 65536 bytes/token → plenty of room for context
-        assert!(r.vram_context > 10000, "Should have large context with hybrid KV");
-        assert!(r.verdict != FitVerdict::DoesNotFit, "27B ternary should fit on 12GB with hybrid KV");
+        assert!(
+            r.vram_context > 10000,
+            "Should have large context with hybrid KV"
+        );
+        assert!(
+            r.verdict != FitVerdict::DoesNotFit,
+            "27B ternary should fit on 12GB with hybrid KV"
+        );
     }
 
     #[test]
