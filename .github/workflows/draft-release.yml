@@ -1,0 +1,97 @@
+name: Draft release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to package (for example v2.1.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-draft:
+    name: Build Windows release
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Install LLVM linker
+        shell: pwsh
+        run: |
+          choco install llvm --yes --no-progress
+          $llvmBin = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvmBin 'lld-link.exe'))) {
+            throw "LLVM installed but lld-link.exe was not found in $llvmBin"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify tag matches application version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $packageVersion = (Get-Content package.json | ConvertFrom-Json).version
+          $expectedTag = "v$packageVersion"
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "Release tag $env:RELEASE_TAG does not match package version $expectedTag"
+          }
+
+      - name: Validate release metadata
+        run: npm run release:check
+
+      - name: Build executable and NSIS installer
+        run: npm run build:setup
+
+      - name: Validate release files and SHA-256 checksums
+        run: node scripts/validate-release.mjs --setup --artifacts
+
+      - name: Create draft GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $assets = @(
+            Get-ChildItem dist-release -File |
+              Where-Object {
+                $_.Name -like 'LocalLLMPanel-*.exe' -or
+                $_.Name -like 'LocalLLMPanel-*.exe.sha256' -or
+                $_.Name -like 'Local.LLM.Panel_*_x64-setup.exe' -or
+                $_.Name -like 'Local.LLM.Panel_*_x64-setup.exe.sha256'
+              }
+          )
+          if ($assets.Count -ne 4) {
+            throw "Expected four release files (two binaries and two checksums), found $($assets.Count)"
+          }
+          $assetPaths = @($assets | ForEach-Object { $_.FullName })
+          gh release create "$env:RELEASE_TAG" @assetPaths --draft --generate-notes --verify-tag --title "$env:RELEASE_TAG"

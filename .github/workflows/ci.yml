@@ -5,23 +5,43 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-jobs:
-  check:
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-      - name: Install Rust toolchain
+jobs:
+  windows:
+    name: Windows checks
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           target: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
 
-      - name: Install LLVM (for lld-link)
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install LLVM linker
         shell: pwsh
         run: |
           choco install llvm --yes --no-progress
@@ -31,41 +51,60 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
         run: npm ci --ignore-scripts
 
       - name: Validate release metadata
-        run: node scripts/validate-release.mjs --setup
+        run: npm run release:check
 
-      - name: Frontend contract smoke tests
+      - name: Frontend contract tests
         run: npm run test:contract
 
-      - name: TypeScript and Vite build
+      - name: Check formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Build frontend
         run: npm run build
 
-      - name: Cargo workspace check
+      - name: Check Rust workspace
         run: cargo check --workspace --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Rust workspace tests
+      - name: Test Rust workspace
         run: cargo test --workspace --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Build standalone release artifact
+      - name: Build standalone Windows executable
         run: npm run build:fast
 
-      - name: Validate release artifact and checksum
+      - name: Validate build artifacts and checksums
         run: node scripts/validate-release.mjs --fast --artifacts
+
+      - name: Upload standalone executable and checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: local-llm-panel-windows-standalone
+          path: |
+            dist-release/LocalLLMPanel-*.exe
+            dist-release/LocalLLMPanel-*.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      - name: Cargo audit
-        run: cd src-tauri; cargo audit
+      - name: Audit Rust dependencies
+        working-directory: src-tauri
+        run: cargo audit
 
-      - name: NPM audit
+      - name: Audit npm dependencies
         run: npm audit --audit-level=moderate
