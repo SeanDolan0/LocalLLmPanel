@@ -6,7 +6,12 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::estimate;
-use crate::state::{AppState, LlamaCppChannel};
+use crate::state::AppState;
+
+/// Serde default for `required_channel`.
+fn default_upstream_channel() -> String {
+    "upstream".to_string()
+}
 use std::sync::Arc as StdArc;
 use tauri::Emitter;
 
@@ -491,9 +496,9 @@ pub struct QuantVariant {
     pub params_b: Option<f64>,
     pub gguf_file: Option<String>,
     pub vllm_native: bool,
-    /// The llama.cpp channel required to run this variant: "upstream" or "prism"
-    #[serde(default)]
-    pub required_channel: LlamaCppChannel,
+    /// The llama.cpp fork required to run this variant: "upstream", "prism", or a custom fork id.
+    #[serde(default = "default_upstream_channel")]
+    pub required_channel: String,
 }
 
 static GGUF_SHARD_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
@@ -650,7 +655,7 @@ pub async fn discover_quant_variants(
             params_b: None,
             gguf_file: None,
             vllm_native: true,
-            required_channel: crate::state::LlamaCppChannel::Upstream,
+            required_channel: default_upstream_channel(),
         }];
         if let Some(c) = cache {
             if let Ok(mut guard) = c.lock() {
@@ -699,7 +704,7 @@ pub async fn discover_quant_variants(
         params_b: None,
         gguf_file: None,
         vllm_native: true,
-        required_channel: LlamaCppChannel::Upstream,
+        required_channel: default_upstream_channel(),
     });
 
     // 5. Run cross-repo candidate, publisher, and GGUF queries concurrently
@@ -776,7 +781,7 @@ pub async fn discover_quant_variants(
                 params_b: None,
                 gguf_file: None,
                 vllm_native: true,
-                required_channel: LlamaCppChannel::Upstream,
+                required_channel: default_upstream_channel(),
             });
         }
     }
@@ -878,9 +883,9 @@ pub async fn check_gguf_repo(
                         if let Some(quant_label) = parse_gguf_quant_label(fname) {
                             let size = sib.get("size").and_then(|v| v.as_u64());
                             let required_channel = if quant_requires_prism_channel(&quant_label) {
-                                LlamaCppChannel::Prism
+                                "prism".to_string()
                             } else {
-                                LlamaCppChannel::Upstream
+                                "upstream".to_string()
                             };
                             match variant_map.entry(quant_label.clone()) {
                                 std::collections::btree_map::Entry::Vacant(e) => {
@@ -1051,9 +1056,10 @@ fn parse_progress_line(line: &str) -> Option<(f64, Option<f64>, Option<f64>, Opt
             if dl_u == 1 && tot_u == 1 {
                 return None;
             }
-            Some(((dl * dl_u as f64) as u64, (tot * tot_u as f64) as u64))
+            let dl_bytes = (dl * dl_u as f64) as u64;
+            let tot_bytes = (tot * tot_u as f64) as u64;
+            Some((Some(dl_bytes), if tot_bytes > 0 { Some(tot_bytes) } else { None }))
         })
-        .map(|(dl, tot)| (Some(dl), Some(tot)))
         .unwrap_or((None, None));
 
     Some((percent, speed_bps, eta_seconds, bytes_downloaded, bytes_total))
@@ -1136,7 +1142,7 @@ else
     exit 1
 fi
 
-HF_HUB_DISABLE_TQDM=1 {offline_env}{token_env}$DOWNLOAD_CMD {model_arg} 2>&1 || echo __HF_PULL_FAILED__"#,
+{offline_env}{token_env}$DOWNLOAD_CMD {model_arg} 2>&1 || echo __HF_PULL_FAILED__"#,
             tilde_snippet = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
             venv_literal = venv_literal,
             home_env = home_env,
@@ -1309,7 +1315,7 @@ mod tests {
             params_b: Some(7.0),
             gguf_file: None,
             vllm_native: true,
-            required_channel: LlamaCppChannel::Upstream,
+            required_channel: default_upstream_channel(),
         }];
         cache.lock().unwrap().insert(
             "test/model".to_string(),

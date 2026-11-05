@@ -1282,10 +1282,10 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     };
     let (wsl_child, native_child, wsl_pid) = match backend_kind {
         crate::state::ServerBackend::Llamacpp => {
-            let channel = def.llamacpp_channel;
-            let exe = crate::llamacpp_install::executable_from_config_channel(&cfg, channel)
+            let channel = def.llamacpp_channel.clone();
+            let exe = crate::llamacpp_install::executable_from_config_channel(&cfg, &channel)
                 .ok_or_else(|| anyhow!(
-                    "llama-server.exe for {channel:?} channel is not installed. Install it from Dashboard or Settings, or set a custom executable path."
+                    "llama-server.exe for fork '{channel}' is not installed. Install it from Dashboard or Settings, or set a custom executable path."
                 ))?;
             let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
             let mut def = def.clone();
@@ -1758,7 +1758,7 @@ pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String
     } else if (lower.contains("has offset") && lower.contains("expected"))
         || lower.contains("failed to read tensor data")
     {
-        "GGUF tensor offset mismatch. The model's quantization format (e.g. ternary group size 128) does not match what the running llama.cpp binary expects. Ensure you are running the PrismML llama.cpp channel for ternary models, or use a GGUF quantized for standard llama.cpp (e.g. Q2_g64 / PQ2_0)."
+        "GGUF tensor offset mismatch. The model's quantization format (e.g. ternary group size 128) does not match what the running llama.cpp binary expects. Ensure you are running a PrismML llama.cpp fork for ternary models (add it in Settings → llama.cpp Forks), or use a GGUF quantized for standard llama.cpp (e.g. Q2_g64 / PQ2_0)."
     } else if lower.contains("erroroutofdevicememory")
         || lower.contains("unable to allocate")
         || lower.contains("failed to allocate")
@@ -1777,7 +1777,7 @@ pub fn startup_failure_hint(backend: &str, exit: &str, log_tail: &str) -> String
         || lower.contains("unknown ggml type")
         || lower.contains("unsupported ggml type")
     {
-        "The model uses a ternary quantization format (PQ2_0, PTQ1_0, etc.) that requires the PrismML llama.cpp fork. Switch the server's llama.cpp channel to 'prism' in Settings, install the Prism channel from Dashboard, and restart the server."
+        "The model uses a ternary quantization format (PQ2_0, PTQ1_0, etc.) that requires a PrismML llama.cpp fork. Add a fork (e.g. id 'prism', repo 'PrismML-Eng/llama.cpp') in Settings → llama.cpp Forks, select it for this server, install it, and restart the server."
     } else if lower.contains("no kernel image")
         || lower.contains("sm_120")
         || lower.contains("unsupported device")
@@ -3336,7 +3336,7 @@ mod tests {
             quant: quant.into(),
             served_model_name: served.map(|s| s.into()),
             kv_cache_dtype: None,
-            llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
+            llamacpp_channel: "upstream".to_string(),
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,

@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum } from "../api";
-import { DownloadProgress } from "./Search";
+import { ActiveDownloadsPanel } from "../components/ActiveDownloadsPanel";
+import { useDownloads } from "../context/DownloadContext";
 import { Badge, Button, Card, CardTitle, Spinner, inputCls } from "../ui";
 import type { LibraryEntry, PullStatus } from "../types";
 
 export default function Library() {
   const navigate = useNavigate();
+  const { getDownload, cancelDownload } = useDownloads();
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [diskUsageMb, setDiskUsageMb] = useState<number | null>(null);
@@ -61,7 +63,7 @@ export default function Library() {
 
   const handleCancelPull = async (modelId: string) => {
     try {
-      await api.pullCancel(modelId);
+      await cancelDownload(modelId);
       setPulls((prev) => {
         const next = { ...prev };
         delete next[modelId];
@@ -169,25 +171,8 @@ export default function Library() {
         </div>
       </Card>
 
-      {/* Active Downloads Banner */}
-      {Object.entries(pulls).filter(([, p]) => p.state === "downloading").length > 0 && (
-        <div className="space-y-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
-          <div className="font-semibold text-indigo-300">Active Downloads</div>
-          {Object.entries(pulls)
-            .filter(([, p]) => p.state === "downloading")
-            .map(([m, p]) => (
-              <div key={m} className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="truncate">
-                    <span className="text-indigo-200 font-medium">{m}</span>
-                    {p.file ? <span className="ml-2 text-slate-400">({p.file})</span> : null}
-                  </div>
-                </div>
-                <DownloadProgress pullState={p} onCancel={() => handleCancelPull(m)} />
-              </div>
-            ))}
-        </div>
-      )}
+      {/* Consolidated Active Downloads Panel */}
+      <ActiveDownloadsPanel className="mb-4" />
 
       {/* Filter and Search Bar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -255,6 +240,11 @@ export default function Library() {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filteredEntries.map((e) => {
             const pull = pulls[e.model_id];
+            const activeJob = getDownload(e.model_id);
+            const isDownloading =
+              activeJob?.status === "Downloading" ||
+              activeJob?.status === "Resolving" ||
+              pull?.state === "downloading";
             const sizeGb = (e.size_mb / 1024).toFixed(1);
             return (
               <Card key={e.model_id} className="flex flex-col justify-between hover:border-edge/90 transition-colors">
@@ -270,7 +260,9 @@ export default function Library() {
                         <span>{fmtNum(e.files)} files</span>
                       </div>
                     </div>
-                    {pull ? (
+                    {isDownloading ? (
+                      <Badge color="indigo">downloading</Badge>
+                    ) : pull ? (
                       <Badge color={pull.state === "complete" ? "emerald" : pull.state === "failed" ? "red" : "indigo"}>
                         {pull.state}
                       </Badge>
@@ -318,7 +310,7 @@ export default function Library() {
                     >
                       local folder on disk
                     </span>
-                  ) : pull?.state === "downloading" ? (
+                  ) : isDownloading ? (
                     <Button
                       variant="danger"
                       onClick={() => handleCancelPull(e.model_id)}
@@ -348,7 +340,7 @@ export default function Library() {
                   <Button
                     variant="ghost"
                     className="text-xs"
-                    disabled={pull?.state === "downloading"}
+                    disabled={isDownloading}
                     onClick={() =>
                       navigate("/servers", {
                         state: {

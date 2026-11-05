@@ -129,6 +129,9 @@ pub fn run() {
             commands::install_llamacpp,
             commands::install_llamacpp_channel,
             commands::llamacpp_check_updates,
+            commands::llamacpp_forks,
+            commands::llamacpp_fork_upsert,
+            commands::llamacpp_fork_remove,
             commands::llamacpp_status,
             commands::github_access,
             commands::clear_github_token,
@@ -193,6 +196,7 @@ pub fn run() {
             commands::download_pause,
             commands::download_cancel,
             commands::download_queue_status,
+            commands::download_clear_completed,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

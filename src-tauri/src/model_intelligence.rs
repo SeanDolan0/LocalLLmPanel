@@ -7,7 +7,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use crate::hf::{self, GgufRepoFile, QuantFormat, QuantVariant};
-use crate::state::LlamaCppChannel;
 
 /// Logical GGUF artifact option presented to the user.
 /// Shards (e.g. `00001-of-00003`) are grouped together so downloading downloads all parts.
@@ -29,7 +28,8 @@ pub struct LogicalGgufArtifact {
     #[serde(default)]
     pub mmproj_files: Vec<String>,
     pub companion_mmproj: Option<String>,
-    pub required_channel: LlamaCppChannel,
+    /// llama.cpp fork required: "upstream", "prism", or a custom fork id.
+    pub required_channel: String,
 }
 
 /// Group a list of raw GGUF repository files into logical, multi-shard-aware artifacts.
@@ -72,9 +72,9 @@ pub fn group_gguf_repo_files(
         let mmproj_files = mmproj_file.clone().into_iter().collect();
 
         let required_channel = if hf::quant_requires_prism_channel(&quant_label) {
-            LlamaCppChannel::Prism
+            "prism".to_string()
         } else {
-            LlamaCppChannel::Upstream
+            "upstream".to_string()
         };
 
         artifacts.push(LogicalGgufArtifact {
@@ -112,7 +112,7 @@ pub fn artifacts_to_quant_variants(artifacts: &[LogicalGgufArtifact]) -> Vec<Qua
                 params_b: None,
                 gguf_file: primary_file,
                 vllm_native: false,
-                required_channel: art.required_channel,
+                required_channel: art.required_channel.clone(),
             }
         })
         .collect()

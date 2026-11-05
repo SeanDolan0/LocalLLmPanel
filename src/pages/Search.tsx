@@ -11,9 +11,10 @@ import {
 } from "../api";
 import { Badge, Button, inputCls, Spinner } from "../ui";
 import ErrorBoundary from "../components/ErrorBoundary";
+import { ActiveDownloadsPanel } from "../components/ActiveDownloadsPanel";
+import { useDownloads } from "../context/DownloadContext";
 import type {
   DiscoveryCategory,
-  DownloadJob,
   EnvStatus,
   FitResultBackend,
   FitVerdict,
@@ -208,7 +209,27 @@ function PullStateButton({
 }: PullStateButtonProps) {
   if (pullState && pullState.state !== "complete") {
     if (pullState.state === "downloading" && showDownloadProgress) {
-      return <DownloadProgress pullState={pullState} onCancel={onCancelPull ? () => onCancelPull(targetId) : undefined} />;
+      const percent = pullState.percent ?? 0;
+      return (
+        <div className="flex items-center gap-2 min-w-[130px] max-w-[200px]">
+          <div className="flex-1 h-2 rounded-full bg-surface-3 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-indigo-500 transition-all duration-300 ease-out"
+              style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+            />
+          </div>
+          <span className="font-mono text-xs text-indigo-300 shrink-0">{percent.toFixed(0)}%</span>
+          {onCancelPull && (
+            <button
+              onClick={() => onCancelPull(targetId)}
+              className="text-xs text-rose-400 hover:text-rose-300 ml-1 shrink-0"
+              title="Cancel download"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      );
     }
     return (
       <div className={`flex items-center gap-1.5 ${badgeClassName}`}>
@@ -429,15 +450,21 @@ export function DownloadProgress({ pullState, onCancel }: DownloadProgressProps)
         <span className="font-mono text-xs text-slate-300 w-10 text-right">{percent.toFixed(0)}%</span>
       </div>
       <div className="flex items-center gap-3 text-[10px] text-slate-400">
-        {downloaded != null && total != null && total > 0 && (
+        {downloaded != null && downloaded > 0 && (
           <span className="flex items-center gap-1 font-mono" title="Downloaded / total">
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-6l-4 4m0 0l-4-4m4 4V4" />
             </svg>
-            <span>{fmtBytes(downloaded)} / {fmtBytes(total)}</span>
-            <span className="text-slate-500">
-              ({fmtBytes(total - downloaded)} left)
-            </span>
+            {total != null && total > 0 ? (
+              <>
+                <span>{fmtBytes(downloaded)} / {fmtBytes(total)}</span>
+                <span className="text-slate-500">
+                  ({fmtBytes(total - downloaded)} left)
+                </span>
+              </>
+            ) : (
+              <span>{fmtBytes(downloaded)} downloaded</span>
+            )}
           </span>
         )}
         <span className="flex items-center gap-1">
@@ -468,6 +495,7 @@ export function DownloadProgress({ pullState, onCancel }: DownloadProgressProps)
 
 export default function Search() {
   const navigate = useNavigate();
+  const { cancelDownload, refreshDownloads } = useDownloads();
   const [query, setQuery] = useState("");
   const debouncedQuery = useDebounce(query, 500);
 
@@ -484,7 +512,6 @@ export default function Search() {
   const [activeCategory, setActiveCategory] = useState<DiscoveryCategory>("for_you");
   const [feedRefreshing, setFeedRefreshing] = useState(false);
   const [lastFeedRefresh, setLastFeedRefresh] = useState<Date | null>(null);
-  const [queueJobs, setQueueJobs] = useState<DownloadJob[]>([]);
   const [onlyRecommended, setOnlyRecommended] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
   const [selectedModel, setSelectedModel] = useState<ModelWithFit | null>(null);
@@ -524,13 +551,8 @@ export default function Search() {
     [installedModels]
   );
 
-  const refreshQueue = useCallback(() => {
-    api.downloadQueueStatus().then(setQueueJobs).catch(() => {});
-  }, []);
-
   useEffect(() => {
     refreshLibrary();
-    refreshQueue();
     api.envStatus().then(setEnv).catch(() => {});
     api.pullStatus().then((res) => {
       if (res?.pulling?.length) {
@@ -546,14 +568,14 @@ export default function Search() {
       setPulls((prev) => ({ ...prev, [p.model]: p }));
       if (p.state === "complete") {
         refreshLibrary();
-        refreshQueue();
       }
     });
 
     const unsubDl = events.downloadProgress((p) => {
+      const rawStatus = (p.status || p.state || "").toLowerCase();
       const entry: PullStatus = {
         model: p.model_id,
-        state: p.state.toLowerCase() === "completed" ? "complete" : p.state.toLowerCase(),
+        state: rawStatus === "completed" ? "complete" : rawStatus,
         file: p.current_file,
         percent: p.percent,
         speed_bps: p.speed_bps,
@@ -569,20 +591,16 @@ export default function Search() {
         }
         return next;
       });
-      if (p.state.toLowerCase() === "completed") {
+      if (rawStatus === "completed") {
         refreshLibrary();
-        refreshQueue();
       }
     });
 
-    const queueTimer = setInterval(refreshQueue, 2500);
-
     return () => {
-      clearInterval(queueTimer);
       unsubPull.then((f) => f());
       unsubDl.then((f) => f());
     };
-  }, [refreshLibrary, refreshQueue]);
+  }, [refreshLibrary]);
 
   // Load dynamic discovery feed for the active category
   const loadFeed = useCallback(async (cat: DiscoveryCategory, force = false) => {
@@ -691,7 +709,7 @@ export default function Search() {
 
         if (target && targetFiles.length > 0) {
           await api.downloadStart(repoId, repoId, targetQuant, targetFiles, "llamacpp");
-          refreshQueue();
+          refreshDownloads();
           return;
         }
         const files = await api.ggufFiles(repoId).catch(() => []);
@@ -706,7 +724,7 @@ export default function Search() {
             targets.map((f) => f.path),
             "llamacpp"
           );
-          refreshQueue();
+          refreshDownloads();
           return;
         }
         throw new Error(`No downloadable GGUF files found in repository ${repoId}`);
@@ -719,17 +737,13 @@ export default function Search() {
   };
 
   const cancelPull = (repoId: string) => {
-    const job = queueJobs.find((j) => j.model_id === repoId || j.repo_id === repoId);
-    if (job) {
-      api.downloadCancel(job.id).catch(() => {});
-    }
-    api.pullCancel(repoId).catch((e) => setSearchErr(String(e)));
+    cancelDownload(repoId);
     setPulls((prev) => {
       const next = { ...prev };
       delete next[repoId];
       return next;
     });
-    setTimeout(refreshQueue, 500);
+    setTimeout(refreshDownloads, 500);
   };
 
   const deploy = (
@@ -923,110 +937,8 @@ export default function Search() {
         </div>
       </div>
 
-      {/* Active Download Queue Manager Card */}
-      {queueJobs.filter((j) => j.state !== "Completed" && j.state !== "Cancelled").length > 0 && (
-        <div className="rounded-xl border border-indigo-500/30 bg-surface-2/95 p-4 shadow-lg space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="flex h-2.5 w-2.5 rounded-full bg-indigo-500 animate-pulse" />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                Active Download Queue ({queueJobs.filter((j) => j.state === "Downloading" || j.state === "Queued").length} jobs)
-              </h3>
-            </div>
-            <span className="text-[11px] text-slate-400 font-mono">
-              Resumable HTTP Range Engine
-            </span>
-          </div>
-
-          <div className="space-y-2">
-            {queueJobs
-              .filter((j) => j.state !== "Completed" && j.state !== "Cancelled")
-              .map((job) => {
-                const pct = job.total_bytes > 0 ? (job.downloaded_bytes / job.total_bytes) * 100 : 0;
-                return (
-                  <div key={job.id} className="rounded-lg border border-edge/80 bg-surface-3/40 p-3 space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs">
-                      <div className="min-w-0">
-                        <span className="font-semibold text-slate-100">{job.model_id}</span>
-                        <span className="text-slate-400 ml-2 font-mono text-[11px]">
-                          ({job.quant} · {job.files.length} file{job.files.length > 1 ? "s" : ""})
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          job.state === "Downloading"
-                            ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
-                            : job.state === "Paused"
-                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                            : job.state === "Failed"
-                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                            : "bg-surface-2 text-slate-400"
-                        }`}>
-                          {job.state}
-                        </span>
-                        {job.state === "Downloading" && (
-                          <Button
-                            variant="ghost"
-                            className="text-xs px-2 py-0.5 text-amber-300 hover:text-amber-200"
-                            onClick={() => api.downloadPause(job.id)}
-                            title="Pause download"
-                          >
-                            Pause
-                          </Button>
-                        )}
-                        {job.state === "Paused" && (
-                          <Button
-                            variant="ghost"
-                            className="text-xs px-2 py-0.5 text-emerald-300 hover:text-emerald-200"
-                            onClick={() => api.downloadStart(job.model_id, job.repo_id, job.quant, job.files, job.backend)}
-                            title="Resume download"
-                          >
-                            Resume
-                          </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          className="text-xs px-2 py-0.5 text-rose-400 hover:text-rose-300"
-                          onClick={() => cancelPull(job.repo_id || job.model_id)}
-                          title="Cancel download"
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-indigo-500 transition-all duration-300 ease-out"
-                          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-                        />
-                      </div>
-                      <span className="font-mono text-xs text-slate-300 w-10 text-right">
-                        {pct.toFixed(0)}%
-                      </span>
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-400">
-                      <span>
-                        {fmtBytes(job.downloaded_bytes)} / {fmtBytes(job.total_bytes)}
-                        {job.files.length > 1 && (
-                          <span className="text-slate-500 ml-1.5">
-                            (file {job.current_file_idx + 1} of {job.files.length})
-                          </span>
-                        )}
-                      </span>
-                      <div className="flex items-center gap-3">
-                        <span>{fmtTransferRate(job.speed_bps)}</span>
-                        <span>ETA: {fmtDuration(job.eta_seconds)}</span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        </div>
-      )}
+      {/* Consolidated Active Downloads Panel */}
+      <ActiveDownloadsPanel className="mb-4" />
 
       {/* Error Banners */}
       {searchErr && (
@@ -1194,11 +1106,15 @@ export default function Search() {
                                     ⚠️ GGUF
                                   </span>
                                 )}
-                                {(variant?.required_channel === "prism" || fit?.notes?.some?.(n => n.includes("PrismML"))) && (
-                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30" title="Requires PrismML llama.cpp fork (ternary format)">
-                                    🔮 Prism
-                                  </span>
-                                )}
+                                {(() => {
+                                  const rc = variant?.required_channel;
+                                  const forkRequired = (rc && rc !== "upstream") || fit?.notes?.some?.(n => n.includes("PrismML"));
+                                  return forkRequired ? (
+                                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30" title={rc && rc !== "upstream" ? `Requires the "${rc}" llama.cpp fork (add it in Settings → llama.cpp Forks)` : "Requires PrismML llama.cpp fork (ternary format)"}>
+                                      🔮 {rc && rc !== "upstream" ? rc : "Prism"}
+                                    </span>
+                                  ) : null;
+                                })()}
                               </div>
                               <span className="text-[10px] text-slate-500">
                                 ~{fit.vram_pct}% VRAM
@@ -1299,64 +1215,6 @@ export default function Search() {
         </div>
       )}
 
-      {/* Live Pulls Indicator Banner */}
-      {Object.entries(pulls).filter(([, p]) => p.state === "downloading").length > 0 && (
-        <div className="space-y-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400">
-          {Object.entries(pulls)
-            .filter(([, p]) => p.state === "downloading")
-            .map(([m, p]) => (
-              <div key={m} className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="truncate">
-                    <span className="text-indigo-300 font-medium">{m}</span>: {p.file || "Downloading..."}
-                  </div>
-                </div>
-                <DownloadProgress pullState={p} onCancel={() => cancelPull(m)} />
-              </div>
-            ))}
-        </div>
-      )}
-
-      {/* Failed Pulls Indicator Banner */}
-      {Object.entries(pulls).filter(([, p]) => p.state === "failed").length > 0 && (
-        <div className="space-y-1 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">
-          {Object.entries(pulls)
-            .filter(([, p]) => p.state === "failed")
-            .map(([m, p]) => (
-              <div key={m} className="flex items-center justify-between gap-2">
-                <div className="truncate">
-                  <span className="text-rose-200 font-semibold">{m} failed</span>:{" "}
-                  {p.error || p.file || "download error"}
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <Button
-                    variant="ghost"
-                    className="text-xs px-2 py-0.5 text-rose-200 hover:text-white"
-                    onClick={() => pull(m)}
-                    title="Retry download"
-                  >
-                    Retry
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className="text-xs px-2 py-0.5 text-slate-400 hover:text-slate-200"
-                    onClick={() => {
-                      setPulls((prev) => {
-                        const next = { ...prev };
-                        delete next[m];
-                        return next;
-                      });
-                    }}
-                    title="Dismiss"
-                  >
-                    ✕
-                  </Button>
-                </div>
-              </div>
-            ))}
-        </div>
-      )}
-
       {/* Model Details & Discovered Quant Variants Modal */}
       {selectedModel && (
         <ErrorBoundary
@@ -1410,7 +1268,7 @@ function ModelCard({
   const fit = best?.fit;
   const variant = best?.variant;
   const isGguf = variant?.format === "GGUF" || fit?.format_support === "Experimental";
-  const requiresPrism = variant?.required_channel === "prism";
+  const requiredFork = variant?.required_channel && variant.required_channel !== "upstream" ? variant.required_channel : null;
   const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
 
   const parts = model.id.split("/");
@@ -1475,12 +1333,12 @@ function ModelCard({
                 ⚠️ GGUF
               </span>
             )}
-            {requiresPrism && (
+            {requiredFork && (
               <span
                 className="inline-flex items-center gap-0.5 rounded-full border border-purple-500/30 bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-medium text-purple-300"
-                title="Requires PrismML llama.cpp fork (ternary format)"
+                title={`Requires the "${requiredFork}" llama.cpp fork (add it in Settings → llama.cpp Forks)`}
               >
-                🔮 Prism
+                🔮 {requiredFork}
               </span>
             )}
           </div>
@@ -2051,7 +1909,7 @@ function ModelDetailModal({
                 const isBest = vwf === best;
                 const repoIdLower = (variant.repo_id ?? "").toLowerCase();
                 const isGguf = variant.format === "GGUF" || fit?.format_support === "Experimental";
-                const requiresPrism = variant.required_channel === "prism";
+                const requiredFork = variant.required_channel && variant.required_channel !== "upstream" ? variant.required_channel : null;
                 const pullState = pulls[variant.repo_id] || (isBest ? pulls[model.id] : undefined);
                 const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
 
@@ -2108,12 +1966,12 @@ function ModelDetailModal({
                               ⚠️ Experimental
                             </span>
                           )}
-                          {requiresPrism && (
+                          {requiredFork && (
                             <span
                               className="inline-flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-300"
-                              title="Requires PrismML llama.cpp fork (ternary format)"
+                              title={`Requires the "${requiredFork}" llama.cpp fork (add it in Settings → llama.cpp Forks)`}
                             >
-                              🔮 Prism
+                              🔮 {requiredFork}
                             </span>
                           )}
                         </div>

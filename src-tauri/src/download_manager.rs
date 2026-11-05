@@ -43,6 +43,7 @@ pub struct DownloadJob {
     pub speed_bps: f64,
     pub eta_seconds: Option<f64>,
     pub status: DownloadStatus,
+    pub state: DownloadStatus,
     pub error: Option<String>,
     pub current_file: Option<String>,
     pub current_shard: usize,
@@ -57,6 +58,7 @@ pub struct DownloadProgressEvent {
     pub model_id: String,
     pub repo_id: String,
     pub status: String,
+    pub state: String,
     pub percent: f64,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
@@ -66,6 +68,20 @@ pub struct DownloadProgressEvent {
     pub current_shard: usize,
     pub total_shards: usize,
     pub error: Option<String>,
+}
+
+pub fn extract_content_length(resp: &reqwest::blocking::Response) -> u64 {
+    resp.headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| {
+            resp.headers()
+                .get("x-linked-size")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(0)
 }
 
 struct ActiveDownloadController {
@@ -104,6 +120,18 @@ impl DownloadManager {
             .unwrap_or_default()
     }
 
+    pub fn clear_completed(&self) -> usize {
+        if let Ok(mut guard) = self.jobs.lock() {
+            let before = guard.len();
+            guard.retain(|_, job| {
+                job.status != DownloadStatus::Completed && job.status != DownloadStatus::Cancelled
+            });
+            before - guard.len()
+        } else {
+            0
+        }
+    }
+
     pub fn cancel_job(&self, job_id: &str) -> bool {
         if let Ok(guard) = self.controllers.lock() {
             if let Some(ctrl) = guard.get(job_id) {
@@ -113,6 +141,8 @@ impl DownloadManager {
         if let Ok(mut guard) = self.jobs.lock() {
             if let Some(job) = guard.get_mut(job_id) {
                 job.status = DownloadStatus::Cancelled;
+                job.state = DownloadStatus::Cancelled;
+                job.speed_bps = 0.0;
                 return true;
             }
         }
@@ -147,6 +177,8 @@ impl DownloadManager {
         if let Ok(mut guard) = self.jobs.lock() {
             if let Some(job) = guard.get_mut(job_id) {
                 job.status = DownloadStatus::Paused;
+                job.state = DownloadStatus::Paused;
+                job.speed_bps = 0.0;
                 return true;
             }
         }
@@ -197,6 +229,7 @@ impl DownloadManager {
             speed_bps: 0.0,
             eta_seconds: None,
             status: DownloadStatus::Queued,
+            state: DownloadStatus::Queued,
             error: None,
             current_file: files.first().cloned(),
             current_shard: 1,
@@ -252,6 +285,7 @@ impl DownloadManager {
                 None => return,
             };
             job.status = DownloadStatus::Resolving;
+            job.state = DownloadStatus::Resolving;
             (
                 job.repo_id.clone(),
                 job.files.clone(),
@@ -274,6 +308,7 @@ impl DownloadManager {
                 model_id: job.model_id.clone(),
                 repo_id: job.repo_id.clone(),
                 status: format!("{:?}", job.status).to_ascii_lowercase(),
+                state: format!("{:?}", job.status).to_ascii_lowercase(),
                 percent,
                 downloaded_bytes: job.downloaded_bytes,
                 total_bytes: job.total_bytes,
@@ -292,20 +327,27 @@ impl DownloadManager {
                 DownloadStatus::Failed => "failed",
                 _ => "downloading",
             };
-            let _ = app.emit(
-                "pull-progress",
-                serde_json::json!({
-                    "model": job.repo_id,
-                    "state": legacy_state,
-                    "file": job.current_file.clone().or_else(|| job.error.clone()),
-                    "percent": percent,
-                    "speed_bps": job.speed_bps,
-                    "eta_seconds": job.eta_seconds,
-                    "bytes_downloaded": job.downloaded_bytes,
-                    "bytes_total": job.total_bytes,
-                }),
-            );
+            let legacy_payload = serde_json::json!({
+                "model": job.repo_id,
+                "state": legacy_state,
+                "file": job.current_file.clone().or_else(|| job.error.clone()),
+                "percent": percent,
+                "speed_bps": job.speed_bps,
+                "eta_seconds": job.eta_seconds,
+                "bytes_downloaded": job.downloaded_bytes,
+                "bytes_total": job.total_bytes,
+            });
+            let _ = app.emit("pull-progress", &legacy_payload);
+            if !job.model_id.is_empty() && job.model_id != job.repo_id {
+                let mut alt = legacy_payload.clone();
+                alt["model"] = serde_json::json!(job.model_id);
+                let _ = app.emit("pull-progress", &alt);
+            }
         };
+
+        if let Some(j) = self.get_job(&job_id) {
+            emit_progress(&j);
+        }
 
         let dest_path = PathBuf::from(&destination_dir);
         if let Err(e) = std::fs::create_dir_all(&dest_path) {
@@ -337,7 +379,7 @@ impl DownloadManager {
                 req = req.bearer_auth(t);
             }
             let size = match req.send().and_then(|r| r.error_for_status()) {
-                Ok(resp) => resp.content_length().unwrap_or(0),
+                Ok(resp) => extract_content_length(&resp),
                 Err(e) => {
                     self.set_job_error(&job_id, format!("Cannot reach {file_rel}: {e}"));
                     if let Some(j) = self.get_job(&job_id) { emit_progress(&j); }
@@ -353,15 +395,19 @@ impl DownloadManager {
                 if let Some(job) = guard.get_mut(&job_id) {
                     job.total_bytes = aggregate_total_bytes;
                     job.status = DownloadStatus::Downloading;
+                    job.state = DownloadStatus::Downloading;
                 }
             }
+        }
+        if let Some(j) = self.get_job(&job_id) {
+            emit_progress(&j);
         }
 
         // 2. Download files with resume support (.part staging)
         let mut completed_bytes_prior_shards = 0u64;
 
         for (shard_idx, file_rel) in files.iter().enumerate() {
-            let expected_file_size = file_sizes[shard_idx];
+            let mut expected_file_size = file_sizes[shard_idx];
             let target_final = dest_path.join(file_rel);
             let target_part = dest_path.join(format!("{file_rel}.part"));
 
@@ -406,6 +452,33 @@ impl DownloadManager {
                     return;
                 }
             };
+
+            // If HEAD size was 0, attempt fallback size extraction from GET
+            if expected_file_size == 0 {
+                let detected = if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                    resp.headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|cr| cr.split('/').last())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0)
+                } else {
+                    extract_content_length(&resp)
+                };
+                if detected > 0 {
+                    expected_file_size = detected;
+                    file_sizes[shard_idx] = detected;
+                    aggregate_total_bytes = file_sizes.iter().sum();
+                    if let Ok(mut guard) = self.jobs.lock() {
+                        if let Some(job) = guard.get_mut(&job_id) {
+                            job.total_bytes = aggregate_total_bytes;
+                        }
+                    }
+                    if let Some(j) = self.get_job(&job_id) {
+                        emit_progress(&j);
+                    }
+                }
+            }
 
             // Handle 200 vs 206
             if resp.status() == reqwest::StatusCode::OK && current_offset > 0 {
@@ -546,7 +619,9 @@ impl DownloadManager {
         if let Ok(mut guard) = self.jobs.lock() {
             if let Some(job) = guard.get_mut(&job_id) {
                 job.status = DownloadStatus::Completed;
+                job.state = DownloadStatus::Completed;
                 job.downloaded_bytes = aggregate_total_bytes;
+                job.speed_bps = 0.0;
                 job.eta_seconds = Some(0.0);
             }
         }
@@ -560,8 +635,27 @@ impl DownloadManager {
         if let Ok(mut guard) = self.jobs.lock() {
             if let Some(job) = guard.get_mut(job_id) {
                 job.status = DownloadStatus::Failed;
+                job.state = DownloadStatus::Failed;
+                job.speed_bps = 0.0;
                 job.error = Some(error);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_head_size() {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
+        let resp = client.head(url).send().unwrap();
+        let header_len = extract_content_length(&resp);
+        assert_eq!(header_len, 668788096);
     }
 }

@@ -17,7 +17,7 @@ No cloud, no containers, no per-server port juggling. Estimates are estimates �
 ### Run & observe servers
 - **Run multiple servers concurrently** — instruct and embedding tasks side by side, with per-server quantization, GPU memory utilization, max model length, port, served model name, and API key.
 - **vLLM auto-provisioning (WSL2)** — idempotent phases: apt basics → `uv` venv (CPython 3.12) → vLLM CUDA wheels → torch/GPU verification. Re-running repairs or upgrades.
-- **Native llama.cpp** — install CUDA builds of `llama-server.exe`, pick upstream or the **PrismML fork** (ternary formats / Bonsai 2 preset), use GGUF and `mmproj` vision files, MoE CPU offload, `--fit` auto-fit, Jinja tool calling, and per-channel installs.
+- **Native llama.cpp** — install CUDA builds of `llama-server.exe`, use GGUF and `mmproj` vision files, MoE CPU offload, `--fit` auto-fit, Jinja tool calling, per-fork installs, and add custom llama.cpp forks (e.g. PrismML for ternary formats) via Settings → llama.cpp Forks.
 - **Environment variables** — global defaults merged with per-server overrides. Launch scripts are written to WSL files to avoid quoting issues; boolean `VLLM_USE_*` flags are validated.
 - **Live logs and metrics** — streamed logs, request/queue/KV-cache/TTFT/tok-s metrics, per-server metrics panel, and VRAM/GPU sparklines on the Dashboard.
 - **Chat playground** — streaming responses, cancellation, saved conversations, markdown rendering, and an OpenAI tool-call smoke test.

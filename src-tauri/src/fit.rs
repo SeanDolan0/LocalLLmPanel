@@ -98,9 +98,9 @@ pub struct VariantInput {
     pub weight_bytes: Option<u64>,
     pub params_b: Option<f64>, // override if different from base model
     pub is_gguf: bool,
-    /// The llama.cpp channel required: "upstream" or "prism"
+    /// The llama.cpp fork required: "upstream", "prism", or a custom fork id.
     #[serde(default)]
-    pub required_channel: crate::state::LlamaCppChannel,
+    pub required_channel: String,
 }
 
 pub fn score_variant(
@@ -112,7 +112,7 @@ pub fn score_variant(
     vram_overhead_mb: f64,
     allow_weight_offload: bool,
     max_context_cap: Option<usize>,
-    channel_installed: Option<crate::state::LlamaCppChannel>,
+    channel_installed: Option<String>,
 ) -> FitResult {
     let params_b = variant.params_b.or(arch.params_b).unwrap_or(0.0);
     let params_b = if params_b <= 0.0 && variant.weight_bytes.unwrap_or(0) > 0 {
@@ -129,9 +129,9 @@ pub fn score_variant(
     
     // Determine format support based on channel availability
     let format_support = if variant.is_gguf {
-        if variant.required_channel == crate::state::LlamaCppChannel::Prism {
-            // Check if prism channel is installed
-            if channel_installed == Some(crate::state::LlamaCppChannel::Prism) {
+        if variant.required_channel != "upstream" {
+            // GGUFs that need a non-upstream fork are only Native when that fork is installed.
+            if channel_installed.as_deref() == Some(variant.required_channel.as_str()) {
                 FormatSupport::Native
             } else {
                 FormatSupport::Experimental
@@ -567,7 +567,7 @@ mod tests {
             weight_bytes: None,
             params_b: None,
             is_gguf,
-            required_channel: crate::state::LlamaCppChannel::Upstream,
+            required_channel: "upstream".to_string(),
         }
     }
 
@@ -577,7 +577,7 @@ mod tests {
             weight_bytes: Some(size_bytes),
             params_b: None,
             is_gguf: true,
-            required_channel: crate::state::LlamaCppChannel::Upstream,
+            required_channel: "upstream".to_string(),
         }
     }
 
@@ -854,7 +854,7 @@ mod tests {
             weight_bytes: Some(16_000_000_000), // ~14.9 GB
             params_b: Some(27.0),
             is_gguf: true,
-            required_channel: crate::state::LlamaCppChannel::Upstream,
+            required_channel: "upstream".to_string(),
         };
         let res = score_variant(&hw, &v_gguf, &arch, None, 0.92, 2500.0, true, None, None);
         assert!(res.vram_context > 0, "usable context should not be 0");
@@ -913,7 +913,7 @@ mod tests {
             weight_bytes: Some(6_000_000_000), // ~6 GB for 27B ternary
             params_b: Some(27.0),
             is_gguf: true,
-            required_channel: crate::state::LlamaCppChannel::Prism,
+            required_channel: "prism".to_string(),
         };
         let arch = ModelArchInfo {
             params_b: Some(27.0),
@@ -923,7 +923,7 @@ mod tests {
             head_dim: Some(128),
         };
         // With Prism channel installed, format_support = Native
-        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, Some(crate::state::LlamaCppChannel::Prism));
+        let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, Some("prism".to_string()));
         assert_eq!(r.format_support, FormatSupport::Native);
         // 6 GB + 2.5 GB overhead = 8.5 GB, VRAM ratio = 8.5/12.2 ≈ 0.69 → Constrained
         // But hybrid KV (16 full-attention layers) = 65536 bytes/token → plenty of room for context
@@ -940,7 +940,7 @@ mod tests {
             weight_bytes: Some(6_000_000_000),
             params_b: Some(27.0),
             is_gguf: true,
-            required_channel: crate::state::LlamaCppChannel::Prism,
+            required_channel: "prism".to_string(),
         };
         let arch = ModelArchInfo {
             params_b: Some(27.0),

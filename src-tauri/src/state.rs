@@ -40,35 +40,131 @@ pub fn save_provision_report_cache(report: &crate::provision::ProvisionReport) {
     let _ = std::fs::write(&path, serde_json::to_vec_pretty(&cache).unwrap_or_default());
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum LlamaCppChannel {
-    #[default]
-    Upstream,
-    Prism,
+/// Identifier of a llama.cpp fork ("channel"), e.g. "upstream" or a
+/// user-defined fork id. Forks are installed and tracked independently and are
+/// keyed by id in `llamacpp_forks` / `llamacpp_channels`.
+pub type LlamaCppChannel = String;
+
+/// Default asset pattern for llama.cpp forks that follow the upstream release
+/// naming convention (`llama-<tag>-bin-win-cuda-X.Y-x64.zip`). Must capture the
+/// CUDA major/minor versions in capture groups 1 and 2.
+pub const DEFAULT_FORK_ASSET_REGEX: &str = r"^llama-.*-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$";
+/// Default cudart (CUDA runtime) asset pattern matching the fork's main build.
+pub const DEFAULT_FORK_RUNTIME_REGEX: &str = r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$";
+
+/// A user-installable llama.cpp fork definition ("channel").
+/// Built-in forks (`builtin: true`) are seeded on load and cannot be edited or removed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LlamaCppFork {
+    /// Stable id used in servers, configs and install dirs (e.g. "upstream", "xhtoken").
+    pub id: String,
+    /// Display name shown in the UI.
+    pub name: String,
+    /// GitHub repository as "owner/name"; used for the releases API and the release-notes link.
+    pub repo: String,
+    /// Short description of what the fork is for.
+    #[serde(default)]
+    pub description: String,
+    /// Regex the main Windows x64 CUDA asset must match. Must capture the CUDA
+    /// major/minor versions in capture groups 1 and 2.
+    pub asset_regex: String,
+    /// Regex for the matching CUDA runtime (cudart) asset. Empty disables the runtime download.
+    #[serde(default)]
+    pub runtime_regex: String,
+    /// Prefix stripped from the main asset name to derive the install tag
+    /// (e.g. "llama-", or "llama-prism-" for the PrismML fork).
+    pub main_prefix: String,
+    /// Built-in forks are managed by the app and cannot be edited or removed.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
-impl LlamaCppChannel {
-    pub fn repo(&self) -> (&'static str, &'static str) {
-        match self {
-            LlamaCppChannel::Upstream => ("ggml-org", "llama.cpp"),
-            LlamaCppChannel::Prism => ("PrismML-Eng", "llama.cpp"),
+impl Default for LlamaCppFork {
+    fn default() -> Self {
+        LlamaCppFork {
+            id: String::new(),
+            name: String::new(),
+            repo: String::new(),
+            description: String::new(),
+            asset_regex: DEFAULT_FORK_ASSET_REGEX.to_string(),
+            runtime_regex: DEFAULT_FORK_RUNTIME_REGEX.to_string(),
+            main_prefix: "llama-".to_string(),
+            builtin: false,
         }
     }
+}
 
-    pub fn branch(&self) -> &'static str {
-        match self {
-            LlamaCppChannel::Upstream => "master",
-            LlamaCppChannel::Prism => "prism",
-        }
-    }
+/// Forks bundled with the app. Only `upstream` ships built-in; anything else
+/// (e.g. PrismML) is added by the user as a custom fork.
+pub fn builtin_llamacpp_forks() -> Vec<LlamaCppFork> {
+    vec![LlamaCppFork {
+        id: "upstream".to_string(),
+        name: "Upstream (ggml-org)".to_string(),
+        repo: "ggml-org/llama.cpp".to_string(),
+        description: "Official ggml-org llama.cpp releases.".to_string(),
+        asset_regex: r"^llama-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$".to_string(),
+        runtime_regex: DEFAULT_FORK_RUNTIME_REGEX.to_string(),
+        main_prefix: "llama-".to_string(),
+        builtin: true,
+    }]
+}
 
-    pub fn dir_suffix(&self) -> &'static str {
-        match self {
-            LlamaCppChannel::Upstream => "upstream",
-            LlamaCppChannel::Prism => "prism",
+pub fn default_llamacpp_forks() -> Vec<LlamaCppFork> {
+    builtin_llamacpp_forks()
+}
+
+/// Validate a fork definition; returns a user-facing error message on failure.
+pub fn validate_llamacpp_fork(fork: &LlamaCppFork) -> Result<(), String> {
+    let id = fork.id.trim();
+    let id_ok = !id.is_empty()
+        && id.len() <= 32
+        && id.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !id_ok {
+        return Err(
+            "fork id must be 1-32 chars of lowercase letters, digits and '-', starting with a letter or digit".into(),
+        );
+    }
+    if fork.name.trim().is_empty() {
+        return Err("fork name is required".into());
+    }
+    if fork.name.trim().len() > 80 {
+        return Err("fork name must be at most 80 characters".into());
+    }
+    let repo = fork.repo.trim();
+    let repo_ok = repo.split('/').count() == 2
+        && repo.split('/').all(|part| {
+            !part.is_empty()
+                && part.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        });
+    if !repo_ok {
+        return Err("fork repo must be a GitHub 'owner/name' path (e.g. ggml-org/llama.cpp)".into());
+    }
+    let asset_re = regex_lite::Regex::new(&fork.asset_regex)
+        .map_err(|e| format!("asset regex is invalid: {e}"))?;
+    if asset_re.captures_len() < 3 {
+        return Err(
+            "asset regex must capture the CUDA major and minor versions in its first two groups, e.g. (\\d+)\\.(\\d+)".into(),
+        );
+    }
+    if !fork.runtime_regex.trim().is_empty() {
+        let runtime_re = regex_lite::Regex::new(&fork.runtime_regex)
+            .map_err(|e| format!("runtime regex is invalid: {e}"))?;
+        if runtime_re.captures_len() < 3 {
+            return Err(
+                "runtime regex must capture the CUDA major and minor versions in its first two groups".into(),
+            );
         }
     }
+    Ok(())
+}
+
+/// Serde default for server channel fields and for configs written before forks existed.
+fn default_llamacpp_channel() -> String {
+    "upstream".to_string()
 }
 
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
@@ -222,8 +318,8 @@ pub struct ServerDef {
     /// Per-server vLLM KV-cache dtype. `None` inherits the global setting.
     #[serde(default)]
     pub kv_cache_dtype: Option<String>,
-    /// llama.cpp binary channel: "upstream" (ggml-org) or "prism" (PrismML-Eng/llama.cpp@prism)
-    #[serde(default)]
+    /// llama.cpp fork id: "upstream" (ggml-org) or a custom fork from `llamacpp_forks`.
+    #[serde(default = "default_llamacpp_channel")]
     pub llamacpp_channel: LlamaCppChannel,
     /// Skip CUDA-graph capture (`--enforce-eager`). WSL2's full-graph
     /// capture can hang for minutes or stall; eager mode starts reliably.
@@ -378,7 +474,7 @@ impl ServerDef {
 
         match self.backend_kind()? {
             ServerBackend::Vllm => {
-                self.llamacpp_channel = LlamaCppChannel::Upstream;
+                self.llamacpp_channel = "upstream".to_string();
                 self.model_path = None;
                 self.mmproj_path = None;
                 self.ctx_size = None;
@@ -723,6 +819,48 @@ pub fn redact_advanced_settings(settings: &AdvancedSettings) -> AdvancedSettings
     redacted
 }
 
+/// Back-compat for configs written before forks existed: fold legacy single-install
+/// fields into the upstream fork entry, seed built-in forks, and make sure every
+/// fork has an install-state entry. Split out from `load()` for unit testing.
+pub(crate) fn migrate_llamacpp_config(cfg: &mut PersistedConfig) {
+    // Back-compat: migrate legacy single-install fields to the upstream fork entry
+    if cfg.llamacpp_channels.is_empty() {
+        let mut upstream = LlamaCppChannelConfig::default();
+        upstream.installed_tag = cfg.llamacpp_installed_tag.clone();
+        upstream.version = cfg.llamacpp_version.clone();
+        upstream.help = cfg.llamacpp_help.clone();
+        upstream.executable = cfg.llamacpp_executable.clone();
+        upstream.dir = cfg.llamacpp_dir.clone();
+        cfg.llamacpp_channels.insert("upstream".to_string(), upstream);
+    }
+    // Forks that were built-in in older versions but no longer ship built-in
+    // (e.g. PrismML) are converted to custom forks instead of being deleted,
+    // so existing installs and servers keep working after the upgrade.
+    let builtin_ids: Vec<String> = builtin_llamacpp_forks()
+        .into_iter()
+        .map(|fork| fork.id)
+        .collect();
+    for fork in &mut cfg.llamacpp_forks {
+        if fork.builtin && !builtin_ids.iter().any(|id| id == &fork.id) {
+            fork.builtin = false;
+        }
+    }
+    // Seed built-in forks for configs written before forks existed, and make
+    // sure every fork has an install-state entry.
+    for builtin in builtin_llamacpp_forks() {
+        if !cfg.llamacpp_forks.iter().any(|fork| fork.id == builtin.id) {
+            cfg.llamacpp_forks.push(builtin);
+        }
+    }
+    let fork_ids: Vec<String> = cfg.llamacpp_forks.iter().map(|fork| fork.id.clone()).collect();
+    for fork_id in fork_ids {
+        if !cfg.llamacpp_channels.contains_key(&fork_id) {
+            cfg.llamacpp_channels
+                .insert(fork_id, LlamaCppChannelConfig::default());
+        }
+    }
+}
+
 pub fn redact_config_for_display(config: &PersistedConfig) -> PersistedConfig {
     let mut redacted = config.clone();
     redacted.hf_token.clear();
@@ -769,7 +907,11 @@ pub struct PersistedConfig {
     pub gguf_dir: String,
     /// Per-channel llama.cpp installation state
     #[serde(default)]
-    pub llamacpp_channels: BTreeMap<LlamaCppChannel, LlamaCppChannelConfig>,
+    pub llamacpp_channels: BTreeMap<String, LlamaCppChannelConfig>,
+    /// llama.cpp forks ("channels") available for install/update/remove.
+    /// Seeded with the built-in upstream fork; users can add their own.
+    #[serde(default = "default_llamacpp_forks")]
+    pub llamacpp_forks: Vec<LlamaCppFork>,
     /// Legacy fields (for back-compat with config.json written by older versions)
     #[serde(default)]
     pub llamacpp_executable: Option<String>,
@@ -831,9 +973,11 @@ impl Default for PersistedConfig {
             .unwrap_or_else(|| crate::wsl::APP_DISTRO_NAME.to_string());
         let mut default_env = BTreeMap::new();
         default_env.insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
+        let llamacpp_forks = default_llamacpp_forks();
         let mut llamacpp_channels = BTreeMap::new();
-        llamacpp_channels.insert(LlamaCppChannel::Upstream, LlamaCppChannelConfig::default());
-        llamacpp_channels.insert(LlamaCppChannel::Prism, LlamaCppChannelConfig::default());
+        for fork in &llamacpp_forks {
+            llamacpp_channels.insert(fork.id.clone(), LlamaCppChannelConfig::default());
+        }
         PersistedConfig {
             distro,
             llm_dir: "~/llm-lp".to_string(),
@@ -851,6 +995,7 @@ impl Default for PersistedConfig {
                 .to_string_lossy()
                 .into_owned(),
             llamacpp_channels,
+            llamacpp_forks,
             llamacpp_executable: None,
             llamacpp_installed_tag: None,
             llamacpp_version: None,
@@ -955,19 +1100,7 @@ impl PersistedConfig {
             cfg.default_env
                 .insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         }
-        // Back-compat: migrate legacy single-install fields to Upstream channel config
-        if cfg.llamacpp_channels.is_empty() {
-            let mut channels = BTreeMap::new();
-            let mut upstream = LlamaCppChannelConfig::default();
-            upstream.installed_tag = cfg.llamacpp_installed_tag.clone();
-            upstream.version = cfg.llamacpp_version.clone();
-            upstream.help = cfg.llamacpp_help.clone();
-            upstream.executable = cfg.llamacpp_executable.clone();
-            upstream.dir = cfg.llamacpp_dir.clone();
-            channels.insert(LlamaCppChannel::Upstream, upstream);
-            channels.insert(LlamaCppChannel::Prism, LlamaCppChannelConfig::default());
-            cfg.llamacpp_channels = channels;
-        }
+        migrate_llamacpp_config(&mut cfg);
         // Default true for existing configs that don't have the field
         // (serde default covers this on deserialization, but be explicit for safety)
         let _ = cfg.auto_shutdown_wsl;
@@ -1487,7 +1620,7 @@ mod tests {
             quant: "fp16".into(),
             served_model_name: None,
             kv_cache_dtype: None,
-            llamacpp_channel: LlamaCppChannel::Upstream,
+            llamacpp_channel: "upstream".to_string(),
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,
@@ -1569,6 +1702,127 @@ mod tests {
         assert!(cfg.servers[0].jinja);
         assert!(!cfg.llamacpp_dir.is_empty());
         assert!(!cfg.gguf_dir.is_empty());
+    }
+
+    #[test]
+    fn forks_are_seeded_for_configs_saved_before_fork_support() {
+        let old = r#"{
+            "distro": "Ubuntu-22.04",
+            "llm_dir": "~/llm-lp",
+            "venv_dir": "~/llm-lp/.venv",
+            "hf_token": "",
+            "default_quant": "fp16",
+            "servers": [],
+            "measured": {},
+            "llamacpp_channels": {
+                "upstream": { "installed_tag": "b12119", "version": "0.9.0-dev (build 12119)", "help": "h", "executable": "C:/x/llama-server.exe", "dir": "C:/x" }
+            }
+        }"#;
+        let mut cfg: PersistedConfig = serde_json::from_str(old).unwrap();
+        // Serde default already supplies the built-in forks.
+        assert!(cfg.llamacpp_forks.iter().all(|f| f.builtin));
+        crate::state::migrate_llamacpp_config(&mut cfg);
+        assert_eq!(cfg.llamacpp_forks.len(), 1);
+        assert!(cfg.llamacpp_forks.iter().any(|f| f.id == "upstream" && f.builtin));
+        assert_eq!(cfg.llamacpp_channels["upstream"].installed_tag.as_deref(), Some("b12119"));
+
+        // A config carrying a custom fork keeps it and gets an install-state entry seeded.
+        let mut cfg2 = PersistedConfig::default();
+        cfg2.llamacpp_forks.push(LlamaCppFork {
+            id: "xhtoken".into(),
+            name: "XHToken (Spark)".into(),
+            repo: "XHToken/llama.cpp".into(),
+            description: String::new(),
+            asset_regex: crate::state::DEFAULT_FORK_ASSET_REGEX.to_string(),
+            runtime_regex: crate::state::DEFAULT_FORK_RUNTIME_REGEX.to_string(),
+            main_prefix: "llama-".into(),
+            builtin: false,
+        });
+        cfg2.llamacpp_channels.remove("xhtoken");
+        crate::state::migrate_llamacpp_config(&mut cfg2);
+        assert!(cfg2.llamacpp_forks.iter().any(|f| f.id == "xhtoken"));
+        assert!(cfg2.llamacpp_forks.iter().any(|f| f.id == "upstream"));
+        assert!(cfg2.llamacpp_channels.contains_key("xhtoken"));
+    }
+
+    #[test]
+    fn former_builtin_forks_are_kept_as_custom_forks_after_upgrade() {
+        // Config as persisted by a build where PrismML shipped built-in.
+        let stored = r#"{
+            "distro": "Ubuntu-22.04",
+            "llm_dir": "~/llm-lp",
+            "venv_dir": "~/llm-lp/.venv",
+            "hf_token": "",
+            "default_quant": "fp16",
+            "servers": [{
+                "id": "s", "name": "bonsai", "model_id": "org/model", "task": "instruct",
+                "port": 8000, "gpu_mem_util": 0.92, "quant": "PQ2_0", "llamacpp_channel": "prism"
+            }],
+            "measured": {},
+            "llamacpp_forks": [
+                { "id": "upstream", "name": "Upstream (ggml-org)", "repo": "ggml-org/llama.cpp",
+                  "description": "Official ggml-org llama.cpp releases.",
+                  "asset_regex": "^llama-b\\d+-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$",
+                  "runtime_regex": "^cudart-llama-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$",
+                  "main_prefix": "llama-", "builtin": true },
+                { "id": "prism", "name": "PrismML (PrismML-Eng)", "repo": "PrismML-Eng/llama.cpp",
+                  "description": "PrismML fork (prism branch): ternary formats.",
+                  "asset_regex": "^llama-prism-b.+?-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$",
+                  "runtime_regex": "^cudart-llama-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$",
+                  "main_prefix": "llama-prism-", "builtin": true }
+            ],
+            "llamacpp_channels": {
+                "upstream": { "installed_tag": "b12119", "version": "v", "help": "h", "executable": "C:/x/llama-server.exe", "dir": "C:/x" },
+                "prism": { "installed_tag": "b10709-9a9394a", "version": "v2", "help": "h", "executable": "C:/x/prism/llama-server.exe", "dir": "C:/x" }
+            }
+        }"#;
+        let mut cfg: PersistedConfig = serde_json::from_str(stored).unwrap();
+        crate::state::migrate_llamacpp_config(&mut cfg);
+        // Upstream remains built-in; prism is retained but demoted to a custom fork.
+        assert!(cfg.llamacpp_forks.iter().any(|f| f.id == "upstream" && f.builtin));
+        let prism = cfg.llamacpp_forks.iter().find(|f| f.id == "prism").expect("prism kept");
+        assert!(!prism.builtin, "prism must survive as a custom fork");
+        assert_eq!(prism.asset_regex, r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$");
+        // Install state is preserved so existing servers keep working.
+        assert_eq!(cfg.llamacpp_channels["prism"].installed_tag.as_deref(), Some("b10709-9a9394a"));
+        assert_eq!(cfg.servers[0].llamacpp_channel, "prism");
+
+        // Re-running migration (as on every app start) is stable.
+        crate::state::migrate_llamacpp_config(&mut cfg);
+        assert_eq!(cfg.llamacpp_forks.len(), 2);
+    }
+
+    #[test]
+    fn custom_forks_survive_save_load_cycle_and_future_builtin_changes() {
+        // Write a config carrying a custom fork, reload it (as after an app update),
+        // run migration, and confirm the custom fork and its install state survive.
+        let mut cfg = PersistedConfig::default();
+        cfg.llamacpp_forks.push(LlamaCppFork {
+            id: "my-fork".into(),
+            name: "My Fork".into(),
+            repo: "someone/llama.cpp".into(),
+            description: "custom notes".into(),
+            asset_regex: r"^my-llama-.*-win-cuda-(\d+)\.(\d+)-x64\.zip$".into(),
+            runtime_regex: String::new(), // intentionally disabled
+            main_prefix: "my-llama-".into(),
+            builtin: false,
+        });
+        cfg.llamacpp_channels.insert(
+            "my-fork".into(),
+            LlamaCppChannelConfig {
+                installed_tag: Some("b1".into()),
+                ..LlamaCppChannelConfig::default()
+            },
+        );
+        let text = serde_json::to_string(&cfg).unwrap();
+        let mut reloaded: PersistedConfig = serde_json::from_str(&text).unwrap();
+        crate::state::migrate_llamacpp_config(&mut reloaded);
+        let fork = reloaded.llamacpp_forks.iter().find(|f| f.id == "my-fork").expect("custom fork survived");
+        assert_eq!(fork.asset_regex, r"^my-llama-.*-win-cuda-(\d+)\.(\d+)-x64\.zip$");
+        assert_eq!(fork.runtime_regex, "");
+        assert_eq!(reloaded.llamacpp_channels["my-fork"].installed_tag.as_deref(), Some("b1"));
+        // Built-ins are added, but never replace or drop user forks.
+        assert_eq!(reloaded.llamacpp_forks.iter().filter(|f| f.id == "upstream").count(), 1);
     }
 
     #[test]
@@ -1947,7 +2201,7 @@ mod tests {
             quant: "fp16".into(),
             served_model_name: None,
             kv_cache_dtype: None,
-            llamacpp_channel: LlamaCppChannel::Upstream,
+            llamacpp_channel: "upstream".to_string(),
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,
@@ -2003,7 +2257,7 @@ mod tests {
             quant: "fp8".into(),
             served_model_name: Some("qwen-7b".into()),
             kv_cache_dtype: Some("fp8_e4m3".into()),
-            llamacpp_channel: LlamaCppChannel::Upstream,
+            llamacpp_channel: "upstream".to_string(),
             enforce_eager: false,
             params_b: Some(7.6),
             swap_space_gb: Some(4),
@@ -2289,7 +2543,7 @@ mod tests {
             quant: "fp16".into(),
             served_model_name: None,
             kv_cache_dtype: None,
-            llamacpp_channel: LlamaCppChannel::Upstream,
+            llamacpp_channel: "upstream".to_string(),
             enforce_eager: true,
             params_b: None,
             swap_space_gb: None,

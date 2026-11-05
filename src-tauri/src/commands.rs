@@ -175,7 +175,7 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
 
         let upstream = cfg
             .llamacpp_channels
-            .get(&crate::state::LlamaCppChannel::Upstream);
+            .get("upstream");
 
         EnvStatus {
             wsl_ok,
@@ -250,17 +250,25 @@ pub async fn install_llamacpp(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::llamacpp_install::InstallStatus, String> {
-    install_llamacpp_channel(app, state, crate::state::LlamaCppChannel::Upstream).await
+    install_llamacpp_channel(app, state, "upstream".to_string()).await
 }
 
 #[tauri::command]
 pub async fn install_llamacpp_channel(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
-    channel: crate::state::LlamaCppChannel,
+    channel: String,
 ) -> Result<crate::llamacpp_install::InstallStatus, String> {
     let st = (*state).clone();
     let cfg = st.config();
+    let fork = cfg
+        .llamacpp_forks
+        .iter()
+        .find(|fork| fork.id == channel)
+        .cloned()
+        .ok_or_else(|| {
+            format!("unknown llama.cpp fork '{channel}'. Add it under Settings → llama.cpp Forks first.")
+        })?;
     let channel_config = cfg
         .llamacpp_channels
         .get(&channel)
@@ -270,7 +278,7 @@ pub async fn install_llamacpp_channel(
     let github_token = (!cfg.github_token.trim().is_empty()).then_some(cfg.github_token);
     let result = tauri::async_runtime::spawn_blocking(move || {
         crate::llamacpp_install::install_for_channel(
-            channel,
+            &fork,
             &destination,
             |file, done, total| {
                 let _ = app.emit(
@@ -286,6 +294,10 @@ pub async fn install_llamacpp_channel(
     .map_err(|e| format!("llama.cpp install failed: {e}"))?;
     let (tag, exe, version, help) = result;
     let mut cfg = st.config.lock().unwrap();
+    if !cfg.llamacpp_channels.contains_key(&channel) {
+        cfg.llamacpp_channels
+            .insert(channel.clone(), crate::state::LlamaCppChannelConfig::default());
+    }
     if let Some(ch) = cfg.llamacpp_channels.get_mut(&channel) {
         ch.installed_tag = Some(tag);
         ch.version = Some(version.clone());
@@ -317,6 +329,74 @@ pub async fn install_llamacpp_channel(
 }
 
 #[tauri::command]
+pub async fn llamacpp_forks(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::state::LlamaCppFork>, String> {
+    Ok(state.config().llamacpp_forks)
+}
+
+#[tauri::command]
+pub async fn llamacpp_fork_upsert(
+    state: State<'_, Arc<AppState>>,
+    fork: crate::state::LlamaCppFork,
+) -> Result<Vec<crate::state::LlamaCppFork>, String> {
+    let mut fork = fork;
+    crate::state::validate_llamacpp_fork(&fork)?;
+    if crate::state::builtin_llamacpp_forks()
+        .iter()
+        .any(|builtin| builtin.id == fork.id)
+    {
+        return Err(format!(
+            "fork id '{}' is reserved for a built-in fork; built-in forks cannot be modified",
+            fork.id
+        ));
+    }
+    fork.builtin = false;
+    let mut cfg = state.config.lock().unwrap();
+    match cfg.llamacpp_forks.iter_mut().find(|existing| existing.id == fork.id) {
+        Some(existing) => *existing = fork.clone(),
+        None => cfg.llamacpp_forks.push(fork.clone()),
+    }
+    // Make sure the install-state map knows about the fork.
+    if !cfg.llamacpp_channels.contains_key(&fork.id) {
+        cfg.llamacpp_channels.insert(
+            fork.id.clone(),
+            crate::state::LlamaCppChannelConfig::default(),
+        );
+    }
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(cfg.llamacpp_forks.clone())
+}
+
+#[tauri::command]
+pub async fn llamacpp_fork_remove(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<crate::state::LlamaCppFork>, String> {
+    let trimmed = id.trim();
+    if crate::state::builtin_llamacpp_forks()
+        .iter()
+        .any(|builtin| builtin.id == trimmed)
+    {
+        return Err(format!("built-in fork '{trimmed}' cannot be removed"));
+    }
+    let mut cfg = state.config.lock().unwrap();
+    if cfg
+        .servers
+        .iter()
+        .any(|server| server.llamacpp_channel == trimmed)
+    {
+        return Err(format!(
+            "fork '{trimmed}' is used by at least one server; switch that server to another fork first"
+        ));
+    }
+    cfg.llamacpp_forks.retain(|fork| fork.id != trimmed);
+    cfg.llamacpp_channels.remove(trimmed);
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(cfg.llamacpp_forks.clone())
+}
+
+#[tauri::command]
 pub async fn llamacpp_check_updates(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<crate::llamacpp_install::LlamaCppUpdateStatus>, String> {
@@ -325,27 +405,25 @@ pub async fn llamacpp_check_updates(
         let t = cfg.github_token.trim().to_string();
         (!t.is_empty()).then_some(t)
     };
-    let upstream = cfg
-        .llamacpp_channels
-        .get(&crate::state::LlamaCppChannel::Upstream)
-        .cloned()
-        .unwrap_or_default();
-    let prism = cfg
-        .llamacpp_channels
-        .get(&crate::state::LlamaCppChannel::Prism)
-        .cloned()
-        .unwrap_or_default();
+    let forks: Vec<(crate::state::LlamaCppFork, Option<String>)> = cfg
+        .llamacpp_forks
+        .iter()
+        .map(|fork| {
+            let installed = cfg
+                .llamacpp_channels
+                .get(&fork.id)
+                .and_then(|channel| channel.installed_tag.clone());
+            (fork.clone(), installed)
+        })
+        .collect();
     // reqwest::blocking must not run on the async runtime, so hand the whole
     // check to a blocking thread.
     tauri::async_runtime::spawn_blocking(move || {
-        let mut out = Vec::with_capacity(2);
-        for (channel, cfg_channel) in [
-            (crate::state::LlamaCppChannel::Upstream, upstream),
-            (crate::state::LlamaCppChannel::Prism, prism),
-        ] {
+        let mut out = Vec::with_capacity(forks.len());
+        for (fork, installed_tag) in &forks {
             out.push(crate::llamacpp_install::check_update(
-                channel,
-                cfg_channel.installed_tag.as_deref(),
+                fork,
+                installed_tag.as_deref(),
                 token.as_deref(),
             ));
         }
@@ -466,7 +544,7 @@ pub async fn llamacpp_status(
         let cfg = st.config();
         let channel = cfg
             .llamacpp_channels
-            .get(&crate::state::LlamaCppChannel::Upstream)
+            .get("upstream")
             .cloned()
             .unwrap_or_default();
         let executable = crate::llamacpp_install::executable_from_config(&cfg);
@@ -495,11 +573,20 @@ pub async fn github_access(
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::llamacpp_install::GithubAccess, String> {
     let token = state.config().github_token;
+    let fork = state
+        .config()
+        .llamacpp_forks
+        .iter()
+        .find(|fork| fork.id == "upstream")
+        .cloned()
+        .unwrap_or_else(|| {
+            crate::state::builtin_llamacpp_forks()
+                .into_iter()
+                .find(|fork| fork.id == "upstream")
+                .expect("builtin upstream fork is always present")
+        });
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(crate::llamacpp_install::test_github_access(
-            crate::state::LlamaCppChannel::Upstream,
-            Some(&token),
-        ))
+        Ok(crate::llamacpp_install::test_github_access(&fork, Some(&token)))
     })
     .await
     .map_err(|e| format!("GitHub access task error: {e}"))?
@@ -762,18 +849,18 @@ fn score_variants(
                 }
             };
             let is_gguf = v.format == QuantFormat::GGUF;
-            let required_channel = v.required_channel;
+            let required_channel = v.required_channel.clone();
             let vi = VariantInput {
                 quant_str,
                 weight_bytes: v.weight_bytes,
                 params_b: v.params_b,
                 is_gguf,
-                required_channel,
+                required_channel: required_channel.clone(),
             };
             let channel_installed = channels
-                .get(&required_channel)
+                .get(required_channel.as_str())
                 .and_then(|c| c.installed_tag.as_ref())
-                .map(|_| required_channel);
+                .map(|_| required_channel.clone());
             let fit = fit::score_variant(
                 hw,
                 &vi,
@@ -1986,7 +2073,7 @@ pub struct ServerInput {
     pub speculative_num_tokens: OptionalField<usize>,
     pub speculative_enabled: Option<bool>,
     pub restart: Option<bool>,
-    pub llamacpp_channel: Option<crate::state::LlamaCppChannel>,
+    pub llamacpp_channel: Option<String>,
 }
 
 #[tauri::command]
@@ -2219,7 +2306,9 @@ pub async fn servers_create(
         env: input.env.clone().into_inner().unwrap_or_default(),
         llamacpp_channel: input
             .llamacpp_channel
-            .unwrap_or(crate::state::LlamaCppChannel::Upstream),
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "upstream".to_string()),
         speculative_model: input
             .speculative_model
             .clone()
@@ -2899,7 +2988,7 @@ pub struct SettingsPatch {
     pub llamacpp_executable: Option<String>,
     pub llamacpp_channels: Option<
         std::collections::BTreeMap<
-            crate::state::LlamaCppChannel,
+            String,
             crate::state::LlamaCppChannelConfig,
         >,
     >,
@@ -3042,7 +3131,7 @@ pub fn settings_set(
         next.llamacpp_channels = channels;
         let upstream = next
             .llamacpp_channels
-            .get(&crate::state::LlamaCppChannel::Upstream)
+            .get("upstream")
             .cloned();
         if let Some(upstream) = upstream {
             if !upstream.dir.trim().is_empty() {
@@ -3745,6 +3834,13 @@ pub fn download_queue_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<crate::download_manager::DownloadJob>, String> {
     Ok(state.download_manager.list_jobs())
+}
+
+#[tauri::command]
+pub fn download_clear_completed(
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, String> {
+    Ok(state.download_manager.clear_completed())
 }
 
 #[tauri::command]
@@ -4517,7 +4613,6 @@ pub async fn download_and_install_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::LlamaCppChannel;
 
     #[test]
     fn safe_relative_gguf_path_keeps_layout_and_blocks_escapes() {
@@ -4890,7 +4985,7 @@ mod tests {
                     params_b: None,
                     gguf_file: None,
                     vllm_native: true,
-                    required_channel: LlamaCppChannel::Upstream,
+                    required_channel: "upstream".to_string(),
                 },
                 fit: FitResult {
                     verdict: fit::FitVerdict::Constrained,
@@ -5008,7 +5103,7 @@ mod tests {
                     params_b: Some(7.0),
                     gguf_file: None,
                     vllm_native: true,
-                    required_channel: LlamaCppChannel::Upstream,
+                    required_channel: "upstream".to_string(),
                 }],
                 fetched_at: std::time::Instant::now(),
             },

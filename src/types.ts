@@ -327,22 +327,33 @@ export interface Settings {
   auto_shutdown_wsl?: boolean;
   auto_check_updates?: boolean;
   default_env?: Record<string, string>;
-  llamacpp_channels?: {
-    upstream?: {
-      installed_tag?: string | null;
-      version?: string | null;
-      help?: string | null;
-      executable?: string | null;
-      dir?: string;
-    };
-    prism?: {
-      installed_tag?: string | null;
-      version?: string | null;
-      help?: string | null;
-      executable?: string | null;
-      dir?: string;
-    };
-  };
+  llamacpp_channels?: Record<string, LlamaCppChannelConfig | undefined>;
+  llamacpp_forks?: LlamaCppFork[];
+}
+
+export interface LlamaCppChannelConfig {
+  installed_tag?: string | null;
+  version?: string | null;
+  help?: string | null;
+  executable?: string | null;
+  dir?: string;
+}
+
+/** A user-installable llama.cpp fork ("channel"), persisted in llamacpp_forks. */
+export interface LlamaCppFork {
+  id: string;
+  name: string;
+  /** GitHub repository as "owner/name". */
+  repo: string;
+  description?: string;
+  /** Regex for the main CUDA Windows x64 asset; captures CUDA major/minor in groups 1-2. */
+  asset_regex: string;
+  /** Regex for the cudart runtime asset; empty disables the runtime download. */
+  runtime_regex: string;
+  /** Prefix stripped from the main asset name to derive the install tag. */
+  main_prefix: string;
+  /** Built-in forks are managed by the app and cannot be edited or removed. */
+  builtin?: boolean;
 }
 
 export interface GgufRepoFile {
@@ -447,7 +458,7 @@ export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";
 export type FormatSupport = "Native" | "Experimental";
 export type QuantFormatTag = "FP16" | "FP8" | "AWQ" | "GPTQ" | "BNB" | "GGUF";
 
-export type LlamaCppChannel = "upstream" | "prism";
+export type LlamaCppChannel = string;
 
 export interface QuantVariant {
   repo_id: string;
@@ -759,26 +770,34 @@ export interface DownloadJob {
   destination_dir: string;
   total_bytes: number;
   downloaded_bytes: number;
-  current_file_idx: number;
+  current_file_idx?: number;
+  current_shard?: number;
+  total_shards?: number;
+  current_file?: string | null;
   speed_bps: number;
-  eta_seconds: number;
-  state: DownloadState;
+  eta_seconds?: number | null;
+  status: DownloadState;
+  state?: DownloadState;
   error: string | null;
+  is_split?: boolean;
 }
 
 export interface DownloadProgressPayload {
   job_id: string;
   model_id: string;
   repo_id?: string;
-  current_file: string;
-  file_index: number;
-  total_files: number;
+  current_file?: string | null;
+  current_shard?: number;
+  total_shards?: number;
+  file_index?: number;
+  total_files?: number;
   downloaded_bytes: number;
   total_bytes: number;
   percent: number;
   speed_bps: number;
-  eta_seconds: number;
-  state: string;
+  eta_seconds?: number | null;
+  status?: string;
+  state?: string;
   error?: string | null;
 }
 

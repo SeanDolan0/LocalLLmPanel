@@ -34,6 +34,7 @@ import type {
   BenchmarkErrorPayload,
   LlamacppInstallStatus,
   LlamaCppChannel,
+  LlamaCppFork,
   LlamaCppUpdateStatus,
   VllmUpdateResult,
   GgufRepoFile,
@@ -67,6 +68,11 @@ export const api = {
     invoke<LlamacppInstallStatus>("install_llamacpp_channel", { channel }),
   llamacppCheckUpdates: () =>
     invoke<LlamaCppUpdateStatus[]>("llamacpp_check_updates"),
+  llamacppForks: () => invoke<LlamaCppFork[]>("llamacpp_forks"),
+  llamacppForkUpsert: (fork: LlamaCppFork) =>
+    invoke<LlamaCppFork[]>("llamacpp_fork_upsert", { fork }),
+  llamacppForkRemove: (id: string) =>
+    invoke<LlamaCppFork[]>("llamacpp_fork_remove", { id }),
   updateVllm: () => invoke<VllmUpdateResult>("update_vllm"),
   llamacppStatus: () => invoke<LlamacppInstallStatus>("llamacpp_status"),
   searchModelsWithFit: (query: string) =>
@@ -85,6 +91,8 @@ export const api = {
     invoke<boolean>("download_cancel", { jobId }),
   downloadQueueStatus: () =>
     invoke<DownloadJob[]>("download_queue_status"),
+  downloadClearCompleted: () =>
+    invoke<number>("download_clear_completed"),
   analyzeContextFit: (input: ContextFitRequest) =>
     invoke<ContextFitReport>("analyze_context_fit", { input }),
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),
@@ -274,7 +282,7 @@ export function fmtTransferRate(bytesPerSecond: number | null | undefined): stri
 
 export function fmtBytes(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n) || n < 0) return "—";
-  const units = ["B", "KB", "MB", "GB"];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let value = n;
   let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
@@ -282,6 +290,17 @@ export function fmtBytes(n: number | null | undefined): string {
     unit += 1;
   }
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+export function fmtDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const totalSec = Math.round(seconds);
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
 }
 
 export function fmtTokPerSec(n: number | null | undefined): string {

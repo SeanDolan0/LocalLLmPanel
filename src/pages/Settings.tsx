@@ -117,6 +117,18 @@ export default function Settings() {
   const [checkingLlamacppUpdates, setCheckingLlamacppUpdates] = useState(false);
   const [installingChannel, setInstallingChannel] = useState<string | null>(null);
   const [llamacppMsg, setLlamacppMsg] = useState<string | null>(null);
+  const [forkMsg, setForkMsg] = useState<string | null>(null);
+  const [showAddFork, setShowAddFork] = useState(false);
+  const [editingForkId, setEditingForkId] = useState<string | null>(null);
+  const [forkForm, setForkForm] = useState({
+    id: "",
+    name: "",
+    repo: "",
+    description: "",
+    asset_regex: "",
+    runtime_regex: "",
+    main_prefix: "",
+  });
   const [githubMsg, setGithubMsg] = useState<string | null>(null);
   const [hfTokenDirty, setHfTokenDirty] = useState(false);
   const [githubTokenDirty, setGithubTokenDirty] = useState(false);
@@ -174,8 +186,8 @@ export default function Settings() {
     }
   };
 
-  const installLlamacppChannel = async (channel: "upstream" | "prism") => {
-    const label = channel === "prism" ? "PrismML" : "Upstream";
+  const installLlamacppChannel = async (channel: string) => {
+    const label = s?.llamacpp_forks?.find((fork) => fork.id === channel)?.name ?? channel;
     setInstallingChannel(channel);
     setLlamacppMsg(null);
     try {
@@ -186,15 +198,82 @@ export default function Settings() {
       // (not the whole settings object) so unsaved edits elsewhere survive.
       const cfg = await api.settingsGet().catch(() => null);
       if (cfg) {
-        setS((prev) => (prev ? { ...prev, llamacpp_channels: cfg.llamacpp_channels } : prev));
+        setS((prev) => (prev ? { ...prev, llamacpp_channels: cfg.llamacpp_channels, llamacpp_forks: cfg.llamacpp_forks } : prev));
       }
       setLlamacppUpdates(null);
-      setLlamacppMsg(`${label} llama.cpp installed/updated.`);
+      setLlamacppMsg(`${label} installed/updated.`);
       setTimeout(() => setLlamacppMsg(null), 5000);
     } catch (e) {
       setLlamacppMsg(`${label} install failed: ${e}`);
     } finally {
       setInstallingChannel(null);
+    }
+  };
+
+  const normalizeForkRepo = (raw: string): string => {
+    let repo = raw.trim().replace(/\/+$/, "");
+    repo = repo.replace(/^https?:\/\/github\.com\//i, "");
+    repo = repo.replace(/\.git$/i, "");
+    const parts = repo.split("/").filter(Boolean);
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : repo;
+  };
+
+  const resetForkForm = () => {
+    setForkForm({ id: "", name: "", repo: "", description: "", asset_regex: "", runtime_regex: "", main_prefix: "" });
+    setEditingForkId(null);
+    setShowAddFork(false);
+  };
+
+  const submitFork = async () => {
+    setForkMsg(null);
+    // Built-in-style defaults: blank regex fields fall back to the upstream naming convention.
+    const DEFAULT_MAIN = "^llama-.*-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$";
+    const DEFAULT_RUNTIME = "^cudart-llama-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$";
+    const fork = {
+      id: editingForkId ?? forkForm.id.trim().toLowerCase(),
+      name: forkForm.name.trim(),
+      repo: normalizeForkRepo(forkForm.repo),
+      description: forkForm.description.trim(),
+      asset_regex: forkForm.asset_regex.trim() || DEFAULT_MAIN,
+      runtime_regex: forkForm.runtime_regex.trim() || DEFAULT_RUNTIME,
+      main_prefix: forkForm.main_prefix.trim() || "llama-",
+      builtin: false,
+    };
+    try {
+      const forks = await api.llamacppForkUpsert(fork);
+      setS((prev) => (prev ? { ...prev, llamacpp_forks: forks } : prev));
+      setLlamacppUpdates(null);
+      setForkMsg(editingForkId ? `Fork "${fork.name}" updated.` : `Fork "${fork.name}" added. Use it in a server's llama.cpp Fork dropdown or install it below.`);
+      resetForkForm();
+    } catch (e) {
+      setForkMsg(String(e));
+    }
+  };
+
+  const editFork = (fork: import("../types").LlamaCppFork) => {
+    setEditingForkId(fork.id);
+    setForkForm({
+      id: fork.id,
+      name: fork.name,
+      repo: fork.repo,
+      description: fork.description ?? "",
+      asset_regex: fork.asset_regex,
+      runtime_regex: fork.runtime_regex,
+      main_prefix: fork.main_prefix,
+    });
+    setShowAddFork(true);
+    setForkMsg(null);
+  };
+
+  const removeFork = async (id: string) => {
+    setForkMsg(null);
+    try {
+      const forks = await api.llamacppForkRemove(id);
+      setS((prev) => (prev ? { ...prev, llamacpp_forks: forks } : prev));
+      setLlamacppUpdates(null);
+      setForkMsg(`Fork "${id}" removed.`);
+    } catch (e) {
+      setForkMsg(String(e));
     }
   };
 
@@ -250,8 +329,7 @@ export default function Settings() {
       .catch((e) => setErr(`Update check failed: ${e}`));
   }, []);
 
-  const upstreamUpdate = llamacppUpdates?.find((u) => u.channel === "upstream");
-  const prismUpdate = llamacppUpdates?.find((u) => u.channel === "prism");
+  const updatesById = new Map((llamacppUpdates ?? []).map((u) => [u.channel, u]));
 
   useEffect(() => {
     let cancelled = false;
@@ -899,28 +977,6 @@ export default function Settings() {
               </Field>
 
               <Field
-                label="llama.cpp Directory (Upstream)"
-                hint="Windows folder containing the installed CUDA llama-server build (ggml-org/llama.cpp)."
-              >
-                <input
-                  className={inputCls}
-                  value={s.llamacpp_channels?.upstream?.dir ?? s.llamacpp_dir}
-                  onChange={(e) => setS({ ...s, llamacpp_channels: { ...s.llamacpp_channels, upstream: { ...s.llamacpp_channels?.upstream, dir: e.target.value } } })}
-                />
-              </Field>
-
-              <Field
-                label="llama.cpp Directory (PrismML)"
-                hint="Windows folder for PrismML fork build (PrismML-Eng/llama.cpp@prism). Supports ternary formats (PQ2_0, PTQ1_0)."
-              >
-                <input
-                  className={inputCls}
-                  value={s.llamacpp_channels?.prism?.dir ?? ""}
-                  onChange={(e) => setS({ ...s, llamacpp_channels: { ...s.llamacpp_channels, prism: { ...s.llamacpp_channels?.prism, dir: e.target.value } } })}
-                />
-              </Field>
-
-              <Field
                 label="GGUF Model Directory"
                 hint="Windows folder used by native GGUF downloads and library scanning."
               >
@@ -930,111 +986,143 @@ export default function Settings() {
                   onChange={(e) => setS({ ...s, gguf_dir: e.target.value })}
                 />
               </Field>
-
-              <Field
-                label="Custom llama-server.exe (Upstream)"
-                hint="Optional absolute path for upstream build; leave blank to use the installed build."
-              >
-                <input
-                  className={inputCls}
-                  placeholder="C:\\path\\to\\llama-server.exe"
-                  value={s.llamacpp_channels?.upstream?.executable ?? s.llamacpp_executable ?? ""}
-                  onChange={(e) =>
-                    setS({
-                      ...s,
-                      llamacpp_channels: { ...s.llamacpp_channels, upstream: { ...s.llamacpp_channels?.upstream, executable: e.target.value.trim() || null } },
-                    })
-                  }
-                />
-              </Field>
-
-              <Field
-                label="Custom llama-server.exe (PrismML)"
-                hint="Optional absolute path for PrismML build; leave blank to use the installed build."
-              >
-                <input
-                  className={inputCls}
-                  placeholder="C:\\path\\to\\llama-server.exe"
-                  value={s.llamacpp_channels?.prism?.executable ?? ""}
-                  onChange={(e) =>
-                    setS({
-                      ...s,
-                      llamacpp_channels: { ...s.llamacpp_channels, prism: { ...s.llamacpp_channels?.prism, executable: e.target.value.trim() || null } },
-                    })
-                  }
-                />
-              </Field>
-              <div className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 text-xs text-slate-400 space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm text-slate-200 min-w-0">
-                    <span className={`h-2 w-2 rounded-full shrink-0 ${llamacppStatus?.cuda_available ? "bg-emerald-400" : "bg-amber-400"}`} />
-                    <span className="truncate">
-                      Native llama.cpp (Upstream): {llamacppStatus?.installed ? (llamacppStatus.cuda_available ? "CUDA ready" : "installed, CUDA device unavailable") : "not installed"}
-                      {s.llamacpp_channels?.upstream?.installed_tag ? ` (tag ${s.llamacpp_channels.upstream.installed_tag})` : ""}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <Button variant="ghost" className="text-[11px]" onClick={checkLlamacppUpdates} disabled={checkingLlamacppUpdates}>
-                      {checkingLlamacppUpdates ? <Spinner label="checking…" /> : "Check for updates"}
-                    </Button>
-                    <Button variant="subtle" className="text-[11px]" onClick={() => installLlamacppChannel("upstream")} disabled={installingChannel !== null}>
-                      {installingChannel === "upstream" ? <Spinner label="installing…" /> : upstreamUpdate?.update_available && upstreamUpdate.latest_tag ? `Update to ${upstreamUpdate.latest_tag}` : "Install / Reinstall"}
-                    </Button>
-                  </div>
-                </div>
-                {llamacppStatus?.devices?.length ? (
-                  <div className="mt-1">Devices: {llamacppStatus.devices.map((d) => `${d.id} (${d.name})`).join(", ")}</div>
-                ) : (
-                  <div className="mt-1">Install a CUDA build; Vulkan/CPU archives are not selected by this app.</div>
-                )}
-                {upstreamUpdate && (
-                  <div className="text-[11px]">
-                    {upstreamUpdate.latest_tag ? (
-                      upstreamUpdate.update_available ? (
-                        <span className="text-amber-300">Update available: {upstreamUpdate.installed_tag ?? "not installed"} → {upstreamUpdate.latest_tag}{upstreamUpdate.cuda_version ? ` (CUDA ${upstreamUpdate.cuda_version})` : ""}</span>
-                      ) : (
-                        <span className="text-emerald-300">Up to date (latest {upstreamUpdate.latest_tag})</span>
-                      )
-                    ) : (
-                      <span className="text-rose-300">{upstreamUpdate.warning ?? "Update check failed"}</span>
-                    )}
-                    {upstreamUpdate.warning && upstreamUpdate.latest_tag && (
-                      <div className="text-amber-300/80 mt-0.5">{upstreamUpdate.warning}</div>
-                    )}
-                  </div>
-                )}
+              <div className="sm:col-span-2 flex items-center justify-between gap-2 pt-1">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">llama.cpp Forks</div>
+                <Button variant="ghost" className="text-[11px]" onClick={checkLlamacppUpdates} disabled={checkingLlamacppUpdates}>
+                  {checkingLlamacppUpdates ? <Spinner label="checking." /> : "Check for updates"}
+                </Button>
               </div>
-              <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 text-xs text-slate-400 space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm text-indigo-200 min-w-0">
-                    <span className="h-2 w-2 rounded-full shrink-0 bg-indigo-400" />
-                    <span className="truncate">
-                      PrismML Channel: {s.llamacpp_channels?.prism?.installed_tag ? `installed (tag ${s.llamacpp_channels.prism.installed_tag})` : "not installed"}
-                    </span>
+
+              {(s.llamacpp_forks ?? []).map((fork) => {
+                const ch = s.llamacpp_channels?.[fork.id];
+                const update = updatesById.get(fork.id);
+                const tag = ch?.installed_tag ?? null;
+                return (
+                  <div key={fork.id} className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-sm text-slate-200 min-w-0">
+                        <span className={`h-2 w-2 rounded-full shrink-0 ${tag ? "bg-emerald-400" : "bg-slate-600"}`} />
+                        <span className="font-medium truncate">{fork.name}</span>
+                        {fork.builtin ? (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-400 border border-slate-600/40">built-in</span>
+                        ) : (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">custom</span>
+                        )}
+                        <a
+                          className="text-[11px] text-indigo-400 hover:underline shrink-0"
+                          href={`https://github.com/${fork.repo}/releases`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {fork.repo} ↗
+                        </a>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {fork.builtin !== true && (
+                          <>
+                            <Button variant="ghost" className="text-[11px]" onClick={() => editFork(fork)}>Edit</Button>
+                            <Button variant="ghost" className="text-[11px] text-rose-300" onClick={() => removeFork(fork.id)}>Remove</Button>
+                          </>
+                        )}
+                        <Button variant="subtle" className="text-[11px]" onClick={() => installLlamacppChannel(fork.id)} disabled={installingChannel !== null}>
+                          {installingChannel === fork.id ? <Spinner label="installing." /> : update?.update_available && update.latest_tag && tag ? `Update to ${update.latest_tag}` : "Install / Reinstall"}
+                        </Button>
+                      </div>
+                    </div>
+                    {fork.description ? <div className="text-[11px] text-slate-500">{fork.description}</div> : null}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Field label="Install directory" hint="Windows folder for this fork's CUDA build(s).">
+                        <input
+                          className={inputCls}
+                          value={ch?.dir ?? s.llamacpp_dir}
+                          onChange={(e) => setS({ ...s, llamacpp_channels: { ...s.llamacpp_channels, [fork.id]: { ...s.llamacpp_channels?.[fork.id], dir: e.target.value } } })}
+                        />
+                      </Field>
+                      <Field label="Custom llama-server.exe" hint="Optional absolute path override; leave blank to use the installed build.">
+                        <input
+                          className={inputCls}
+                          placeholder="C:\\path\\to\\llama-server.exe"
+                          value={ch?.executable ?? ""}
+                          onChange={(e) =>
+                            setS({
+                              ...s,
+                              llamacpp_channels: { ...s.llamacpp_channels, [fork.id]: { ...s.llamacpp_channels?.[fork.id], executable: e.target.value.trim() || null } },
+                            })
+                          }
+                        />
+                      </Field>
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      {tag ? `installed (tag ${tag})` : "not installed"}
+                      {fork.id === "upstream" && llamacppStatus ? ` · ${llamacppStatus.cuda_available ? "CUDA ready" : llamacppStatus.installed ? "CUDA device unavailable" : "not installed"}` : ""}
+                      {fork.id === "upstream" && llamacppStatus?.devices?.length ? ` · Devices: ${llamacppStatus.devices.map((d) => `${d.id} (${d.name})`).join(", ")}` : ""}
+                    </div>
+                    {update ? (
+                      <div className="text-[11px]">
+                        {update.latest_tag ? (
+                          update.update_available && tag ? (
+                            <span className="text-amber-300">Update available: {tag} → {update.latest_tag}{update.cuda_version ? ` (CUDA ${update.cuda_version})` : ""}</span>
+                          ) : (
+                            <span className="text-emerald-300">Up to date (latest {update.latest_tag})</span>
+                          )
+                        ) : (
+                          <span className="text-rose-300">{update.warning ?? "Update check failed"}</span>
+                        )}
+                        {update.warning && update.latest_tag ? <div className="text-amber-300/80 mt-0.5">{update.warning}</div> : null}
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <Button variant="subtle" className="text-[11px]" onClick={() => installLlamacppChannel("prism")} disabled={installingChannel !== null}>
-                      {installingChannel === "prism" ? <Spinner label="installing…" /> : prismUpdate?.update_available && prismUpdate.latest_tag && s.llamacpp_channels?.prism?.installed_tag ? `Update to ${prismUpdate.latest_tag}` : "Install / Reinstall"}
-                    </Button>
-                  </div>
-                </div>
-                <div className="mt-1 text-slate-400">Supports ternary quant formats (PQ2_0, PTQ1_0) and Hadamard activation transform for Bonsai 2 models.</div>
-                {prismUpdate && (
-                  <div className="text-[11px]">
-                    {prismUpdate.latest_tag ? (
-                      prismUpdate.update_available && s.llamacpp_channels?.prism?.installed_tag ? (
-                        <span className="text-amber-300">Update available: {prismUpdate.installed_tag} → {prismUpdate.latest_tag}{prismUpdate.cuda_version ? ` (CUDA ${prismUpdate.cuda_version})` : ""}</span>
-                      ) : (
-                        <span className="text-emerald-300">Up to date (latest {prismUpdate.latest_tag})</span>
-                      )
-                    ) : (
-                      <span className="text-rose-300">{prismUpdate.warning ?? "Update check failed"}</span>
-                    )}
-                    {prismUpdate.warning && prismUpdate.latest_tag && (
-                      <div className="text-amber-300/80 mt-0.5">{prismUpdate.warning}</div>
-                    )}
+                );
+              })}
+              <div className="sm:col-span-2">
+                {!showAddFork ? (
+                  <Button variant="subtle" className="text-[11px]" onClick={() => { resetForkForm(); setShowAddFork(true); setForkMsg(null); }}>
+                    + Add custom fork…
+                  </Button>
+                ) : (
+                  <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-indigo-200">{editingForkId ? `Edit fork "${editingForkId}"` : "Add a custom llama.cpp fork"}</div>
+                      <Button variant="ghost" className="text-[11px]" onClick={resetForkForm}>Cancel</Button>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Field label="Fork id" hint="Lowercase slug used in servers/installs, e.g. xhtoken">
+                        <input className={inputCls} placeholder="xhtoken" value={forkForm.id} disabled={editingForkId !== null} onChange={(e) => setForkForm({ ...forkForm, id: e.target.value })} />
+                      </Field>
+                      <Field label="Display name">
+                        <input className={inputCls} placeholder="XHToken (Spark)" value={forkForm.name} onChange={(e) => setForkForm({ ...forkForm, name: e.target.value })} />
+                      </Field>
+                      <Field label="GitHub repo" hint="'owner/name' or a github.com URL">
+                        <input className={inputCls} placeholder="XHToken/llama.cpp" value={forkForm.repo} onChange={(e) => setForkForm({ ...forkForm, repo: e.target.value })} />
+                      </Field>
+                      <Field label="Asset prefix" hint="Prefix stripped from the main asset name to derive the tag">
+                        <input className={inputCls} placeholder="llama-" value={forkForm.main_prefix} onChange={(e) => setForkForm({ ...forkForm, main_prefix: e.target.value })} />
+                      </Field>
+                    </div>
+                    <Field label="Description" hint="Optional">
+                      <input className={inputCls} placeholder="What this fork adds (e.g. Spark DSpark speculative decoding)" value={forkForm.description} onChange={(e) => setForkForm({ ...forkForm, description: e.target.value })} />
+                    </Field>
+                    <Collapsible title="Advanced: asset regexes" compact>
+                      <div className="grid gap-2 sm:grid-cols-2 pt-2">
+                        <Field label="Main asset regex" hint="Windows x64 CUDA zip; captures CUDA major.minor in groups 1-2">
+                          <input className={inputCls} placeholder="^llama-.*-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$" value={forkForm.asset_regex} onChange={(e) => setForkForm({ ...forkForm, asset_regex: e.target.value })} />
+                        </Field>
+                        <Field label="Runtime (cudart) regex" hint="Blank keeps the upstream default naming">
+                          <input className={inputCls} placeholder="^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$" value={forkForm.runtime_regex} onChange={(e) => setForkForm({ ...forkForm, runtime_regex: e.target.value })} />
+                        </Field>
+                      </div>
+                    </Collapsible>
+                    <div className="flex items-center gap-2">
+                      <Button variant="subtle" className="text-[11px]" onClick={submitFork}>{editingForkId ? "Save fork" : "Add fork"}</Button>
+                    </div>
+                    <p className="text-[10px] text-slate-500">
+                      Install/update scans the fork's GitHub releases and picks the newest Windows x64 CUDA build your driver supports. The main asset must match the regex above
+                      (default: the upstream naming convention); a matching cudart zip is expanded alongside it. Forks that publish no Windows CUDA zips can't be auto-installed — use
+                      a Custom llama-server.exe path instead.
+                    </p>
                   </div>
                 )}
+                {forkMsg ? <div className="mt-1 text-[11px] text-slate-300">{forkMsg}</div> : null}
               </div>
               {llamacppMsg && (
                 <div className="sm:col-span-2 text-[11px] text-slate-300">{llamacppMsg}</div>

@@ -5,15 +5,11 @@ use regex_lite::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::state::LlamaCppChannel;
-
-const UPSTREAM_RELEASES_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10";
-const UPSTREAM_RELEASES_PAGE: &str = "https://github.com/ggml-org/llama.cpp/releases";
-const PRISM_RELEASES_API: &str = "https://api.github.com/repos/PrismML-Eng/llama.cpp/releases?per_page=10";
-const PRISM_RELEASES_PAGE: &str = "https://github.com/PrismML-Eng/llama.cpp/releases";
+use crate::state::LlamaCppFork;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GithubAccess {
@@ -40,33 +36,40 @@ pub struct Asset {
     pub browser_download_url: String,
 }
 
+/// Install-time configuration derived from a fork definition. Forks supply the
+/// regexes; this struct only compiles them once and derives the API/page URLs.
 #[derive(Debug, Clone)]
 struct ChannelConfig {
-    api_url: &'static str,
-    page_url: &'static str,
+    label: String,
+    api_url: String,
+    page_url: String,
     parse_main_regex: Regex,
-    parse_runtime_regex: Regex,
+    parse_runtime_regex: Option<Regex>,
     main_prefix: String,
 }
 
 impl ChannelConfig {
-    fn for_channel(channel: LlamaCppChannel) -> Self {
-        match channel {
-            LlamaCppChannel::Upstream => ChannelConfig {
-                api_url: UPSTREAM_RELEASES_API,
-                page_url: UPSTREAM_RELEASES_PAGE,
-                parse_main_regex: Regex::new(r"^llama-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
-                parse_runtime_regex: Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
-                main_prefix: "llama-".to_string(),
-            },
-            LlamaCppChannel::Prism => ChannelConfig {
-                api_url: PRISM_RELEASES_API,
-                page_url: PRISM_RELEASES_PAGE,
-                parse_main_regex: Regex::new(r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
-                parse_runtime_regex: Regex::new(r"^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$").unwrap(),
-                main_prefix: "llama-prism-".to_string(),
-            },
-        }
+    fn for_fork(fork: &LlamaCppFork) -> Result<Self> {
+        let repo = fork.repo.trim();
+        let label = format!("'{}' ({})", fork.id, repo);
+        let parse_main_regex = Regex::new(&fork.asset_regex).with_context(|| {
+            format!("fork {} has an invalid asset regex: {}", fork.id, fork.asset_regex)
+        })?;
+        let parse_runtime_regex = if fork.runtime_regex.trim().is_empty() {
+            None
+        } else {
+            Some(Regex::new(&fork.runtime_regex).with_context(|| {
+                format!("fork {} has an invalid runtime regex: {}", fork.id, fork.runtime_regex)
+            })?)
+        };
+        Ok(ChannelConfig {
+            label,
+            api_url: format!("https://api.github.com/repos/{repo}/releases?per_page=10"),
+            page_url: format!("https://github.com/{repo}/releases"),
+            parse_main_regex,
+            parse_runtime_regex,
+            main_prefix: fork.main_prefix.clone(),
+        })
     }
 }
 
@@ -122,21 +125,25 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 pub fn choose_assets(assets: &[Asset]) -> Result<(Asset, Option<Asset>)> {
-    let selection = choose_assets_for_machine(LlamaCppChannel::Upstream, assets, None, None)?;
+    let fork = crate::state::builtin_llamacpp_forks()
+        .into_iter()
+        .find(|fork| fork.id == "upstream")
+        .expect("builtin upstream fork is always present");
+    let selection = choose_assets_for_machine(&fork, assets, None, None)?;
     Ok((selection.candidate.main, selection.candidate.runtime))
 }
 
 fn choose_assets_for_machine(
-    channel: LlamaCppChannel,
+    fork: &LlamaCppFork,
     assets: &[Asset],
     driver: Option<CudaVersion>,
     compute_cap: Option<(u32, u32)>,
 ) -> Result<Selection> {
-    choose_assets_for_machine_channel(channel, assets, driver, compute_cap)
+    let config = ChannelConfig::for_fork(fork)?;
+    choose_assets_for_machine_config(&config, assets, driver, compute_cap)
 }
 
-fn parse_main_tag(name: &str, channel: LlamaCppChannel) -> String {
-    let config = ChannelConfig::for_channel(channel);
+fn parse_main_tag(name: &str, config: &ChannelConfig) -> String {
     name.split("-bin-")
         .next()
         .unwrap_or("unknown")
@@ -144,8 +151,7 @@ fn parse_main_tag(name: &str, channel: LlamaCppChannel) -> String {
         .to_string()
 }
 
-fn parse_main_channel(name: &str, channel: LlamaCppChannel) -> Option<CudaVersion> {
-    let config = ChannelConfig::for_channel(channel);
+fn parse_main_channel(name: &str, config: &ChannelConfig) -> Option<CudaVersion> {
     let captures = config.parse_main_regex.captures(name)?;
     Some(CudaVersion(
         captures.get(1)?.as_str().parse().ok()?,
@@ -153,19 +159,18 @@ fn parse_main_channel(name: &str, channel: LlamaCppChannel) -> Option<CudaVersio
     ))
 }
 
-fn parse_runtime_channel(name: &str, channel: LlamaCppChannel) -> Option<CudaVersion> {
-    let config = ChannelConfig::for_channel(channel);
-    let captures = config.parse_runtime_regex.captures(name)?;
+fn parse_runtime_channel(name: &str, config: &ChannelConfig) -> Option<CudaVersion> {
+    let captures = config.parse_runtime_regex.as_ref()?.captures(name)?;
     Some(CudaVersion(
         captures.get(1)?.as_str().parse().ok()?,
         captures.get(2)?.as_str().parse().ok()?,
     ))
 }
 
-fn diagnostic_channel(assets: &[Asset], driver: Option<CudaVersion>, channel: LlamaCppChannel) -> String {
-    let config = ChannelConfig::for_channel(channel);
+fn diagnostic_channel(assets: &[Asset], driver: Option<CudaVersion>, config: &ChannelConfig) -> Vec<String> {
     let mut lines = vec![format!(
-        "No suitable Windows x64 CUDA archive found for {channel:?} channel (driver CUDA: {}).",
+        "No suitable Windows x64 CUDA archive found for {} (driver CUDA: {}).",
+        config.label,
         driver.map_or_else(|| "unknown".into(), |v| v.to_string())
     )];
     for asset in assets
@@ -174,7 +179,7 @@ fn diagnostic_channel(assets: &[Asset], driver: Option<CudaVersion>, channel: Ll
     {
         let reason = if asset.name.to_ascii_lowercase().contains("arm64") {
             "rejected: arm64"
-        } else if parse_main_channel(&asset.name, channel).is_some() {
+        } else if parse_main_channel(&asset.name, config).is_some() {
             "rejected: CUDA version is newer than the driver"
         } else if !asset.name.to_ascii_lowercase().contains("cuda") {
             "rejected: non-CUDA variant"
@@ -189,18 +194,18 @@ fn diagnostic_channel(assets: &[Asset], driver: Option<CudaVersion>, channel: Ll
         ));
     }
     lines.push(format!("Releases: {}", config.page_url));
-    lines.join("\n")
+    lines
 }
 
-fn choose_assets_for_machine_channel(
-    channel: LlamaCppChannel,
+fn choose_assets_for_machine_config(
+    config: &ChannelConfig,
     assets: &[Asset],
     driver: Option<CudaVersion>,
     compute_cap: Option<(u32, u32)>,
 ) -> Result<Selection> {
     let mut mains: Vec<(CudaVersion, &Asset)> = assets
         .iter()
-        .filter_map(|asset| parse_main_channel(&asset.name, channel).map(|version| (version, asset)))
+        .filter_map(|asset| parse_main_channel(&asset.name, config).map(|version| (version, asset)))
         .collect();
     mains.sort_by(|a, b| b.0.cmp(&a.0));
     let usable = mains
@@ -212,10 +217,10 @@ fn choose_assets_for_machine_channel(
             compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version >= CudaVersion(12, 8)
         })
         .or_else(|| usable.clone().next())
-        .ok_or_else(|| anyhow!(diagnostic_channel(assets, driver, channel)))?;
+        .ok_or_else(|| anyhow!(diagnostic_channel(assets, driver, config).join("\n")))?;
     let runtime = assets
         .iter()
-        .find(|asset| parse_runtime_channel(&asset.name, channel) == Some(*version))
+        .find(|asset| parse_runtime_channel(&asset.name, config) == Some(*version))
         .cloned();
     let warning = if compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version < CudaVersion(12, 8)
     {
@@ -224,7 +229,7 @@ fn choose_assets_for_machine_channel(
         None
     };
     Ok(Selection {
-        tag: parse_main_tag(&main.name, channel),
+        tag: parse_main_tag(&main.name, config),
         candidate: CudaCandidate {
             main: (*main).clone(),
             runtime,
@@ -235,18 +240,19 @@ fn choose_assets_for_machine_channel(
 }
 
 pub fn install_for_channel(
-    channel: LlamaCppChannel,
+    fork: &LlamaCppFork,
     destination: &Path,
     progress: impl Fn(&str, u64, Option<u64>) + Copy,
     token: Option<&str>,
 ) -> Result<(String, PathBuf, String, String)> {
-    let selection = latest_release_for_channel(channel, token)?;
+    let config = ChannelConfig::for_fork(fork)?;
+    let selection = latest_release_for_channel(&config, token)?;
     let tag = selection.tag;
     let main = selection.candidate.main;
     let runtime = selection.candidate.runtime;
-    let install_dir = destination.join(format!("{channel:?}-{}-cuda-{}", tag, selection.candidate.version).to_lowercase());
+    let install_dir = destination.join(format!("{}-{}-cuda-{}", fork.id, tag, selection.candidate.version).to_lowercase());
     std::fs::create_dir_all(&install_dir)?;
-    let temp = destination.join(format!(".llamacpp-{channel:?}-{}.zip", std::process::id()).to_lowercase());
+    let temp = destination.join(format!(".llamacpp-{}-{}.zip", fork.id, std::process::id()).to_lowercase());
     let download_label = selection.warning.as_ref().map_or_else(
         || format!("downloading {}", main.name),
         |warning| format!("downloading {} ({warning})", main.name),
@@ -261,7 +267,7 @@ pub fn install_for_channel(
 
         if let Some(runtime) = runtime {
             let runtime_zip =
-                destination.join(format!(".llamacpp-{channel:?}-cudart-{}.zip", std::process::id()).to_lowercase());
+                destination.join(format!(".llamacpp-{}-cudart-{}.zip", fork.id, std::process::id()).to_lowercase());
             let runtime_result = (|| {
                 download(
                     &runtime.browser_download_url,
@@ -286,8 +292,11 @@ pub fn install_for_channel(
     result
 }
 
-pub fn executable_from_config_channel(cfg: &crate::state::PersistedConfig, channel: LlamaCppChannel) -> Option<PathBuf> {
-    let channel_config = cfg.llamacpp_channels.get(&channel)?;
+pub fn executable_from_config_channel(
+    cfg: &crate::state::PersistedConfig,
+    channel: &str,
+) -> Option<PathBuf> {
+    let channel_config = cfg.llamacpp_channels.get(channel)?;
     channel_config
         .executable
         .as_ref()
@@ -295,7 +304,7 @@ pub fn executable_from_config_channel(cfg: &crate::state::PersistedConfig, chann
         .filter(|p| p.is_file())
         .or_else(|| find_channel_file(Path::new(&channel_config.dir), channel, "llama-server.exe"))
         .or_else(|| {
-            if channel == LlamaCppChannel::Upstream {
+            if channel == "upstream" {
                 find_on_path("llama-server.exe")
             } else {
                 None
@@ -304,7 +313,7 @@ pub fn executable_from_config_channel(cfg: &crate::state::PersistedConfig, chann
 }
 
 pub fn executable_from_config(cfg: &crate::state::PersistedConfig) -> Option<PathBuf> {
-    executable_from_config_channel(cfg, LlamaCppChannel::Upstream)
+    executable_from_config_channel(cfg, "upstream")
 }
 
 fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Result<()> {
@@ -356,12 +365,13 @@ fn expand_archive(zip: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_channel_file(root: &Path, channel: LlamaCppChannel, name: &str) -> Option<PathBuf> {
+fn find_channel_file(root: &Path, channel: &str, name: &str) -> Option<PathBuf> {
     let direct = root.join(name);
     if direct.is_file() {
         return Some(direct);
     }
     let entries = std::fs::read_dir(root).ok()?;
+    let prefix = format!("{}-", channel.to_ascii_lowercase());
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -370,10 +380,7 @@ fn find_channel_file(root: &Path, channel: LlamaCppChannel, name: &str) -> Optio
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            let matches_channel = match channel {
-                LlamaCppChannel::Prism => dir_name.contains("prism"),
-                LlamaCppChannel::Upstream => !dir_name.contains("prism"),
-            };
+            let matches_channel = dir_name.starts_with(&prefix);
             if matches_channel {
                 if let Some(found) = find_file(&path, name) {
                     return Some(found);
@@ -423,20 +430,26 @@ fn compute_capability() -> Option<(u32, u32)> {
     ))
 }
 
-fn releases_for_channel(channel: LlamaCppChannel, token: Option<&str>) -> Result<(Vec<Release>, Option<String>)> {
-    let config = ChannelConfig::for_channel(channel);
-    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<Release>)>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+fn releases_for_channel(
+    config: &ChannelConfig,
+    token: Option<&str>,
+) -> Result<(Vec<Release>, Option<String>)> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<Release>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = config.api_url.clone();
     if token.is_none() {
-        if let Some((when, releases)) = cache.lock().unwrap().as_ref() {
+        if let Some((when, releases)) = cache.lock().unwrap().get(&key) {
             if when.elapsed() < Duration::from_secs(300) {
                 return Ok((releases.clone(), None));
             }
         }
     }
-    let (releases, warning) = github_releases_with_info(config.api_url, token)?;
+    let (releases, warning) = github_releases_with_info(&config.api_url, token)?;
     if token.is_none() {
-        *cache.lock().unwrap() = Some((Instant::now(), releases.clone()));
+        cache
+            .lock()
+            .unwrap()
+            .insert(key, (Instant::now(), releases.clone()));
     }
     Ok((releases, warning))
 }
@@ -502,9 +515,22 @@ fn github_releases_with_info(
     Ok((response.json()?, warning))
 }
 
-pub fn test_github_access(channel: LlamaCppChannel, token: Option<&str>) -> GithubAccess {
-    let config = ChannelConfig::for_channel(channel);
+pub fn test_github_access(fork: &LlamaCppFork, token: Option<&str>) -> GithubAccess {
     let token_used = token.map(str::trim).is_some_and(|t| !t.is_empty());
+    let config = match ChannelConfig::for_fork(fork) {
+        Ok(config) => config,
+        Err(error) => {
+            return GithubAccess {
+                ok: false,
+                status: None,
+                remaining: None,
+                reset: None,
+                token_used,
+                warning: None,
+                message: error.to_string(),
+            }
+        }
+    };
     let client = match github_client() {
         Ok(client) => client,
         Err(error) => {
@@ -521,7 +547,7 @@ pub fn test_github_access(channel: LlamaCppChannel, token: Option<&str>) -> Gith
     };
     let trimmed = token.map(str::trim).filter(|t| !t.is_empty());
     let mut warning = None;
-    let mut response = match github_request(&client, config.api_url, trimmed).send() {
+    let mut response = match github_request(&client, &config.api_url, trimmed).send() {
         Ok(response) => response,
         Err(_) => {
             return GithubAccess {
@@ -540,7 +566,7 @@ pub fn test_github_access(channel: LlamaCppChannel, token: Option<&str>) -> Gith
             "Your GitHub token was rejected; using unauthenticated access (60 requests/hour)."
                 .into(),
         );
-        response = match github_request(&client, config.api_url, None).send() {
+        response = match github_request(&client, &config.api_url, None).send() {
             Ok(response) => response,
             Err(_) => {
                 return GithubAccess {
@@ -594,11 +620,11 @@ pub fn test_github_access(channel: LlamaCppChannel, token: Option<&str>) -> Gith
     }
 }
 
-fn latest_release_for_channel(channel: LlamaCppChannel, token: Option<&str>) -> Result<Selection> {
+fn latest_release_for_channel(config: &ChannelConfig, token: Option<&str>) -> Result<Selection> {
     let driver = driver_cuda_version();
     let cc = compute_capability();
-    let (releases, api_warning) = releases_for_channel(channel, token)?;
-    let mut selection = select_release_for_channel(channel, &releases, driver, cc)?;
+    let (releases, api_warning) = releases_for_channel(config, token)?;
+    let mut selection = select_release_for_channel(config, &releases, driver, cc)?;
     if let Some(warning) = api_warning {
         selection.warning = Some(match selection.warning {
             Some(existing) => format!("{warning} {existing}"),
@@ -610,7 +636,8 @@ fn latest_release_for_channel(channel: LlamaCppChannel, token: Option<&str>) -> 
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LlamaCppUpdateStatus {
-    pub channel: LlamaCppChannel,
+    /// Id of the fork ("upstream", "prism", or a custom fork id).
+    pub channel: String,
     pub installed_tag: Option<String>,
     pub latest_tag: Option<String>,
     pub update_available: bool,
@@ -648,13 +675,26 @@ fn tag_number(tag: &str) -> Option<u64> {
 /// Network/selection failures are reported in `warning` with `latest_tag: None`
 /// so the UI can still render the installed state.
 pub fn check_update(
-    channel: LlamaCppChannel,
+    fork: &LlamaCppFork,
     installed_tag: Option<&str>,
     token: Option<&str>,
 ) -> LlamaCppUpdateStatus {
-    let config = ChannelConfig::for_channel(channel);
-    let page_url = config.page_url.to_string();
-    match latest_release_for_channel(channel, token) {
+    let config = match ChannelConfig::for_fork(fork) {
+        Ok(config) => config,
+        Err(error) => {
+            return LlamaCppUpdateStatus {
+                channel: fork.id.clone(),
+                installed_tag: installed_tag.map(str::to_string),
+                latest_tag: None,
+                update_available: false,
+                cuda_version: None,
+                warning: Some(format!("fork configuration error: {error}")),
+                page_url: format!("https://github.com/{}/releases", fork.repo),
+            }
+        }
+    };
+    let page_url = config.page_url.clone();
+    match latest_release_for_channel(&config, token) {
         Ok(selection) => {
             let latest = selection.tag.clone();
             let update_available = match (installed_tag.map(tag_number).flatten(), tag_number(&latest)) {
@@ -662,7 +702,7 @@ pub fn check_update(
                 _ => installed_tag != Some(latest.as_str()),
             };
             LlamaCppUpdateStatus {
-                channel,
+                channel: fork.id.clone(),
                 installed_tag: installed_tag.map(str::to_string),
                 latest_tag: Some(latest),
                 update_available,
@@ -672,7 +712,7 @@ pub fn check_update(
             }
         }
         Err(e) => LlamaCppUpdateStatus {
-            channel,
+            channel: fork.id.clone(),
             installed_tag: installed_tag.map(str::to_string),
             latest_tag: None,
             update_available: false,
@@ -684,12 +724,11 @@ pub fn check_update(
 }
 
 fn select_release_for_channel(
-    channel: LlamaCppChannel,
+    config: &ChannelConfig,
     releases: &[Release],
     driver: Option<CudaVersion>,
     cc: Option<(u32, u32)>,
 ) -> Result<Selection> {
-    let config = ChannelConfig::for_channel(channel);
     let mut examined = Vec::new();
     for release in releases.iter().filter(|release| !release.draft) {
         let windows_count = release
@@ -697,7 +736,7 @@ fn select_release_for_channel(
             .iter()
             .filter(|asset| asset.name.to_ascii_lowercase().contains("win"))
             .count();
-        match choose_assets_for_machine_channel(channel, &release.assets, driver, cc) {
+        match choose_assets_for_machine_config(config, &release.assets, driver, cc) {
             Ok(mut selection) => {
                 selection.tag = release.tag_name.clone();
                 if !examined.is_empty() {
@@ -720,7 +759,8 @@ fn select_release_for_channel(
         }
     }
     Err(anyhow!(
-        "No suitable llama.cpp release was found for {channel:?} channel.\nExamined releases:\n{}\n{}",
+        "No suitable llama.cpp release was found for {}.\nExamined releases:\n{}\n{}\nIf this fork publishes assets with different names, edit its asset regex in Settings → llama.cpp Forks.",
+        config.label,
         examined.join("\n"),
         format!("{}\nManual fallback: download a Windows x64 CUDA zip and its matching cudart zip from the release page, extract both into the same folder, then set that folder's llama-server.exe under Settings → Custom llama-server.exe.", config.page_url)
     ))
@@ -731,7 +771,11 @@ pub fn install(
     progress: impl Fn(&str, u64, Option<u64>) + Copy,
     token: Option<&str>,
 ) -> Result<(String, PathBuf, String, String)> {
-    install_for_channel(LlamaCppChannel::Upstream, destination, progress, token)
+    let fork = crate::state::builtin_llamacpp_forks()
+        .into_iter()
+        .find(|fork| fork.id == "upstream")
+        .expect("builtin upstream fork is always present");
+    install_for_channel(&fork, destination, progress, token)
 }
 
 pub fn command_output(exe: &Path, args: &[&str]) -> Result<String> {
@@ -791,9 +835,41 @@ mod tests {
     use super::{
         choose_assets, choose_assets_for_machine, executable_from_config, expand_archive,
         github_client, github_releases_with_info, github_request, hidden_command, parse_devices,
-        select_release_for_channel, Asset, CudaVersion, Release, UPSTREAM_RELEASES_API,
+        select_release_for_channel, Asset, CudaVersion, Release,
     };
-    use crate::state::{LlamaCppChannel, PersistedConfig};
+
+    fn upstream_api() -> String {
+        format!(
+            "https://api.github.com/repos/{}/releases?per_page=10",
+            upstream_fork().repo
+        )
+    }
+    use crate::state::{builtin_llamacpp_forks, LlamaCppFork, PersistedConfig};
+
+    fn fork_by_id(id: &str) -> LlamaCppFork {
+        builtin_llamacpp_forks()
+            .into_iter()
+            .find(|fork| fork.id == id)
+            .expect("builtin fork present")
+    }
+
+    fn upstream_fork() -> LlamaCppFork {
+        fork_by_id("upstream")
+    }
+
+    /// A user-added fork with PrismML-style release naming (PrismML is not built in).
+    fn prism_fork() -> LlamaCppFork {
+        LlamaCppFork {
+            id: "prism".into(),
+            name: "PrismML (PrismML-Eng)".into(),
+            repo: "PrismML-Eng/llama.cpp".into(),
+            description: "user-added ternary support".into(),
+            asset_regex: r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$".into(),
+            runtime_regex: crate::state::DEFAULT_FORK_RUNTIME_REGEX.to_string(),
+            main_prefix: "llama-prism-".into(),
+            builtin: false,
+        }
+    }
 
     #[test]
     fn detects_llama_server_from_path_when_not_configured() {
@@ -817,7 +893,7 @@ mod tests {
         cfg.llamacpp_executable = None;
         let not_configured = root.join("not-configured").to_string_lossy().into_owned();
         cfg.llamacpp_dir = not_configured.clone();
-        if let Some(ch) = cfg.llamacpp_channels.get_mut(&LlamaCppChannel::Upstream) {
+        if let Some(ch) = cfg.llamacpp_channels.get_mut("upstream") {
             ch.dir = not_configured;
             ch.executable = None;
         }
@@ -915,7 +991,7 @@ mod tests {
             browser_download_url: "old".into(),
         }];
         let selected =
-            choose_assets_for_machine(LlamaCppChannel::Upstream, &assets, Some(CudaVersion(12, 4)), Some((12, 0))).unwrap();
+            choose_assets_for_machine(&upstream_fork(), &assets, Some(CudaVersion(12, 4)), Some((12, 0))).unwrap();
         assert!(selected.warning.is_some());
     }
 
@@ -936,7 +1012,7 @@ mod tests {
             },
         ];
         let selected =
-            choose_assets_for_machine(LlamaCppChannel::Upstream, &assets, Some(CudaVersion(13, 3)), Some((8, 9))).unwrap();
+            choose_assets_for_machine(&upstream_fork(), &assets, Some(CudaVersion(13, 3)), Some((8, 9))).unwrap();
         assert_eq!(selected.candidate.version, CudaVersion(13, 3));
         assert_eq!(
             selected.candidate.runtime.unwrap().browser_download_url,
@@ -957,7 +1033,7 @@ mod tests {
             },
         ];
         let selected =
-            choose_assets_for_machine(LlamaCppChannel::Prism, &assets, Some(CudaVersion(13, 3)), Some((12, 0))).unwrap();
+            choose_assets_for_machine(&prism_fork(), &assets, Some(CudaVersion(13, 3)), Some((12, 0))).unwrap();
         assert_eq!(selected.candidate.version, CudaVersion(13, 3));
         assert_eq!(selected.candidate.main.name, "llama-prism-b10709-9a9394a-bin-win-cuda-13.3-x64.zip");
         assert_eq!(selected.tag, "b10709-9a9394a");
@@ -983,13 +1059,13 @@ mod tests {
     #[test]
     fn github_requests_never_inherit_hf_tokens() {
         let client = github_client().unwrap();
-        let anonymous = github_request(&client, UPSTREAM_RELEASES_API, None).build().unwrap();
+        let anonymous = github_request(&client, &upstream_api(), None).build().unwrap();
         assert!(anonymous.headers().get("Authorization").is_none());
-        let blank = github_request(&client, UPSTREAM_RELEASES_API, Some(" \t "))
+        let blank = github_request(&client, &upstream_api(), Some(" \t "))
             .build()
             .unwrap();
         assert!(blank.headers().get("Authorization").is_none());
-        let token = github_request(&client, UPSTREAM_RELEASES_API, Some(" test-token "))
+        let token = github_request(&client, &upstream_api(), Some(" test-token "))
             .build()
             .unwrap();
         assert!(token.headers().contains_key("Authorization"));
@@ -1088,7 +1164,8 @@ mod tests {
                 }],
             },
         ];
-        let selection = select_release_for_channel(LlamaCppChannel::Upstream, &releases, Some(CudaVersion(13, 3)), None).unwrap();
+        let config = super::ChannelConfig::for_fork(&upstream_fork()).unwrap();
+        let selection = select_release_for_channel(&config, &releases, Some(CudaVersion(13, 3)), None).unwrap();
         assert_eq!(selection.tag, "b1");
         assert!(selection.warning.unwrap().contains("b2"));
     }
@@ -1100,17 +1177,18 @@ mod tests {
             .user_agent("LocalLLmPanel/1.0")
             .build()
             .unwrap()
-            .get(UPSTREAM_RELEASES_API)
+            .get(&upstream_api())
             .send()
             .unwrap()
             .error_for_status()
             .unwrap()
             .json()
             .unwrap();
+        let config = super::ChannelConfig::for_fork(&upstream_fork()).unwrap();
         assert!(releases
             .iter()
             .flat_map(|release| release.assets.iter())
-            .any(|asset| super::parse_main_channel(&asset.name, super::LlamaCppChannel::Upstream).is_some()));
+            .any(|asset| super::parse_main_channel(&asset.name, &config).is_some()));
     }
 
     #[test]
@@ -1119,6 +1197,66 @@ mod tests {
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].id, "CUDA0");
         assert_eq!(devices[0].backend, "CUDA");
+    }
+
+    #[test]
+    fn selects_custom_fork_assets_with_generic_regex() {
+        let fork = LlamaCppFork {
+            id: "xhtoken".into(),
+            name: "XHToken Spark".into(),
+            repo: "XHToken/llama.cpp".into(),
+            description: "Spark DSpark runtime".into(),
+            asset_regex: crate::state::DEFAULT_FORK_ASSET_REGEX.to_string(),
+            runtime_regex: crate::state::DEFAULT_FORK_RUNTIME_REGEX.to_string(),
+            main_prefix: "llama-".into(),
+            builtin: false,
+        };
+        let assets = vec![
+            Asset {
+                name: "llama-x1-b1-bin-win-cuda-12.8-x64.zip".into(),
+                browser_download_url: "main".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-12.8-x64.zip".into(),
+                browser_download_url: "runtime".into(),
+            },
+            Asset {
+                name: "llama-x1-b1-bin-win-cpu-x64.zip".into(),
+                browser_download_url: "cpu".into(),
+            },
+        ];
+        let selected =
+            choose_assets_for_machine(&fork, &assets, Some(CudaVersion(12, 8)), Some((12, 0))).unwrap();
+        assert_eq!(selected.candidate.main.browser_download_url, "main");
+        assert_eq!(selected.candidate.version, CudaVersion(12, 8));
+        assert_eq!(selected.candidate.runtime.unwrap().browser_download_url, "runtime");
+        assert_eq!(selected.tag, "x1-b1");
+    }
+
+    #[test]
+    fn rejects_invalid_fork_definitions() {
+        use crate::state::{validate_llamacpp_fork, LlamaCppFork};
+        let mut fork = LlamaCppFork::default();
+        fork.id = "Bad Id!".into();
+        fork.name = "Bad".into();
+        fork.repo = "owner/name".into();
+        assert!(validate_llamacpp_fork(&fork).is_err());
+
+        fork.id = "ok-fork".into();
+        fork.repo = "not-a-github-repo".into();
+        assert!(validate_llamacpp_fork(&fork).is_err());
+
+        fork.repo = "owner/name".into();
+        fork.asset_regex = r"^llama-.*\.zip$".into(); // missing CUDA capture groups
+        assert!(validate_llamacpp_fork(&fork).is_err());
+
+        fork.asset_regex = crate::state::DEFAULT_FORK_ASSET_REGEX.to_string();
+        assert!(validate_llamacpp_fork(&fork).is_ok());
+
+        // Builtin forks must pass validation too.
+        for builtin in builtin_llamacpp_forks() {
+            assert!(validate_llamacpp_fork(&builtin).is_ok(), "{} invalid", builtin.id);
+        }
     }
 }
 

@@ -2579,7 +2579,7 @@ mod tests {
                 quant: "fp16".to_string(),
                 served_model_name: served.map(|s| s.to_string()),
                 kv_cache_dtype: None,
-                llamacpp_channel: crate::state::LlamaCppChannel::Upstream,
+                llamacpp_channel: "upstream".to_string(),
                 enforce_eager: true,
                 params_b: None,
                 swap_space_gb: None,

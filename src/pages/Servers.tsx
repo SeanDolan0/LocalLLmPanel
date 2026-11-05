@@ -29,7 +29,7 @@ export default function Servers() {
   const [prefillServed, setPrefillServed] = useState<string | undefined>(undefined);
   const [prefillKvDtype, setPrefillKvDtype] = useState<string | undefined>(undefined);
   const [prefillTask, setPrefillTask] = useState<"instruct" | "embed" | undefined>(undefined);
-  const [prefillChannel, setPrefillChannel] = useState<"upstream" | "prism" | undefined>(undefined);
+  const [prefillChannel, setPrefillChannel] = useState<string | undefined>(undefined);
   const [prefillSpeculativeEnabled, setPrefillSpeculativeEnabled] = useState<boolean | undefined>(undefined);
   const [prefillSpeculativeModel, setPrefillSpeculativeModel] = useState<string | undefined>(undefined);
   const [prefillSpeculativeModelPath, setPrefillSpeculativeModelPath] = useState<string | undefined>(undefined);
@@ -129,7 +129,7 @@ export default function Servers() {
       prefillServed?: string;
       prefillKvDtype?: string;
       prefillTask?: "instruct" | "embed";
-      prefillChannel?: "upstream" | "prism";
+      prefillChannel?: string;
       prefillSpeculativeEnabled?: boolean;
       prefillSpeculativeModel?: string;
       prefillSpeculativeModelPath?: string;
@@ -898,7 +898,7 @@ function NewServerForm({
   initialServed?: string;
   initialKvDtype?: string;
   initialTask?: "instruct" | "embed";
-  initialChannel?: "upstream" | "prism";
+  initialChannel?: string;
   initialEnv?: Record<string, string>;
   initialSpeculativeEnabled?: boolean;
   initialSpeculativeModel?: string;
@@ -964,7 +964,15 @@ function NewServerForm({
   const [extraArgs, setExtraArgs] = useState("");
   const [moePresetApplied, setMoePresetApplied] = useState(false);
   const [env, setEnv] = useState<Record<string, string>>(initialEnv ?? {});
-  const [llamaCppChannel, setLlamaCppChannel] = useState<"upstream" | "prism">(initialChannel || "upstream");
+  const [llamaCppChannel, setLlamaCppChannel] = useState<string>(initialChannel || "upstream");
+  const [llamaCppForks, setLlamaCppForks] = useState<import("../types").LlamaCppFork[]>([
+    { id: "upstream", name: "Upstream (ggml-org)", repo: "ggml-org/llama.cpp", asset_regex: "", runtime_regex: "", main_prefix: "llama-", builtin: true },
+  ]);
+  useEffect(() => {
+    api.llamacppForks()
+      .then((forks) => { if (Array.isArray(forks) && forks.length) setLlamaCppForks(forks); })
+      .catch(() => {});
+  }, []);
   const [cacheTypeK, setCacheTypeK] = useState("q8_0");
   const [cacheTypeV, setCacheTypeV] = useState("q8_0");
   const [kvCacheDtype, setKvCacheDtype] = useState(initialKvDtype || "");
@@ -1045,7 +1053,7 @@ function NewServerForm({
     }
     if (initialServer) {
       setEnforceEager(initialServer.enforce_eager ?? true);
-      setLlamaCppChannel(initialServer.llamacpp_channel === "prism" ? "prism" : "upstream");
+      setLlamaCppChannel(initialServer.llamacpp_channel || "upstream");
       setCacheTypeK(initialServer.cache_type_k || "q8_0");
       setCacheTypeV(initialServer.cache_type_v || "q8_0");
       setKvCacheDtype(initialServer.kv_cache_dtype || "");
@@ -1580,10 +1588,11 @@ function NewServerForm({
           )}
           {backend === "llamacpp" && (
             <>
-              <Field label="llama.cpp Channel" hint="PrismML fork supports ternary formats (PQ2_0, PTQ1_0) and Hadamard transform.">
-                <select className={inputCls} value={llamaCppChannel} onChange={(e) => setLlamaCppChannel(e.target.value as "upstream" | "prism")}>
-                  <option value="upstream">Upstream (ggml-org/llama.cpp)</option>
-                  <option value="prism">PrismML (PrismML-Eng/llama.cpp@prism)</option>
+              <Field label="llama.cpp Fork" hint="Fork required by the model (e.g. ternary PQ2_0/PTQ1_0 → PrismML). Manage forks in Settings → llama.cpp Forks.">
+                <select className={inputCls} value={llamaCppChannel} onChange={(e) => setLlamaCppChannel(e.target.value)}>
+                  {llamaCppForks.map((fork) => (
+                    <option key={fork.id} value={fork.id}>{fork.name}</option>
+                  ))}
                 </select>
               </Field>
               {llamaCppChannel === "prism" && (

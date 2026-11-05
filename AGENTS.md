@@ -39,7 +39,7 @@ Build script (`scripts/build.mjs`) warns on mismatch.
 
 ## Architecture Highlights
 
-- **Rust core**: `wsl.rs` (distro/run), `provision.rs` (idempotent phases), `server.rs` (lifecycle/logs/metrics), `estimate.rs`/`fit.rs` (pure heuristics), `hf.rs` (search/pull/quant discovery), `state.rs` (config + live state), `llamacpp_install.rs` (native binary mgmt).
+- **Rust core**: `wsl.rs` (distro/run), `provision.rs` (idempotent phases), `server.rs` (lifecycle/logs/metrics), `estimate.rs`/`fit.rs` (pure heuristics), `hf.rs` (search/pull/quant discovery), `state.rs` (config + live state), `llamacpp_install.rs` (llama.cpp fork install/update; built-in upstream, user-defined forks via Settings).
 - **Frontend**: Vite + React 18 + TS; Tailwind v4; pages in `src/pages/`; `api.ts` wraps Tauri invoke + events.
 - **Config**: `%APPDATA%\local-llm-panel\config.json` (atomic write).
 - **vLLM env**: per-server `env` merged with global `default_env`; launch scripts written to WSL files to avoid quoting issues; default `VLLM_USE_FLASHINFER_SAMPLER=0`.

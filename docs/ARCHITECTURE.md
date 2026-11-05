@@ -41,6 +41,8 @@ Tauri Rust core ── llama-server.exe (NativeChild)
        └─ %APPDATA%\local-llm-panel\logs\<id>.log
 ```
 
+**llama.cpp forks ("channels").** llama-server builds are tracked as named forks: `PersistedConfig::llamacpp_forks` holds the fork registry and `llamacpp_channels` the per-fork install state (tag/version/executable/dir). Two built-in forks ship with the app (`upstream` = ggml-org/llama.cpp, `prism` = PrismML-Eng/llama.cpp@prism); users can add arbitrary GitHub forks from Settings → llama.cpp Forks (id, repo, release-asset regex) — no code changes needed. Servers pick a fork via `ServerDef.llamacpp_channel` (a fork id); `required_channel` on quant variants / GGUF artifacts maps models to the fork they need.
+
 Gateway (OpenAI-compatible reverse proxy):
 
 ```
