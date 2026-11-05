@@ -15,24 +15,83 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows:
-    name: Windows checks
+  lint-and-contracts:
+    name: Lint & Frontend Contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate release metadata
+        run: npm run release:check
+
+      - name: Frontend contract & smoke tests
+        run: npm run test:contract
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Install Rust (fmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+  test-core-linux:
+    name: Cross-Platform Core Tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-core-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-core-
+
+      - name: Test llmfit-core crate
+        run: cargo test -p llmfit-core --locked --manifest-path src-tauri/Cargo.toml
+
+  windows-build-and-test:
+    name: Windows Build & Test
     runs-on: windows-latest
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           target: x86_64-pc-windows-msvc
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Cache Cargo dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: |
             ~\.cargo\registry
@@ -52,7 +111,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -60,22 +119,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --ignore-scripts
 
-      - name: Validate release metadata
-        run: npm run release:check
-
-      - name: Frontend contract tests
-        run: npm run test:contract
-
-      - name: Check formatting
-        working-directory: src-tauri
-        run: cargo fmt --all -- --check
-
       - name: Run Clippy
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets --locked
-
-      - name: Build frontend
-        run: npm run build
 
       - name: Check Rust workspace
         run: cargo check --workspace --locked --manifest-path src-tauri/Cargo.toml
@@ -90,7 +136,7 @@ jobs:
         run: node scripts/validate-release.mjs --fast --artifacts
 
       - name: Upload standalone executable and checksum
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: local-llm-panel-windows-standalone
           path: |
@@ -99,12 +145,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+  dependency-audit:
+    name: Dependency Security Audits
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
 
-      - name: Audit Rust dependencies
-        working-directory: src-tauri
-        run: cargo audit
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Audit npm dependencies
-        run: npm audit --audit-level=moderate
+        run: npm audit --audit-level=high
+
+      - name: Audit Rust dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

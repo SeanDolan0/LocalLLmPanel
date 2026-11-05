@@ -1,0 +1,40 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: '15 3 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit-rust:
+    name: Rust Security Advisory Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Scan Cargo dependencies with rustsec
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+  audit-npm:
+    name: npm Security Advisory Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: true

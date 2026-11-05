@@ -1,0 +1,36 @@
+name: Model or Architecture Support
+description: Request support or calibration for a new model architecture or format
+title: "[Model]: "
+labels: ["model-support"]
+body:
+  - type: input
+    id: model_name
+    attributes:
+      label: Model Name / Slug
+      description: Name or Hugging Face repository slug (e.g. Qwen/Qwen2.5-Coder-32B-Instruct)
+      placeholder: Qwen/Qwen2.5-Coder-32B-Instruct
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture / Family
+      description: Model architecture or quantization format
+      options:
+        - GGUF (llama.cpp)
+        - Hugging Face Transformers / Safetensors (vLLM)
+        - AWQ
+        - GPTQ
+        - EXL2
+        - Vision / Multimodal Projector
+        - MoE (Mixture of Experts)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context_notes
+    attributes:
+      label: Context & Hardware Observations
+      description: Any observed memory, KV cache, or context fit considerations with this model.
+    validations:
+      required: false

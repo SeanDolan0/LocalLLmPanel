@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: User Guide & Documentation
+    url: https://github.com/SeanDolan0/LocalLLmPanel/blob/main/docs/USER_GUIDE.md
+    about: Please consult the User Guide before reporting configuration questions.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/SeanDolan0/LocalLLmPanel/security/policy
+    about: Read our security policy and submit confidential vulnerability reports.

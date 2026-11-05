@@ -1,0 +1,75 @@
+name: Bug Report
+description: Create a report to help us reproduce and fix a bug
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please provide as much relevant detail as possible.
+        **Do not include private tokens, API keys, or raw confidential logs.**
+  - type: input
+    id: version
+    attributes:
+      label: Local LLM Panel Version
+      description: What version or commit are you running? (e.g. v2.1.4)
+      placeholder: v2.1.4
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend / Provider
+      description: Which inference backend were you using when the issue occurred?
+      options:
+        - vLLM (WSL2 Ubuntu)
+        - llama.cpp (Native Windows)
+        - OpenAI Gateway / Proxy
+        - Model Discovery / Download Manager
+        - Other / Not backend specific
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware & Environment
+      description: GPU model, VRAM size, NVIDIA driver version, Windows version (e.g. RTX 4090 24GB, Driver 560.xx, Windows 11 23H2).
+      placeholder: |
+        - GPU: NVIDIA GeForce RTX 4080 (16GB VRAM)
+        - Driver: 566.14
+        - OS: Windows 11 Build 22631
+        - WSL2 Distro (if applicable): Ubuntu 22.04
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps to reproduce the behavior.
+      placeholder: |
+        1. Go to 'Servers'
+        2. Click 'New server'
+        3. Select model '...' with backend '...'
+        4. See error in server logs
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Screenshots
+      description: Paste any redacted terminal or application logs here.
+      render: shell

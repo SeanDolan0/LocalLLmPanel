@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to package (for example v2.1.3)
+        description: Existing version tag to package (for example v2.1.4)
         required: true
         type: string
 
@@ -27,7 +27,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -47,7 +47,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
