@@ -255,6 +255,12 @@ pub fn install_for_channel(
     progress: impl Fn(&str, u64, Option<u64>) + Copy,
     token: Option<&str>,
 ) -> Result<(String, PathBuf, String, String)> {
+    if fork.is_local() {
+        return Err(anyhow!(
+            "fork '{}' is a local build; it is verified in place instead of downloaded (use Install / Verify to re-probe it)",
+            fork.id
+        ));
+    }
     let config = ChannelConfig::for_fork(fork)?;
     let selection = latest_release_for_channel(&config, token)?;
     let tag = selection.tag;
@@ -309,6 +315,37 @@ pub fn executable_from_config_channel(
     cfg: &crate::state::PersistedConfig,
     channel: &str,
 ) -> Option<PathBuf> {
+    // Local builds resolve straight to the user-built binary (channel override
+    // first so a per-fork "Custom llama-server.exe" edit still wins).
+    if let Some(fork) = cfg.llamacpp_forks.iter().find(|fork| fork.id == channel) {
+        if fork.is_local() {
+            if let Some(channel_config) = cfg.llamacpp_channels.get(channel) {
+                if let Some(exe) = channel_config
+                    .executable
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|exe| !exe.is_empty())
+                {
+                    let path = PathBuf::from(exe);
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+            if let Some(exe) = fork
+                .local_executable
+                .as_deref()
+                .map(str::trim)
+                .filter(|exe| !exe.is_empty())
+            {
+                let path = PathBuf::from(exe);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+            return None;
+        }
+    }
     let channel_config = cfg.llamacpp_channels.get(channel)?;
     channel_config
         .executable
@@ -683,15 +720,44 @@ fn tag_number(tag: &str) -> Option<u64> {
     best
 }
 
+/// Probe a locally built `llama-server.exe` in place: confirm the file exists and
+/// capture its `--version` / `--help` output exactly like a downloaded build, so
+/// capability gating (`--fit`, draft flags, ...) works for local forks too.
+pub fn probe_local_executable(exe: &Path) -> Result<(String, String)> {
+    if !exe.is_file() {
+        return Err(anyhow!(
+            "local llama-server.exe not found: {} (build the fork first, then point the fork at the built binary)",
+            exe.display()
+        ));
+    }
+    let version = command_output(exe, &["--version"])?;
+    let help = command_output(exe, &["--help"])?;
+    Ok((version, help))
+}
+
 /// Check whether the installed tag is behind the latest usable release for the
 /// machine's CUDA driver. Downloads nothing beyond the release metadata JSON.
 /// Network/selection failures are reported in `warning` with `latest_tag: None`
-/// so the UI can still render the installed state.
+/// so the UI can still render the installed state. Local builds are never
+/// downloaded, so their check always reports "up to date" with a local note.
 pub fn check_update(
     fork: &LlamaCppFork,
     installed_tag: Option<&str>,
     token: Option<&str>,
 ) -> LlamaCppUpdateStatus {
+    if fork.is_local() {
+        return LlamaCppUpdateStatus {
+            channel: fork.id.clone(),
+            installed_tag: installed_tag.map(str::to_string),
+            latest_tag: installed_tag.map(str::to_string).or_else(|| Some("local".to_string())),
+            update_available: false,
+            cuda_version: None,
+            warning: Some(
+                "Local build: kept in place (rebuild the fork yourself to update it; no GitHub download).".to_string(),
+            ),
+            page_url: String::new(),
+        };
+    }
     let config = match ChannelConfig::for_fork(fork) {
         Ok(config) => config,
         Err(error) => {
@@ -876,6 +942,8 @@ mod tests {
             id: "prism".into(),
             name: "PrismML (PrismML-Eng)".into(),
             repo: "PrismML-Eng/llama.cpp".into(),
+            kind: "github".into(),
+            local_executable: None,
             description: "user-added ternary support".into(),
             asset_regex: r"^llama-prism-b.+?-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$".into(),
             runtime_regex: crate::state::DEFAULT_FORK_RUNTIME_REGEX.to_string(),
@@ -1239,6 +1307,8 @@ mod tests {
             id: "xhtoken".into(),
             name: "XHToken Spark".into(),
             repo: "XHToken/llama.cpp".into(),
+            kind: "github".into(),
+            local_executable: None,
             description: "Spark DSpark runtime".into(),
             asset_regex: crate::state::DEFAULT_FORK_ASSET_REGEX.to_string(),
             runtime_regex: crate::state::DEFAULT_FORK_RUNTIME_REGEX.to_string(),
@@ -1269,6 +1339,27 @@ mod tests {
             "runtime"
         );
         assert_eq!(selected.tag, "x1-b1");
+    }
+
+    #[test]
+    fn local_forks_skip_github_validation_and_require_exe() {
+        use crate::state::{validate_llamacpp_fork, LlamaCppFork};
+        let mut local = LlamaCppFork::default();
+        local.id = "mybuild".into();
+        local.name = "My build".into();
+        local.kind = "local".into();
+        local.repo = String::new(); // no GitHub repo needed
+        local.asset_regex = String::new(); // ignored for local builds
+        local.local_executable = None;
+        assert!(validate_llamacpp_fork(&local).is_err());
+        local.local_executable = Some(r"C:\llama.cpp\build\bin\llama-server.exe".into());
+        assert!(validate_llamacpp_fork(&local).is_ok());
+        assert!(local.is_local() && !local.is_github());
+
+        // Local builds never consult GitHub for update checks.
+        let status = super::check_update(&local, Some("local"), None);
+        assert!(!status.update_available);
+        assert!(status.warning.unwrap().contains("Local build"));
     }
 
     #[test]

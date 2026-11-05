@@ -46,6 +46,8 @@ The native backend launches `llama-server.exe` on Windows and uses GGUF model fi
 
 Custom llama.cpp forks can be added under **Settings → llama.cpp Forks**. A fork definition identifies its GitHub repository and release asset naming convention; the app uses that information to discover supported Windows CUDA builds.
 
+**Locally built forks (no GitHub pull):** choose the **Local build** source and point the fork at the `llama-server.exe` you built yourself (e.g. a CMake/MSVC build of a local checkout). Nothing is downloaded — Verify probes that binary in place (via `--version`/`--help`, so capability gating still works), servers use it directly, and rebuild + Verify (or a server restart) picks up a new build. Rebuild the fork yourself to "update" it; update checks always report up to date.
+
 If GitHub release discovery is unavailable, use the fork's release page to download the Windows x64 CUDA archive and its matching CUDA runtime archive, extract them together, and select a custom executable path in Settings.
 
 ## Speculative decoding

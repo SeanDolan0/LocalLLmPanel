@@ -340,12 +340,17 @@ export interface LlamaCppChannelConfig {
   dir?: string;
 }
 
-/** A user-installable llama.cpp fork ("channel"), persisted in llamacpp_forks. */
+/** A user-installable llama.cpp fork ("channel"), persisted in llamacpp_forks.
+ * kind "github": downloaded from GitHub releases. kind "local": built on this
+ * machine, pointed at via local_executable (no GitHub repo needed). */
 export interface LlamaCppFork {
   id: string;
   name: string;
-  /** GitHub repository as "owner/name". */
+  kind?: string;
+  /** GitHub repository as "owner/name" (github forks only). */
   repo: string;
+  /** Absolute path to a locally built llama-server.exe (local forks only). */
+  local_executable?: string | null;
   description?: string;
   /** Regex for the main CUDA Windows x64 asset; captures CUDA major/minor in groups 1-2. */
   asset_regex: string;

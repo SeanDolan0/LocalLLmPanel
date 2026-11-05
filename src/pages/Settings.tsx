@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, fmtNum } from "../api";
-import { Badge, Button, Card, CardTitle, Collapsible, Field, Spinner, inputCls } from "../ui";
+import { Badge, Button, Card, CardTitle, Collapsible, Field, HelpBubble, Spinner, inputCls } from "../ui";
 import UpdateModal from "../components/UpdateModal";
 import type {
   AdvancedSettings,
@@ -38,6 +38,7 @@ function WslDistroField({
   return (
     <Field
       label="WSL Distribution"
+      help="The WSL2 distro that runs the vLLM servers. It does not change GPU speed or RAM usage by itself — pick the Ubuntu distro you provisioned; switching after provisioning may require a re-provision."
       hint={
         distros.length > 0
           ? `Installed distros: ${distros.join(", ")}`
@@ -76,6 +77,7 @@ function HfTokenField({
   return (
     <Field
       label="Hugging Face Token"
+      help="Lets the panel download gated models and raises Hugging Face rate limits for pulls. No effect on model speed or RAM — it is stored encrypted with Windows DPAPI and never sent anywhere except Hugging Face."
       hint="Passed as HF_TOKEN to model downloads and vLLM server launches."
     >
       <div className="space-y-1.5">
@@ -121,9 +123,11 @@ export default function Settings() {
   const [showAddFork, setShowAddFork] = useState(false);
   const [editingForkId, setEditingForkId] = useState<string | null>(null);
   const [forkForm, setForkForm] = useState({
+    kind: "github",
     id: "",
     name: "",
     repo: "",
+    local_executable: "",
     description: "",
     asset_regex: "",
     runtime_regex: "",
@@ -219,31 +223,51 @@ export default function Settings() {
   };
 
   const resetForkForm = () => {
-    setForkForm({ id: "", name: "", repo: "", description: "", asset_regex: "", runtime_regex: "", main_prefix: "" });
+    setForkForm({ kind: "github", id: "", name: "", repo: "", local_executable: "", description: "", asset_regex: "", runtime_regex: "", main_prefix: "" });
     setEditingForkId(null);
     setShowAddFork(false);
   };
+
+  const isLocalForkForm = forkForm.kind === "local";
 
   const submitFork = async () => {
     setForkMsg(null);
     // Built-in-style defaults: blank regex fields fall back to the upstream naming convention.
     const DEFAULT_MAIN = "^llama-.*-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$";
     const DEFAULT_RUNTIME = "^cudart-llama-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$";
-    const fork = {
-      id: editingForkId ?? forkForm.id.trim().toLowerCase(),
-      name: forkForm.name.trim(),
-      repo: normalizeForkRepo(forkForm.repo),
-      description: forkForm.description.trim(),
-      asset_regex: forkForm.asset_regex.trim() || DEFAULT_MAIN,
-      runtime_regex: forkForm.runtime_regex.trim() || DEFAULT_RUNTIME,
-      main_prefix: forkForm.main_prefix.trim() || "llama-",
-      builtin: false,
-    };
+    const local = forkForm.kind === "local";
+    const fork = local
+      ? {
+        id: editingForkId ?? forkForm.id.trim().toLowerCase(),
+        name: forkForm.name.trim(),
+        kind: "local",
+        repo: "",
+        local_executable: forkForm.local_executable.trim(),
+        description: forkForm.description.trim(),
+        asset_regex: "",
+        runtime_regex: "",
+        main_prefix: "",
+        builtin: false,
+      }
+      : {
+        id: editingForkId ?? forkForm.id.trim().toLowerCase(),
+        name: forkForm.name.trim(),
+        kind: "github",
+        repo: normalizeForkRepo(forkForm.repo),
+        local_executable: null,
+        description: forkForm.description.trim(),
+        asset_regex: forkForm.asset_regex.trim() || DEFAULT_MAIN,
+        runtime_regex: forkForm.runtime_regex.trim() || DEFAULT_RUNTIME,
+        main_prefix: forkForm.main_prefix.trim() || "llama-",
+        builtin: false,
+      };
     try {
       const forks = await api.llamacppForkUpsert(fork);
       setS((prev) => (prev ? { ...prev, llamacpp_forks: forks } : prev));
       setLlamacppUpdates(null);
-      setForkMsg(editingForkId ? `Fork "${fork.name}" updated.` : `Fork "${fork.name}" added. Use it in a server's llama.cpp Fork dropdown or install it below.`);
+      setForkMsg(editingForkId ? `Fork "${fork.name}" updated.` : local
+        ? `Local fork "${fork.name}" added. Press Verify to probe the built binary, then pick it in a server's llama.cpp Fork dropdown.`
+        : `Fork "${fork.name}" added. Use it in a server's llama.cpp Fork dropdown or install it below.`);
       resetForkForm();
     } catch (e) {
       setForkMsg(String(e));
@@ -253,9 +277,11 @@ export default function Settings() {
   const editFork = (fork: import("../types").LlamaCppFork) => {
     setEditingForkId(fork.id);
     setForkForm({
+      kind: fork.kind ?? "github",
       id: fork.id,
       name: fork.name,
       repo: fork.repo,
+      local_executable: fork.local_executable ?? "",
       description: fork.description ?? "",
       asset_regex: fork.asset_regex,
       runtime_regex: fork.runtime_regex,
@@ -486,8 +512,9 @@ export default function Settings() {
             className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
           />
           <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-200">
+            <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
               Minimize to System Tray
+              <HelpBubble text="Closing the window hides the panel into the tray instead of stopping servers. No effect on model speed or RAM." />
             </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               Closing the window hides it into the system notification tray instead of stopping servers.
@@ -503,8 +530,9 @@ export default function Settings() {
             className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
           />
           <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-200">
+            <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
               Launch at Windows Login
+              <HelpBubble text="Starts the panel automatically when you sign into Windows (via the HKCU Run registry). No effect on model speed or RAM." />
             </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               Starts LocalLLM Panel automatically when signing into Windows (via HKCU Run registry).
@@ -520,8 +548,9 @@ export default function Settings() {
             className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
           />
           <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-200">
+            <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
               Auto-Restart Crashed Servers
+              <HelpBubble text="Restarts a server with backoff if its backend process crashes. No effect on model speed or RAM while running." />
             </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               Monitors background server processes and restarts them with backoff if they crash.
@@ -536,7 +565,9 @@ export default function Settings() {
             className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
           />
           <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-200">Auto-shutdown WSL when idle</div>
+            <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">Auto-shutdown WSL when idle
+              <HelpBubble text="Terminates WSL when nothing has used it for a minute, freeing system RAM. Next server start pays a short WSL cold-boot time." />
+            </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               Terminates the WSL distro when no servers, pulls, or provisioning are active and nothing has used WSL for at least 60 seconds. Keeps WSL shut down after closing/idle periods to free memory.
             </div>
@@ -635,8 +666,9 @@ export default function Settings() {
             className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
           />
           <div className="space-y-0.5">
-            <div className="text-sm font-medium text-slate-200">
+            <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
               Automatically check for updates on startup
+              <HelpBubble text="Quietly checks GitHub Releases on launch and alerts you when a panel update is ready. No effect on model speed or RAM." />
             </div>
             <div className="text-xs text-slate-400 leading-relaxed">
               When enabled, Local LLM Panel quietly checks GitHub Releases on launch and alerts you in the sidebar when a new update is ready.
@@ -758,6 +790,7 @@ export default function Settings() {
 
               <Field
                 label="Default Quantization"
+                help="Which checkpoint precision Search deploys by default. FP16 is highest quality but uses the most VRAM; FP8 / AWQ / GPTQ use far less VRAM and system RAM so larger models or longer contexts fit, at some quality cost."
                 hint="Preferred precision used when deploying models from search."
               >
                 <select
@@ -782,7 +815,7 @@ export default function Settings() {
                 subtitle="Only needed if GitHub search hits anonymous rate limits"
                 className="mt-3"
               >
-                <Field label="GitHub Token (optional)" hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
+                <Field label="GitHub Token (optional)" help="Raises the api.github.com rate limit used for llama.cpp release checks and downloads. No effect on model speed or RAM — the token is sent only to GitHub." hint="Used only for api.github.com to raise the unauthenticated rate limit. It is never sent to Hugging Face.">
                   <div className="space-y-1.5">
                     <input className={inputCls} type="password" placeholder="ghp_…" value={s.github_token} onChange={(e) => { setS({ ...s, github_token: e.target.value }); setGithubTokenDirty(true); }} />
                     <div className="flex gap-2">
@@ -808,6 +841,7 @@ export default function Settings() {
             <div className="space-y-4">
               <Field
                 label={`GPU VRAM Allocation (${Math.round(mem.default_gpu_mem_util * 100)}%)`}
+                help="Default share of GPU VRAM new vLLM servers may reserve for weights + KV cache. Higher fits longer contexts and more concurrency but leaves less headroom (out-of-memory risk); the overhead buffer is still reserved on top."
                 hint="Fraction of GPU VRAM allocated for model weights and KV cache."
               >
                 <div className="space-y-3 pt-1">
@@ -866,8 +900,9 @@ export default function Settings() {
                   className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                 />
                 <div className="space-y-0.5">
-                  <div className="text-sm font-medium text-slate-200">
+                  <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                     Allow RAM Context Overflow (RAM Swap)
+                    <HelpBubble text="Lets the context spill into WSL2 system RAM when VRAM is full (--swap-space). Prevents out-of-memory crashes on long prompts but is much slower than GPU KV cache." />
                   </div>
                   <div className="text-xs text-slate-400 leading-relaxed">
                     Automatically uses WSL2 system RAM when model context exceeds GPU VRAM, preventing out-of-memory errors on large prompts.
@@ -947,6 +982,7 @@ export default function Settings() {
 
               <Field
                 label="Custom Model Cache Path (HF_HOME)"
+                help="Where Hugging Face weights are cached. No effect on model speed or RAM — point it at a large, fast drive if C: is tight."
                 hint="Store models on another Windows drive (e.g. /mnt/d/ai-models/hf) to save C: drive space."
               >
                 <input
@@ -960,7 +996,7 @@ export default function Settings() {
                 />
               </Field>
 
-              <Field label="LLM Working Dir (inside WSL)" hint="Base runtime dir where pid and log files reside.">
+              <Field label="LLM Working Dir (inside WSL)" help="Where pid and log files live inside WSL. No effect on model speed or RAM." hint="Base runtime dir where pid and log files reside.">
                 <input
                   className={inputCls}
                   value={s.llm_dir}
@@ -968,7 +1004,7 @@ export default function Settings() {
                 />
               </Field>
 
-              <Field label="Python Virtual Environment" hint="Path to the provisioned vLLM venv inside WSL.">
+              <Field label="Python Virtual Environment" help="The provisioned vLLM Python environment inside WSL. No effect on model speed or RAM — only change it if you intentionally provisioned elsewhere." hint="Path to the provisioned vLLM venv inside WSL.">
                 <input
                   className={inputCls}
                   value={s.venv_dir}
@@ -978,6 +1014,7 @@ export default function Settings() {
 
               <Field
                 label="GGUF Model Directory"
+                help="Where native GGUF model files are stored and scanned from. No effect on inference speed or RAM — use a large drive for big models."
                 hint="Windows folder used by native GGUF downloads and library scanning."
               >
                 <input
@@ -997,6 +1034,7 @@ export default function Settings() {
                 const ch = s.llamacpp_channels?.[fork.id];
                 const update = updatesById.get(fork.id);
                 const tag = ch?.installed_tag ?? null;
+                const isLocal = (fork.kind ?? "github") === "local";
                 return (
                   <div key={fork.id} className="sm:col-span-2 rounded-lg border border-edge bg-surface/60 p-3 space-y-2">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1008,14 +1046,18 @@ export default function Settings() {
                         ) : (
                           <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">custom</span>
                         )}
-                        <a
-                          className="text-[11px] text-indigo-400 hover:underline shrink-0"
-                          href={`https://github.com/${fork.repo}/releases`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {fork.repo} ↗
-                        </a>
+                        {isLocal ? (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">local build</span>
+                        ) : (
+                          <a
+                            className="text-[11px] text-indigo-400 hover:underline shrink-0"
+                            href={`https://github.com/${fork.repo}/releases`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {fork.repo} ↗
+                          </a>
+                        )}
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         {fork.builtin !== true && (
@@ -1025,20 +1067,26 @@ export default function Settings() {
                           </>
                         )}
                         <Button variant="subtle" className="text-[11px]" onClick={() => installLlamacppChannel(fork.id)} disabled={installingChannel !== null}>
-                          {installingChannel === fork.id ? <Spinner label="installing." /> : update?.update_available && update.latest_tag && tag ? `Update to ${update.latest_tag}` : "Install / Reinstall"}
+                          {installingChannel === fork.id ? <Spinner label="installing." /> : isLocal ? "Verify / Refresh" : update?.update_available && update.latest_tag && tag ? `Update to ${update.latest_tag}` : "Install / Reinstall"}
                         </Button>
                       </div>
                     </div>
                     {fork.description ? <div className="text-[11px] text-slate-500">{fork.description}</div> : null}
+                    {isLocal ? (
+                      <div className="text-[11px] text-slate-400">
+                        Points at your build: <code className="text-amber-200/90 break-all">{fork.local_executable || "(no path set)"}</code>
+                        {" "}— rebuilt binary is picked up by pressing Verify / Refresh (or restarting the server); no GitHub download is needed.
+                      </div>
+                    ) : (
                     <div className="grid gap-2 sm:grid-cols-2">
-                      <Field label="Install directory" hint="Windows folder for this fork's CUDA build(s).">
+                      <Field label="Install directory" help="Where this fork's downloaded CUDA build is extracted. No effect on inference speed or RAM — keep it on a fast SSD." hint="Windows folder for this fork's CUDA build(s).">
                         <input
                           className={inputCls}
                           value={ch?.dir ?? s.llamacpp_dir}
                           onChange={(e) => setS({ ...s, llamacpp_channels: { ...s.llamacpp_channels, [fork.id]: { ...s.llamacpp_channels?.[fork.id], dir: e.target.value } } })}
                         />
                       </Field>
-                      <Field label="Custom llama-server.exe" hint="Optional absolute path override; leave blank to use the installed build.">
+                      <Field label="Custom llama-server.exe" help="Optional binary override for this fork (e.g. a manually downloaded build). Inference speed and RAM come from that binary's flags, not from this path — blank uses the installed build." hint="Optional absolute path override; leave blank to use the installed build.">
                         <input
                           className={inputCls}
                           placeholder="C:\\path\\to\\llama-server.exe"
@@ -1052,8 +1100,9 @@ export default function Settings() {
                         />
                       </Field>
                     </div>
+                    )}
                     <div className="text-[11px] text-slate-400">
-                      {tag ? `installed (tag ${tag})` : "not installed"}
+                      {tag && tag !== "local" ? `installed (tag ${tag})` : tag ? `verified local build${ch?.version ? ` · ${ch.version.split("\n")[0]}` : ""}` : "not verified yet — press Verify / Refresh after building"}
                       {fork.id === "upstream" && llamacppStatus ? ` · ${llamacppStatus.cuda_available ? "CUDA ready" : llamacppStatus.installed ? "CUDA device unavailable" : "not installed"}` : ""}
                       {fork.id === "upstream" && llamacppStatus?.devices?.length ? ` · Devices: ${llamacppStatus.devices.map((d) => `${d.id} (${d.name})`).join(", ")}` : ""}
                     </div>
@@ -1085,41 +1134,76 @@ export default function Settings() {
                       <div className="text-xs font-semibold text-indigo-200">{editingForkId ? `Edit fork "${editingForkId}"` : "Add a custom llama.cpp fork"}</div>
                       <Button variant="ghost" className="text-[11px]" onClick={resetForkForm}>Cancel</Button>
                     </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] text-slate-400">Source:</span>
+                      <button
+                        type="button"
+                        onClick={() => setForkForm({ ...forkForm, kind: "github" })}
+                        className={`px-2.5 py-1 text-[11px] rounded-md border transition-colors ${!isLocalForkForm ? "bg-indigo-500/20 text-indigo-200 border-indigo-500/40 font-semibold" : "bg-surface-2 text-slate-400 border-edge hover:text-slate-200"}`}
+                      >
+                        GitHub releases
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setForkForm({ ...forkForm, kind: "local" })}
+                        className={`px-2.5 py-1 text-[11px] rounded-md border transition-colors ${isLocalForkForm ? "bg-amber-500/20 text-amber-200 border-amber-500/40 font-semibold" : "bg-surface-2 text-slate-400 border-edge hover:text-slate-200"}`}
+                      >
+                        Local build (no GitHub)
+                      </button>
+                    </div>
                     <div className="grid gap-2 sm:grid-cols-2">
-                      <Field label="Fork id" hint="Lowercase slug used in servers/installs, e.g. xhtoken">
+                      <Field label="Fork id" help="Stable slug used in server definitions and install folders. No effect on model speed or RAM." hint="Lowercase slug used in servers/installs, e.g. xhtoken">
                         <input className={inputCls} placeholder="xhtoken" value={forkForm.id} disabled={editingForkId !== null} onChange={(e) => setForkForm({ ...forkForm, id: e.target.value })} />
                       </Field>
-                      <Field label="Display name">
+                      <Field label="Display name" help="Just a readable name shown in dropdowns. No effect on model speed or RAM.">
                         <input className={inputCls} placeholder="XHToken (Spark)" value={forkForm.name} onChange={(e) => setForkForm({ ...forkForm, name: e.target.value })} />
                       </Field>
-                      <Field label="GitHub repo" hint="'owner/name' or a github.com URL">
-                        <input className={inputCls} placeholder="XHToken/llama.cpp" value={forkForm.repo} onChange={(e) => setForkForm({ ...forkForm, repo: e.target.value })} />
-                      </Field>
-                      <Field label="Asset prefix" hint="Prefix stripped from the main asset name to derive the tag">
-                        <input className={inputCls} placeholder="llama-" value={forkForm.main_prefix} onChange={(e) => setForkForm({ ...forkForm, main_prefix: e.target.value })} />
-                      </Field>
+                      {isLocalForkForm ? (
+                        <Field label="Built llama-server.exe" help="Absolute path to the llama-server.exe you built yourself. The panel runs this binary in place — model speed and RAM use come from how you built it, not from a download." hint="Absolute path to the binary you built yourself, e.g. C:\llama.cpp\build\bin\llama-server.exe">
+                          <input className={inputCls} placeholder="C:\llama.cpp\build\bin\llama-server.exe" value={forkForm.local_executable} onChange={(e) => setForkForm({ ...forkForm, local_executable: e.target.value })} />
+                        </Field>
+                      ) : (
+                      <>
+                        <Field label="GitHub repo" help="The fork's GitHub repo used to find release downloads. No effect on model speed or RAM." hint="'owner/name' or a github.com URL">
+                          <input className={inputCls} placeholder="XHToken/llama.cpp" value={forkForm.repo} onChange={(e) => setForkForm({ ...forkForm, repo: e.target.value })} />
+                        </Field>
+                        <Field label="Asset prefix" help="Part of the release zip name stripped to derive the installed tag. No effect on model speed or RAM — only affects which download is picked." hint="Prefix stripped from the main asset name to derive the tag">
+                          <input className={inputCls} placeholder="llama-" value={forkForm.main_prefix} onChange={(e) => setForkForm({ ...forkForm, main_prefix: e.target.value })} />
+                        </Field>
+                      </>
+                      )}
                     </div>
-                    <Field label="Description" hint="Optional">
+                    <Field label="Description" help="A note about what this fork adds. No effect on model speed or RAM." hint="Optional">
                       <input className={inputCls} placeholder="What this fork adds (e.g. Spark DSpark speculative decoding)" value={forkForm.description} onChange={(e) => setForkForm({ ...forkForm, description: e.target.value })} />
                     </Field>
+                    {!isLocalForkForm && (
                     <Collapsible title="Advanced: asset regexes" compact>
                       <div className="grid gap-2 sm:grid-cols-2 pt-2">
-                        <Field label="Main asset regex" hint="Windows x64 CUDA zip; captures CUDA major.minor in groups 1-2">
+                        <Field label="Main asset regex" help="Matches the fork's Windows x64 CUDA zip name and extracts the CUDA version. No effect on model speed or RAM — a wrong pattern just fails to find a download." hint="Windows x64 CUDA zip; captures CUDA major.minor in groups 1-2">
                           <input className={inputCls} placeholder="^llama-.*-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$" value={forkForm.asset_regex} onChange={(e) => setForkForm({ ...forkForm, asset_regex: e.target.value })} />
                         </Field>
-                        <Field label="Runtime (cudart) regex" hint="Blank keeps the upstream default naming">
+                        <Field label="Runtime (cudart) regex" help="Matches the CUDA runtime (cudart) zip that ships alongside the main build. No effect on model speed or RAM beyond the runtime needed to run the GPU build." hint="Blank keeps the upstream default naming">
                           <input className={inputCls} placeholder="^cudart-llama-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$" value={forkForm.runtime_regex} onChange={(e) => setForkForm({ ...forkForm, runtime_regex: e.target.value })} />
                         </Field>
                       </div>
                     </Collapsible>
+                    )}
                     <div className="flex items-center gap-2">
                       <Button variant="subtle" className="text-[11px]" onClick={submitFork}>{editingForkId ? "Save fork" : "Add fork"}</Button>
                     </div>
+                    {isLocalForkForm ? (
+                      <p className="text-[10px] text-slate-500">
+                        Build the fork yourself (e.g. with CMake/MSVC or a local checkout) and point the fork at the
+                        resulting <code>llama-server.exe</code>. Nothing is downloaded: Verify probes that binary in
+                        place, and servers use it directly. Rebuild + Verify (or a server restart) to pick up a new build.
+                      </p>
+                    ) : (
                     <p className="text-[10px] text-slate-500">
                       Install/update scans the fork's GitHub releases and picks the newest Windows x64 CUDA build your driver supports. The main asset must match the regex above
-                      (default: the upstream naming convention); a matching cudart zip is expanded alongside it. Forks that publish no Windows CUDA zips can't be auto-installed — use
-                      a Custom llama-server.exe path instead.
+                      (default: the upstream naming convention); a matching cudart zip is expanded alongside it. Forks that publish no Windows CUDA zips can't be auto-installed —
+                      add them as a Local build fork instead and point it at your own <code>llama-server.exe</code>.
                     </p>
+                    )}
                   </div>
                 )}
                 {forkMsg ? <div className="mt-1 text-[11px] text-slate-300">{forkMsg}</div> : null}
@@ -1137,8 +1221,9 @@ export default function Settings() {
                     className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       Hugging Face Offline Mode (<code>HF_HUB_OFFLINE=1</code>)
+                      <HelpBubble text="Forces vLLM to never reach out to Hugging Face at startup. No effect on model speed or RAM — servers fail fast if the model is not already cached locally." />
                     </div>
                     <div className="text-xs text-slate-400">
                       Prevents vLLM from attempting network requests to Hugging Face on startup; strictly requires cached model weights.
@@ -1171,6 +1256,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 label="KV Cache Precision (kv_cache_dtype)"
+                help="vLLM KV-cache dtype. FP8 halves the KV-cache VRAM (roughly 2× usable context) at a small quality cost; auto keeps 16-bit (FP16/BF16) for best quality."
                 hint="FP8 KV-cache halves memory usage for context tokens, enabling 2x larger context windows."
               >
                 <select
@@ -1187,6 +1273,7 @@ export default function Settings() {
 
               <Field
                 label="Max Concurrency (max_num_seqs)"
+                help="Caps how many sequences vLLM batches at once. Higher means more throughput under concurrent load but proportionally more KV-cache VRAM (out-of-memory risk); lower is safer but slower."
                 hint="Maximum concurrent request sequences processed in a batch (leave blank for vLLM default 256)."
               >
                 <input
@@ -1212,8 +1299,9 @@ export default function Settings() {
                     className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       Enable Prefix Caching
+                      <HelpBubble text="Reuses KV-cache blocks for repeated prompt prefixes (system prompts, multi-turn history). Faster time-to-first-token; costs some VRAM for the cached blocks." />
                     </div>
                     <div className="text-xs text-slate-400">
                       Reuses KV-cache for repeated prompt prefixes (e.g. system prompts, multi-turn chat history). Dramatically accelerates time-to-first-token.
@@ -1229,8 +1317,9 @@ export default function Settings() {
                     className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       Enable Chunked Prefill
+                      <HelpBubble text="Splits long prompt prefills so ongoing decodes are not blocked. Smoother latency under load; negligible RAM/VRAM change." />
                     </div>
                     <div className="text-xs text-slate-400">
                       Chunks long user prompts so decoding requests aren't blocked, reducing generation latency spikes under load.
@@ -1246,8 +1335,9 @@ export default function Settings() {
                     className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       Disable Custom All-Reduce (<code>--disable-custom-all-reduce</code>)
+                      <HelpBubble text="Disables vLLM's custom CUDA all-reduce. Negligible effect on a single GPU; recommended on multi-GPU consumer cards / WSL2 without NVLink, where the custom path can hang." />
                     </div>
                     <div className="text-xs text-slate-400">
                       Recommended when running tensor parallelism on multi-GPU consumer GeForce setups or WSL2 where hardware NVLink peer-to-peer memory access is unavailable.
@@ -1259,6 +1349,7 @@ export default function Settings() {
               <div className="sm:col-span-2">
                 <Field
                   label="Extra vLLM Launch CLI Arguments"
+                  help="Raw vLLM flags appended at server start. Speed and RAM effects depend entirely on the flags you add — harness request parameters (temperature, max tokens, reasoning, tools) override these defaults."
                   hint="Arbitrary CLI flags appended directly to python -m vllm.entrypoints.openai.api_server. These are server defaults: request parameters from your harness (reasoning_effort, temperature, max_tokens, tools, …) take precedence."
                 >
                   <input
@@ -1313,6 +1404,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 label="Host Binding"
+                help="127.0.0.1 accepts connections from this machine only; 0.0.0.0 also accepts from your local network. No effect on model speed or RAM — LAN access exposes your endpoints to other devices."
                 hint="127.0.0.1 restricts access to local machine; 0.0.0.0 allows LAN devices / WebUIs."
               >
                 <select
@@ -1346,6 +1438,7 @@ export default function Settings() {
 
               <Field
                 label="API Key Protection (--api-key)"
+                help="Optional key gating the server and gateway endpoints. No effect on model speed or RAM; if the gateway is enabled, a key is required to call it."
                 hint={
                   s.api_key_configured
                     ? "A key is stored securely. Leave blank to keep it; enter a replacement to rotate it."
@@ -1379,8 +1472,9 @@ export default function Settings() {
                     onChange={(e) => updateAdv({ gateway_enabled: e.target.checked })}
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       OpenAI-Compatible Gateway
+                      <HelpBubble text="One fixed endpoint that routes chat requests to whichever running vLLM server serves the requested model. No effect on model speed or RAM; requires an API key." />
                     </div>
                     <p className="text-[11px] text-slate-500">
                       One stay-put endpoint that routes chat requests to whichever running vLLM
@@ -1415,6 +1509,7 @@ export default function Settings() {
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field
                     label="Gateway Port"
+                    help="Port the routing gateway listens on. No effect on model speed or RAM."
                     hint="Ollama-style default; point your client here."
                   >
                     <input
@@ -1431,6 +1526,7 @@ export default function Settings() {
                   </Field>
                   <Field
                     label="Base URL for Clients"
+                    help="The URL clients (Cursor, Continue, LibreChat, …) call. No effect on model speed or RAM."
                     hint="Use in Cursor, Continue, LibreChat, or any OpenAI-compatible client."
                   >
                     <div className="flex gap-2">
@@ -1545,6 +1641,7 @@ export default function Settings() {
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field
                   label={`GPU VRAM Utilization (${Math.round(mem.default_gpu_mem_util * 100)}%)`}
+                  help="Default share of VRAM new vLLM servers may reserve. Higher fits longer contexts and higher concurrency but leaves less headroom (out-of-memory risk); the overhead buffer is still reserved on top."
                   hint="Target fraction of GPU VRAM allocated for model weights and KV cache (50% – 98%)."
                 >
                   <div className="flex items-center gap-3 pt-1">
@@ -1567,6 +1664,7 @@ export default function Settings() {
 
                 <Field
                   label="VRAM Overhead Buffer (MB)"
+                  help="VRAM held aside for the CUDA context, runtime allocations, and display. Larger is more stable but leaves less usable VRAM for weights and KV cache."
                   hint="Reserved VRAM buffer for CUDA context, runtime allocations, and display."
                 >
                   <input
@@ -1594,8 +1692,9 @@ export default function Settings() {
                     className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       Enable RAM Context Overflow
+                      <HelpBubble text="Lets the context spill into WSL2 system RAM when VRAM is full (--swap-space). Prevents out-of-memory crashes on long prompts but is much slower than GPU KV cache." />
                     </div>
                     <div className="text-xs text-slate-400">
                       Allows context window to spill into WSL2 system RAM via <code>--swap-space</code> when VRAM is full.
@@ -1613,8 +1712,9 @@ export default function Settings() {
                     className="mt-0.5 h-4 w-4 rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0 focus:ring-offset-0"
                   />
                   <div className="space-y-0.5">
-                    <div className="text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
                       Allow Weight Offloading
+                      <HelpBubble text="Permits offloading model weights to CPU RAM (--cpu-offload-gb) when the model does not fit in VRAM. Lets oversized models run, but CPU inference is far slower than GPU." />
                     </div>
                     <div className="text-xs text-slate-400">
                       Permits offloading model weights to CPU RAM via <code>--cpu-offload-gb</code> if model exceeds VRAM.
@@ -1626,6 +1726,7 @@ export default function Settings() {
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field
                   label="RAM Safety Reserve (MB)"
+                  help="WSL2 system RAM kept untouched for the Linux kernel and background services. Larger is more stable but shrinks the usable overflow budget."
                   hint="WSL2 system RAM kept untouched for Linux kernel and background services."
                 >
                   <input
@@ -1642,6 +1743,7 @@ export default function Settings() {
 
                 <Field
                   label="Global Context Cap (Tokens)"
+                  help="Optional ceiling for context lengths in fit calculations. A lower cap saves VRAM/RAM but truncates long prompts; blank means uncapped."
                   hint="Optional ceiling on context window lengths (e.g. 65536). Leave blank for uncapped."
                 >
                   <input
@@ -1661,6 +1763,7 @@ export default function Settings() {
                 <div className="sm:col-span-2">
                   <Field
                     label="RAM Budget Mode"
+                    help="Auto sizes the swap budget from available WSL2 RAM minus the safety reserve; Manual locks a fixed MB budget. A bigger budget fits longer contexts but uses more system RAM."
                     hint="Auto dynamically sizes swap budget from available WSL2 RAM minus safety reserve. Manual locks a specific limit."
                   >
                     <div className="space-y-2 pt-1">
@@ -1762,6 +1865,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 label="vLLM Logging Level"
+                help="vLLM log verbosity. DEBUG adds CPU and disk I/O during inference; ERROR is the cheapest. No effect on model RAM."
                 hint="Controls verbosity of console and telemetry logs from the vLLM engine."
               >
                 <select
@@ -1779,6 +1883,7 @@ export default function Settings() {
               <div className="sm:col-span-2">
                 <Field
                   label="Custom Environment Variables"
+                  help="Environment variables exported into WSL before vLLM starts. Some (NCCL, Triton cache) can affect speed or stability; none change model RAM directly. A bad value can prevent a server from starting."
                   hint="Exported to the WSL bash environment before starting vLLM (one KEY=VAL per line, # comments allowed)."
                 >
                   <textarea

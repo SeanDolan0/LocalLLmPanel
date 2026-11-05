@@ -268,10 +268,39 @@ export function Gauge({ pct, label, sub }: { pct: number; label: string; sub?: s
   );
 }
 
-export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
+/// Small "?" bubble that shows a plain-language explainer on hover,
+/// keyboard focus, or tap. Use next to a setting label; the text should say
+/// what the setting is and how it affects performance / RAM.
+export function HelpBubble({ text, label }: { text: string; label?: string }) {
+  return (
+    <span
+      className="group relative inline-flex shrink-0 align-middle"
+      role="tooltip"
+      aria-label={label ?? text}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <span
+        tabIndex={0}
+        aria-hidden="true"
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 bg-surface text-[9px] font-bold leading-none text-slate-400 transition-colors group-hover:border-indigo-400/60 group-hover:text-indigo-300 group-focus-within:border-indigo-400/60 group-focus-within:text-indigo-300"
+      >
+        ?
+      </span>
+      <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 w-64 -translate-x-1/2 rounded-lg border border-edge bg-surface-3 p-2.5 text-left text-[11px] font-normal leading-relaxed text-slate-300 opacity-0 shadow-xl shadow-black/50 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+        {text}
+      </span>
+    </span>
+  );
+}
+
+export function Field({ label, children, hint, help }: { label: string; children: ReactNode; hint?: string; help?: string }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-medium text-slate-400">{label}</span>
+      <span className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-400">
+        {label}
+        {help && <HelpBubble text={help} />}
+      </span>
       {children}
       {hint && <span className="mt-1 block text-[11px] text-slate-600">{hint}</span>}
     </label>

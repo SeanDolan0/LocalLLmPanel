@@ -54,6 +54,15 @@ pub const DEFAULT_FORK_RUNTIME_REGEX: &str = r"^cudart-llama-bin-win-cuda-(\d+)\
 
 /// A user-installable llama.cpp fork definition ("channel").
 /// Built-in forks (`builtin: true`) are seeded on load and cannot be edited or removed.
+///
+/// Two kinds are supported:
+/// - `"github"` (default): the fork publishes GitHub releases with Windows x64
+///   CUDA zips; the app discovers and downloads them (fields `repo` /
+///   `asset_regex` / `runtime_regex` / `main_prefix`).
+/// - `"local"`: the user builds the fork themselves on this machine (e.g. a
+///   CMake build of a local checkout) and points the app at the resulting
+///   `llama-server.exe` via `local_executable`. No GitHub repo or download is
+///   involved; `repo` and the regexes are ignored for local forks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct LlamaCppFork {
@@ -61,13 +70,22 @@ pub struct LlamaCppFork {
     pub id: String,
     /// Display name shown in the UI.
     pub name: String,
+    /// Fork source kind: "github" (GitHub releases) or "local" (build on this machine).
+    #[serde(default = "default_fork_kind")]
+    pub kind: String,
     /// GitHub repository as "owner/name"; used for the releases API and the release-notes link.
+    /// Required for "github" forks; ignored for "local" forks.
     pub repo: String,
+    /// Absolute path to a locally built `llama-server.exe`.
+    /// Required for "local" forks; ignored for "github" forks.
+    #[serde(default)]
+    pub local_executable: Option<String>,
     /// Short description of what the fork is for.
     #[serde(default)]
     pub description: String,
     /// Regex the main Windows x64 CUDA asset must match. Must capture the CUDA
     /// major/minor versions in capture groups 1 and 2.
+    /// Required for "github" forks; ignored for "local" forks.
     pub asset_regex: String,
     /// Regex for the matching CUDA runtime (cudart) asset. Empty disables the runtime download.
     #[serde(default)]
@@ -80,12 +98,28 @@ pub struct LlamaCppFork {
     pub builtin: bool,
 }
 
+fn default_fork_kind() -> String {
+    "github".to_string()
+}
+
+impl LlamaCppFork {
+    pub fn is_local(&self) -> bool {
+        self.kind.trim().eq_ignore_ascii_case("local")
+    }
+
+    pub fn is_github(&self) -> bool {
+        !self.is_local()
+    }
+}
+
 impl Default for LlamaCppFork {
     fn default() -> Self {
         LlamaCppFork {
             id: String::new(),
             name: String::new(),
+            kind: default_fork_kind(),
             repo: String::new(),
+            local_executable: None,
             description: String::new(),
             asset_regex: DEFAULT_FORK_ASSET_REGEX.to_string(),
             runtime_regex: DEFAULT_FORK_RUNTIME_REGEX.to_string(),
@@ -101,7 +135,9 @@ pub fn builtin_llamacpp_forks() -> Vec<LlamaCppFork> {
     vec![LlamaCppFork {
         id: "upstream".to_string(),
         name: "Upstream (ggml-org)".to_string(),
+        kind: "github".to_string(),
         repo: "ggml-org/llama.cpp".to_string(),
+        local_executable: None,
         description: "Official ggml-org llama.cpp releases.".to_string(),
         asset_regex: r"^llama-b\d+-bin-win-cuda-(\d+)\.(\d+)-x64\.zip$".to_string(),
         runtime_regex: DEFAULT_FORK_RUNTIME_REGEX.to_string(),
@@ -137,6 +173,23 @@ pub fn validate_llamacpp_fork(fork: &LlamaCppFork) -> Result<(), String> {
     if fork.name.trim().len() > 80 {
         return Err("fork name must be at most 80 characters".into());
     }
+    if fork.is_local() {
+        let exe = fork
+            .local_executable
+            .as_deref()
+            .map(str::trim)
+            .filter(|exe| !exe.is_empty())
+            .ok_or_else(|| {
+                "local builds need the path to the built llama-server.exe (e.g. C:\\llama.cpp\\build\\bin\\llama-server.exe)".to_string()
+            })?;
+        if !exe.to_ascii_lowercase().ends_with(".exe") {
+            return Err("local executable path must point at a .exe file".into());
+        }
+        return Ok(());
+    }
+    if !fork.kind.trim().is_empty() && !fork.is_github() {
+        return Err("fork kind must be \"github\" or \"local\"".into());
+    }
     let repo = fork.repo.trim();
     let repo_ok = repo.split('/').count() == 2
         && repo.split('/').all(|part| {
@@ -147,7 +200,7 @@ pub fn validate_llamacpp_fork(fork: &LlamaCppFork) -> Result<(), String> {
         });
     if !repo_ok {
         return Err(
-            "fork repo must be a GitHub 'owner/name' path (e.g. ggml-org/llama.cpp)".into(),
+            "fork repo must be a GitHub 'owner/name' path (e.g. ggml-org/llama.cpp); for a locally built fork, set the kind to \"local\" and provide the built llama-server.exe path instead".into(),
         );
     }
     let asset_re = regex_lite::Regex::new(&fork.asset_regex)
@@ -1754,6 +1807,8 @@ mod tests {
             id: "xhtoken".into(),
             name: "XHToken (Spark)".into(),
             repo: "XHToken/llama.cpp".into(),
+            kind: "github".into(),
+            local_executable: None,
             description: String::new(),
             asset_regex: crate::state::DEFAULT_FORK_ASSET_REGEX.to_string(),
             runtime_regex: crate::state::DEFAULT_FORK_RUNTIME_REGEX.to_string(),
@@ -1836,6 +1891,8 @@ mod tests {
             id: "my-fork".into(),
             name: "My Fork".into(),
             repo: "someone/llama.cpp".into(),
+            kind: "github".into(),
+            local_executable: None,
             description: "custom notes".into(),
             asset_regex: r"^my-llama-.*-win-cuda-(\d+)\.(\d+)-x64\.zip$".into(),
             runtime_regex: String::new(), // intentionally disabled

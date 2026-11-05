@@ -272,6 +272,74 @@ pub async fn install_llamacpp_channel(
         .get(&channel)
         .cloned()
         .unwrap_or_default();
+    // Local builds are verified in place instead of downloaded: probe the
+    // user-built binary (fork-level path first, per-fork override wins) and
+    // persist its version/help so capability gating keeps working.
+    if fork.is_local() {
+        let exe = channel_config
+            .executable
+            .as_deref()
+            .map(str::trim)
+            .filter(|exe| !exe.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                fork.local_executable
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|exe| !exe.is_empty())
+                    .map(PathBuf::from)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "fork '{channel}' is a local build but has no llama-server.exe path; point it at the binary you built under Settings → llama.cpp Forks"
+                )
+            })?;
+        let (exe, version, help) = tauri::async_runtime::spawn_blocking(move || {
+            crate::llamacpp_install::probe_local_executable(&exe)
+                .map(|(version, help)| (exe, version, help))
+        })
+        .await
+        .map_err(|e| format!("llama.cpp verify task error: {e}"))?
+        .map_err(|e| format!("local llama.cpp verify failed: {e}"))?;
+        let mut cfg = st.config.lock().unwrap();
+        if !cfg.llamacpp_channels.contains_key(&channel) {
+            cfg.llamacpp_channels.insert(
+                channel.clone(),
+                crate::state::LlamaCppChannelConfig::default(),
+            );
+        }
+        if let Some(ch) = cfg.llamacpp_channels.get_mut(&channel) {
+            ch.installed_tag = Some("local".to_string());
+            ch.version = Some(version.clone());
+            ch.help = Some(help);
+            ch.executable = Some(exe.to_string_lossy().into_owned());
+            if let Some(parent) = exe.parent() {
+                ch.dir = parent.to_string_lossy().into_owned();
+            }
+        }
+        cfg.save().map_err(|e| e.to_string())?;
+        let devices = crate::llamacpp_install::list_devices(&exe).unwrap_or_default();
+        return Ok(crate::llamacpp_install::InstallStatus {
+            installed: true,
+            tag: cfg
+                .llamacpp_channels
+                .get(&channel)
+                .and_then(|c| c.installed_tag.clone()),
+            version: cfg
+                .llamacpp_channels
+                .get(&channel)
+                .and_then(|c| c.version.clone()),
+            executable: cfg
+                .llamacpp_channels
+                .get(&channel)
+                .and_then(|c| c.executable.clone()),
+            gpu: crate::llamacpp_install::windows_gpu_snapshot(),
+            cuda_available: devices
+                .iter()
+                .any(|d| d.backend.eq_ignore_ascii_case("cuda")),
+            devices,
+        });
+    }
     let destination = PathBuf::from(channel_config.dir);
     let github_token = (!cfg.github_token.trim().is_empty()).then_some(cfg.github_token);
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -367,6 +435,16 @@ pub async fn llamacpp_fork_upsert(
             fork.id.clone(),
             crate::state::LlamaCppChannelConfig::default(),
         );
+    }
+    // Local builds resolve straight to the fork-level path so the server
+    // launcher finds the binary even before the first Verify run.
+    if fork.is_local() {
+        if let (Some(channel), Some(exe)) = (
+            cfg.llamacpp_channels.get_mut(&fork.id),
+            &fork.local_executable,
+        ) {
+            channel.executable = Some(exe.clone());
+        }
     }
     cfg.save().map_err(|e| e.to_string())?;
     Ok(cfg.llamacpp_forks.clone())

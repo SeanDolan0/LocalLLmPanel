@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
-import { Badge, Button, Card, CardTitle, Collapsible, Field, Menu, inputCls, Spinner } from "../ui";
+import { Badge, Button, Card, CardTitle, Collapsible, Field, HelpBubble, Menu, inputCls, Spinner } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import { ServerMetricsPanel } from "../components/ServerMetricsPanel";
 import { effectiveModelName } from "../types";
@@ -962,7 +962,6 @@ function NewServerForm({
   const [ubatchSize, setUbatchSize] = useState("");
   const [parallel, setParallel] = useState("0");
   const [extraArgs, setExtraArgs] = useState("");
-  const [moePresetApplied, setMoePresetApplied] = useState(false);
   const [env, setEnv] = useState<Record<string, string>>(initialEnv ?? {});
   const [llamaCppChannel, setLlamaCppChannel] = useState<string>(initialChannel || "upstream");
   const [llamaCppForks, setLlamaCppForks] = useState<import("../types").LlamaCppFork[]>([
@@ -1352,13 +1351,13 @@ function NewServerForm({
         </div>
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Backend">
+        <Field label="Backend" help="vLLM (WSL2) for Hugging Face checkpoints; llama.cpp (Windows) for GGUF models. Backends use RAM and VRAM differently — vLLM manages GPU memory automatically, llama.cpp exposes the offload flags below.">
           <select className={inputCls} value={backend} onChange={(e) => changeBackend(e.target.value as "vllm" | "llamacpp")}>
             <option value="vllm">vLLM (WSL2)</option>
             <option value="llamacpp">llama.cpp (Windows)</option>
           </select>
         </Field>
-        <Field label={backend === "llamacpp" ? "GGUF model path" : "Model id (HF)"}>
+        <Field label={backend === "llamacpp" ? "GGUF model path" : "Model id (HF)"} help={backend === "llamacpp" ? "Path to the GGUF weights file. Model size in GB decides how much VRAM/RAM the server needs — bigger quants and more layers use more VRAM." : "Hugging Face repo id (or local path). Quant/precision choice is the biggest driver of VRAM and system RAM use."}>
           {backend === "llamacpp" ? (
             <div className="flex gap-1.5">
               <input
@@ -1411,10 +1410,10 @@ function NewServerForm({
             />
           )}
         </Field>
-        <Field label="Name (optional)">
+        <Field label="Name (optional)" help="Display name for this server. No effect on model speed or RAM.">
           <input className={inputCls} placeholder="coder-0.5b" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        {backend === "vllm" && <Field label="Task">
+        {backend === "vllm" && <Field label="Task" help="Instruct serves chat/completions; embed serves the embeddings endpoint. No effect on model speed or RAM — it only changes which routes are exposed.">
           <select className={inputCls} value={task} onChange={(e) => setTask(e.target.value as "instruct" | "embed")}>
             <option value="instruct">instruct (chat)</option>
             <option value="embed">embed (embeddings)</option>
@@ -1434,6 +1433,7 @@ function NewServerForm({
             <>
               <Field
                 label="Max model len (blank = auto)"
+                help="Context length ceiling. Longer contexts use much more VRAM for the KV cache (and spill to RAM swap once VRAM is full) — the #1 driver of total memory use. Blank lets vLLM pick a size that fits your VRAM."
                 hint={
                   (vramContextLimit ?? 0) > 0
                     ? `Pure VRAM: ≤ ${fmtNum(vramContextLimit!)} tokens | RAM Swap: > ${fmtNum(vramContextLimit!)} tokens`
@@ -1478,7 +1478,7 @@ function NewServerForm({
                   </div>
                 )}
               </Field>
-              <Field label="KV cache precision" hint="Blank inherits the global vLLM setting. FP8 reduces KV-cache VRAM; verify quality on long-context tasks.">
+              <Field label="KV cache precision" help="KV-cache dtype (blank = global setting). FP8 roughly halves KV-cache VRAM so much longer contexts fit; 16-bit is highest quality but uses the most VRAM." hint="Blank inherits the global vLLM setting. FP8 reduces KV-cache VRAM; verify quality on long-context tasks.">
                 <select className={inputCls} value={kvCacheDtype} onChange={(e) => setKvCacheDtype(e.target.value)}>
                   <option value="">Global / Auto</option>
                   <option value="float16">FP16</option>
@@ -1487,26 +1487,26 @@ function NewServerForm({
                   <option value="fp8_e5m2">FP8 E5M2</option>
                 </select>
               </Field>
-              <Field label="KV Cache CPU Offload (GB)" hint="Advanced vLLM V1 option (--kv-offloading-size). Leave at 0 for normal GPU KV caching.">
+              <Field label="KV Cache CPU Offload (GB)" help="How much KV cache (GB) may sit in CPU RAM instead of VRAM. Lets longer contexts fit than VRAM allows, but CPU-resident KV cache is much slower. 0 = normal GPU-only caching." hint="Advanced vLLM V1 option (--kv-offloading-size). Leave at 0 for normal GPU KV caching.">
                 <input type="number" step="1" min="0" className={inputCls} placeholder="0" value={swapSpaceGb} onChange={(e) => setSwapSpaceGb(e.target.value)} />
               </Field>
-              <Field label="CPU Weight Offload (GB)" hint="vLLM --cpu-offload-gb. Offloads model parameters to CPU RAM; use only when GPU-only placement cannot fit.">
+              <Field label="CPU Weight Offload (GB)" help="How many GB of model weights may be offloaded to CPU RAM. Required only when the model does not fit in VRAM; CPU inference is far slower than GPU. 0 = GPU only." hint="vLLM --cpu-offload-gb. Offloads model parameters to CPU RAM; use only when GPU-only placement cannot fit.">
                 <input type="number" step="1" min="0" className={inputCls} placeholder="0 (e.g. 8)" value={cpuOffloadGb} onChange={(e) => setCpuOffloadGb(e.target.value)} />
               </Field>
             </>
           )}
           {backend === "llamacpp" && (
             <>
-              <Field label="Context size">
+              <Field label="Context size" help="llama.cpp context length (-c). Longer contexts use much more VRAM for the KV cache — the main driver of total GPU memory use. Blank uses llama.cpp's default.">
                 <input className={inputCls} value={ctxSize} onChange={(e) => setCtxSize(e.target.value)} />
               </Field>
-              <Field label="Fit target (MiB)" hint="Memory margin per device when --fit is supported.">
+              <Field label="Fit target (MiB)" help="Extra VRAM headroom per device kept aside when automatic memory fit is on (--fit-target). Higher is safer against out-of-memory but leaves less VRAM for the model." hint="Memory margin per device when --fit is supported.">
                 <input className={inputCls} placeholder="1024" value={fitTarget} onChange={(e) => setFitTarget(e.target.value)} />
               </Field>
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input type="checkbox" checked={fit} onChange={(e) => setFit(e.target.checked)} /> Automatic memory fit (when supported)
+                <input type="checkbox" checked={fit} onChange={(e) => setFit(e.target.checked)} /> Automatic memory fit (when supported) <HelpBubble text="Lets llama.cpp size GPU layers and context to fit available VRAM automatically. Strongly recommended — prevents out-of-memory crashes; disabling it requires manual layer tuning." />
               </label>
-              <Field label="KV Cache Type K (--cache-type-k)" hint="Data type for the K cache. Lower precision saves VRAM at some quality cost.">
+              <Field label="KV Cache Type K (--cache-type-k)" help="Data type for the K cache. Lower precision (q8_0/q4_0) saves VRAM, allowing longer contexts; f16 is highest quality but uses the most VRAM." hint="Data type for the K cache. Lower precision saves VRAM at some quality cost.">
                 <select className={inputCls} value={cacheTypeK} onChange={(e) => setCacheTypeK(e.target.value)}>
                   <option value="f16">f16 (default, highest quality)</option>
                   <option value="bf16">bf16</option>
@@ -1519,7 +1519,7 @@ function NewServerForm({
                   <option value="f32">f32</option>
                 </select>
               </Field>
-              <Field label="KV Cache Type V (--cache-type-v)" hint="Data type for the V cache. Can differ from K; q4_0/q5_0 saves the most VRAM.">
+              <Field label="KV Cache Type V (--cache-type-v)" help="Data type for the V cache. Lower precision (q8_0/q4_0) saves the most VRAM and lets longer contexts fit; f16 is highest quality but uses the most VRAM." hint="Data type for the V cache. Can differ from K; q4_0/q5_0 saves the most VRAM.">
                 <select className={inputCls} value={cacheTypeV} onChange={(e) => setCacheTypeV(e.target.value)}>
                   <option value="f16">f16 (default, highest quality)</option>
                   <option value="bf16">bf16</option>
@@ -1544,10 +1544,10 @@ function NewServerForm({
         className="mt-3"
       >
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="API model name / alias" hint="Blank uses the model ID or GGUF filename. vLLM maps this to --served-model-name; llama.cpp maps it to --alias.">
+          <Field label="API model name / alias" help="Public model name clients use to reach this server. No effect on model speed or RAM." hint="Blank uses the model ID or GGUF filename. vLLM maps this to --served-model-name; llama.cpp maps it to --alias.">
             <input className={inputCls} placeholder="blank = model identity" value={served} onChange={(e) => setServed(e.target.value)} />
           </Field>
-          <Field label="Per-server API key (optional)" hint="Overrides the global vLLM key for this server and is also passed to llama.cpp.">
+          <Field label="Per-server API key (optional)" help="Overrides the global key for this server only. No effect on model speed or RAM." hint="Overrides the global vLLM key for this server and is also passed to llama.cpp.">
             <div className="flex gap-1.5">
               <input
                 type="password"
@@ -1560,7 +1560,7 @@ function NewServerForm({
               {apiKey && <Button variant="ghost" className="shrink-0 px-2 text-xs" onClick={() => navigator.clipboard.writeText(apiKey)}>Copy</Button>}
             </div>
           </Field>
-          {backend === "vllm" && <Field label="Checkpoint format" hint="Pre-quantized GPTQ/AWQ/FP8 checkpoints are auto-detected from model config.">
+          {backend === "vllm" && <Field label="Checkpoint format" help="Pre-quantized checkpoints (FP8/GPTQ/AWQ) are detected automatically; Auto is almost always right. Format choice is the biggest lever on VRAM/RAM use: FP8/AWQ/GPTQ need far less VRAM than FP16 so bigger models or contexts fit." hint="Pre-quantized GPTQ/AWQ/FP8 checkpoints are auto-detected from model config.">
             <select className={inputCls} value={quant.toLowerCase()} onChange={(e) => setQuant(e.target.value)}>
               <option value="auto">Auto (recommended)</option>
               <option value="fp16">FP16 / BF16</option>
@@ -1571,9 +1571,9 @@ function NewServerForm({
           </Field>}
           {backend === "vllm" && (
             <>
-              <Field label="Startup / performance mode" hint="Eager mode starts fastest and uses less VRAM. CUDA graphs improve steady-state throughput but add compile/capture time.">
+              <Field label="Startup / performance mode" help="Eager starts fastest and uses less VRAM (no graph capture); CUDA graphs give higher steady-state throughput but add start-up compile time and extra VRAM." hint="Eager mode starts fastest and uses less VRAM. CUDA graphs improve steady-state throughput but add compile/capture time.">
                 <select className={inputCls} value={enforceEager ? "eager" : "graphs"} onChange={(e) => setEnforceEager(e.target.value === "eager")}>
-                  <option value="eager">Eager (recommended for 12 GB GPUs)</option>
+                  <option value="eager">Eager (recommended — faster startup, less VRAM)</option>
                   <option value="graphs">CUDA graphs (higher throughput)</option>
                 </select>
               </Field>
@@ -1581,44 +1581,21 @@ function NewServerForm({
                 <span className="font-semibold text-indigo-200">vLLM 0.30+ defaults:</span> attention backend Auto, prefix caching enabled, and chunked prefill managed by vLLM. KV precision can be inherited globally or overridden per server above.
               </div>
               <EnvironmentVarsEditor initialEnv={env} onChange={setEnv} />
-              <Field label="GPU memory utilization" hint="Fraction of GPU memory vLLM may reserve (0–1). Default 0.85.">
+              <Field label="GPU memory utilization" help="Fraction of GPU VRAM vLLM may reserve for weights + KV cache. Higher fits longer contexts and more concurrency but leaves less headroom (out-of-memory risk). 0.85 default." hint="Fraction of GPU memory vLLM may reserve (0–1). Default 0.85.">
                 <input type="number" step="0.05" min="0.1" max="0.95" className={inputCls} value={gpuUtil} onChange={(e) => setGpuUtil(e.target.value)} />
               </Field>
             </>
           )}
           {backend === "llamacpp" && (
             <>
-              <Field label="llama.cpp Fork" hint="Fork required by the model (e.g. ternary PQ2_0/PTQ1_0 → PrismML). Manage forks in Settings → llama.cpp Forks.">
+              <Field label="llama.cpp Fork" help="Which llama.cpp build runs this server (e.g. PrismML for ternary quants, or your local build). Different forks can use different VRAM for the same model if they offload differently — pick the one the model requires." hint="Fork required by the model (e.g. ternary PQ2_0/PTQ1_0 → PrismML). Manage forks in Settings → llama.cpp Forks.">
                 <select className={inputCls} value={llamaCppChannel} onChange={(e) => setLlamaCppChannel(e.target.value)}>
                   {llamaCppForks.map((fork) => (
                     <option key={fork.id} value={fork.id}>{fork.name}</option>
                   ))}
                 </select>
               </Field>
-              {llamaCppChannel === "prism" && (
-                <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-                  <div className="text-sm font-medium text-indigo-200">Bonsai 2 / Ternary Preset</div>
-                  <div className="text-xs text-slate-400 mb-2">Optimized for PrismML fork: all GPU layers, flash attention, Jinja tool calling, q8_0 KV cache.</div>
-                  <Button
-                    variant="subtle"
-                    onClick={() => {
-                      setNGpuLayers("99");
-                      setNCpuMoe("");
-                      setCtxSize("32768");
-                      setFit(true);
-                      setFitTarget("1024");
-                      setFlashAttn(true);
-                      setJinja(true);
-                      setCacheTypeK("q8_0");
-                      setCacheTypeV("q8_0");
-                      setMoePresetApplied(true);
-                    }}
-                  >
-                    Apply Bonsai 2 Preset
-                  </Button>
-                </div>
-              )}
-              <Field label="GGUF quantization label" hint="Metadata inferred from the filename; llama.cpp reads it from the GGUF itself.">
+              <Field label="GGUF quantization label" help="Informational only — llama.cpp reads the quant from the GGUF itself. The real file size (Q4/Q5/Q8…) decides how much VRAM/RAM the server needs." hint="Metadata inferred from the filename; llama.cpp reads it from the GGUF itself.">
                 <input className={inputCls} placeholder="e.g. PQ2_0, PTQ1_0, Q2_0_g64" value={quant} onChange={(e) => setQuant(e.target.value)} />
               </Field>
               {nGpuLayers.trim() && fit && (
@@ -1626,90 +1603,52 @@ function NewServerForm({
                   Explicit <code>-ngl</code> disables llama.cpp automatic fitting. Clear GPU layers to let fit choose automatically.
                 </div>
               )}
-              {!moePresetApplied && (
-                <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
-                <div>
-                  <div className="text-sm font-medium text-indigo-200">MoE presets</div>
-                  <div className="text-xs text-slate-400">Choose automatic fitting or tune manual CPU expert offload.</div>
-                </div>
-                <div className="flex gap-2">
-                <Button
-                  variant="subtle"
-                  onClick={() => {
-                    setNGpuLayers("");
-                    setNCpuMoe("");
-                    setCtxSize("32768");
-                    setFit(true);
-                    setFitTarget("1024");
-                    setFlashAttn(true);
-                    setJinja(true);
-                    setMoePresetApplied(true);
-                  }}
-                >
-                  MoE auto-fit
-                </Button>
-                <Button
-                  variant="subtle"
-                  onClick={() => {
-                    setNGpuLayers("99");
-                    setNCpuMoe("24");
-                    setCtxSize("32768");
-                    setFlashAttn(true);
-                    setJinja(true);
-                    setMoePresetApplied(true);
-                  }}
-                >
-                  MoE manual offload
-                </Button>
-                  </div>
-                </div>
-              )}
-              <Field label="GPU layers (-ngl)">
+              <Field label="GPU layers (-ngl)" help="How many model layers stay on the GPU (more = faster, more VRAM). Blank lets automatic fit decide. Setting this manually disables automatic fitting.">
                 <input className={inputCls} placeholder="auto" value={nGpuLayers} onChange={(e) => setNGpuLayers(e.target.value)} />
               </Field>
-              <Field label="CPU MoE layers">
+              <Field label="CPU MoE layers" help="For mixture-of-experts models: how many expert layers stay on the CPU. Offloading them saves VRAM but slows inference significantly. Blank keeps all experts on the GPU.">
                 <input className={inputCls} value={nCpuMoe} onChange={(e) => setNCpuMoe(e.target.value)} />
               </Field>
-              <Field label="Device(s)" hint="Optional llama.cpp device ids, e.g. CUDA0 or CUDA0,CUDA1.">
+              <Field label="Device(s)" help="Which GPUs to use (e.g. CUDA0,CUDA1). Spreading across GPUs splits VRAM load; a single device is fastest when the model fits. No direct RAM effect." hint="Optional llama.cpp device ids, e.g. CUDA0 or CUDA0,CUDA1.">
                 <input className={inputCls} list="llamacpp-devices" placeholder="auto" value={device} onChange={(e) => setDevice(e.target.value)} />
                 <datalist id="llamacpp-devices">
                   {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </datalist>
               </Field>
-              <Field label="Log verbosity (0–5)" hint="llama.cpp: 0 generic, 1 error, 2 warning, 3 info, 4 trace, 5 debug.">
+              <Field label="Log verbosity (0–5)" help="llama.cpp log detail. Higher levels cost CPU/disk but help debugging; no effect on model RAM." hint="llama.cpp: 0 generic, 1 error, 2 warning, 3 info, 4 trace, 5 debug.">
                 <input className={inputCls} placeholder="3" value={logVerbosity} onChange={(e) => setLogVerbosity(e.target.value)} />
               </Field>
-              <Field label="mmproj path (optional)">
+              <Field label="mmproj path (optional)" help="Vision projector weights (.mmproj) for vision models. Adds its file size to VRAM/RAM load; leave blank for text-only models.">
                 <input className={inputCls} value={mmprojPath} onChange={(e) => setMmprojPath(e.target.value)} />
               </Field>
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} /> Flash attention
+                <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} /> Flash attention <HelpBubble text="Fused attention kernels. Faster and uses less VRAM for attention than standard attention; recommended on for long contexts." />
               </label>
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input type="checkbox" checked={jinja} onChange={(e) => setJinja(e.target.checked)} /> Jinja tool-calling templates
+                <input type="checkbox" checked={jinja} onChange={(e) => setJinja(e.target.checked)} /> Jinja tool-calling templates <HelpBubble text="Enables the model's Jinja chat template for tool calls and thinking. No effect on model speed or RAM; required for tool-calling support." />
               </label>
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input type="checkbox" checked={noKvOffload} onChange={(e) => setNoKvOffload(e.target.checked)} /> Disable KV-cache offload
+                <input type="checkbox" checked={noKvOffload} onChange={(e) => setNoKvOffload(e.target.checked)} /> Disable KV-cache offload <HelpBubble text="Keeps the entire KV cache in VRAM instead of spilling to CPU RAM. Faster but uses much more VRAM for long contexts; leave off to allow spill." />
               </label>
-              <Field label="CPU threads" hint="Blank uses llama.cpp auto-detection.">
+              <Field label="CPU threads" help="CPU threads for llama.cpp (--threads). More threads can speed CPU offload but steal CPU from the panel/OS; blank uses auto-detection." hint="Blank uses llama.cpp auto-detection.">
                 <input type="number" min="1" className={inputCls} placeholder="auto" value={threads} onChange={(e) => setThreads(e.target.value)} />
               </Field>
-              <Field label="Logical batch size">
+              <Field label="Logical batch size" help="Logical batch size (-b). Larger batches raise throughput but scale KV-cache and activation VRAM/RAM with every extra sequence.">
                 <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
               </Field>
-              <Field label="Physical micro-batch size">
+              <Field label="Physical micro-batch size" help="Physical micro-batch size (-ub). Smaller values lower peak VRAM/RAM but can be slower; blank uses llama.cpp's default.">
                 <input type="number" min="1" className={inputCls} placeholder="llama.cpp default" value={ubatchSize} onChange={(e) => setUbatchSize(e.target.value)} />
               </Field>
-              <Field label="Parallel request slots" hint="0 uses llama.cpp automatic selection.">
+              <Field label="Parallel request slots" help="How many requests run in parallel (-p). More slots = higher concurrency but proportionally more KV-cache VRAM/RAM. 0 uses llama.cpp's automatic selection." hint="0 uses llama.cpp automatic selection.">
                 <input type="number" min="0" className={inputCls} placeholder="auto" value={parallel} onChange={(e) => setParallel(e.target.value)} />
               </Field>
-              <Field label="Extra llama.cpp arguments" hint="One argument per line. Structured settings above take precedence; harness request parameters (thinking level, temperature, max_tokens, …) override these defaults.">
+              <Field label="Extra llama.cpp arguments" help="Raw llama.cpp flags, one per line. Speed and RAM effects depend entirely on the flags; the structured settings above take precedence." hint="One argument per line. Structured settings above take precedence; harness request parameters (thinking level, temperature, max_tokens, …) override these defaults.">
                 <textarea className={`${inputCls} min-h-20 font-mono text-xs`} placeholder={"--jinja\n--override-kv key=value"} value={extraArgs} onChange={(e) => setExtraArgs(e.target.value)} />
               </Field>
             </>
           )}
           <label className="flex items-center gap-2 text-sm text-slate-300 sm:col-span-2">
-            <input type="checkbox" checked={metrics} onChange={(e) => setMetrics(e.target.checked)} /> Collect runtime metrics from this server
+            <input type="checkbox" checked={metrics} onChange={(e) => setMetrics(e.target.checked)} /> Collect runtime metrics from this server <HelpBubble text="Polls the server's /metrics endpoint for the dashboard. Negligible CPU/RAM cost; no effect on model memory." />
           </label>
         </div>
       </Collapsible>
@@ -1737,13 +1676,14 @@ function NewServerForm({
                 checked={speculativeEnabled}
                 onChange={(e) => setSpeculativeEnabled(e.target.checked)}
               />
-              Enable speculative decoding with a draft model
+              Enable speculative decoding with a draft model <HelpBubble text="Runs a small draft model that proposes tokens the main model verifies, typically raising tokens/sec. Adds the draft model's weights to VRAM/RAM use." />
             </label>
 
             {speculativeEnabled && (
               <>
                 <Field
                   label={backend === "llamacpp" ? "Draft GGUF model path" : "Draft model ID (HF or local)"}
+                  help="Small draft model loaded alongside the main model. Its weights add to VRAM/RAM use; a faster draft means faster overall generation."
                   hint={
                     backend === "llamacpp"
                       ? "Must be a GGUF file compatible with the target model (e.g. 0.5B draft for 7B target)."
@@ -1794,6 +1734,7 @@ function NewServerForm({
 
                 <Field
                   label="Number of speculative tokens"
+                  help="Tokens the draft proposes per forward pass. More tokens can mean higher tokens/sec but less gain if predictions are often wrong. No direct VRAM/RAM change."
                   hint="Tokens proposed by the draft model per forward pass. Default is 5."
                 >
                   <input
@@ -1942,7 +1883,7 @@ function EnvironmentVarsEditor({ initialEnv, onChange }: EnvironmentVarsEditorPr
   }, [localEnv, onChange]);
 
   return (
-    <Field label="Environment Variables" hint="Per-server vLLM overrides. Safe global defaults from Settings are merged first; these values win.">
+    <Field label="Environment Variables" help="Per-server overrides for vLLM. Variables can change performance or stability (e.g. CUDA/NCCL/Triton); none change model RAM directly. Bad values can prevent startup." hint="Per-server vLLM overrides. Safe global defaults from Settings are merged first; these values win.">
       <div className="space-y-2">
         {/* Per-server Overrides */}
         <div className="space-y-1">
