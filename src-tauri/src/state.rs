@@ -931,6 +931,9 @@ pub struct PersistedConfig {
     pub memory_settings: MemorySettings,
     #[serde(default)]
     pub advanced_settings: AdvancedSettings,
+    /// Persisted NSIS installation directory for reliable updater targeting
+    #[serde(default)]
+    pub app_install_dir: Option<String>,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
     #[serde(default = "default_true")]
@@ -1014,6 +1017,7 @@ impl Default for PersistedConfig {
             auto_check_updates: true,
             imported_local_models: Vec::new(),
             default_env,
+            app_install_dir: None,
         }
     }
 }

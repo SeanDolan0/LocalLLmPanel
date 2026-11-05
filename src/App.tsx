@@ -52,6 +52,7 @@ function SidebarDownloadIndicator() {
 export default function App() {
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [updateBanner, setUpdateBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -68,6 +69,26 @@ export default function App() {
       .then((info) => {
         if (info.available) {
           setUpdateInfo(info);
+        }
+      })
+      .catch(() => {});
+
+    // Check if an update attempt just completed or failed
+    api.lastUpdateStatus()
+      .then((status) => {
+        if (status) {
+          if (status.status === "success") {
+            const ver = status.expected_version ? ` to v${status.expected_version.replace(/^v/, "")}` : "";
+            setUpdateBanner({
+              type: "success",
+              message: `Restarted successfully with update${ver}.`,
+            });
+          } else if (status.status === "failed") {
+            setUpdateBanner({
+              type: "error",
+              message: `Update installation failed: ${status.message}. Diagnostic log: %TEMP%\\LocalLLMPanel-updates\\update-apply.log`,
+            });
+          }
         }
       })
       .catch(() => {});
@@ -153,6 +174,27 @@ export default function App() {
 
           {/* Main */}
           <main className="flex-1 overflow-y-auto">
+            {updateBanner && (
+              <div
+                className={`flex items-center justify-between px-4 py-2.5 text-xs border-b ${
+                  updateBanner.type === "success"
+                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                    : "bg-red-500/10 border-red-500/30 text-red-300"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span>{updateBanner.type === "success" ? "✓" : "⚠️"}</span>
+                  <span>{updateBanner.message}</span>
+                </div>
+                <button
+                  onClick={() => setUpdateBanner(null)}
+                  className="text-slate-400 hover:text-slate-200 ml-4 font-bold"
+                  title="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
             <ErrorBoundary variant="page" dismissLabel="Back to search">
               <Routes>
                 <Route path="/" element={<Dashboard />} />

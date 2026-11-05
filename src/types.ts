@@ -326,6 +326,7 @@ export interface Settings {
   launch_at_login?: boolean;
   auto_shutdown_wsl?: boolean;
   auto_check_updates?: boolean;
+  app_install_dir?: string | null;
   default_env?: Record<string, string>;
   llamacpp_channels?: Record<string, LlamaCppChannelConfig | undefined>;
   llamacpp_forks?: LlamaCppFork[];
@@ -733,6 +734,15 @@ export interface AppUpdateProgress {
 export interface UpdateLaunchResult {
   success: boolean;
   message: string;
+}
+
+export interface LastUpdateStatus {
+  status: "success" | "failed";
+  message: string;
+  exit_code?: number | null;
+  expected_version?: string | null;
+  target_exe?: string | null;
+  timestamp?: string | null;
 }
 
 export interface LogicalGgufArtifact {

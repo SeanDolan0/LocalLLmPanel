@@ -41,6 +41,7 @@ import type {
   AppUpdateInfo,
   AppUpdateProgress,
   UpdateLaunchResult,
+  LastUpdateStatus,
   LogicalGgufArtifact,
   DownloadJob,
   DownloadProgressPayload,
@@ -213,6 +214,8 @@ export const api = {
     invoke<AppUpdateInfo>("check_app_update", { force: force ?? null }),
   downloadAndInstallUpdate: () =>
     invoke<UpdateLaunchResult>("download_and_install_update"),
+  lastUpdateStatus: () =>
+    invoke<LastUpdateStatus | null>("last_update_status"),
   onAppUpdateProgress: (cb: (progress: AppUpdateProgress) => void) =>
     listen<AppUpdateProgress>("app-update-progress", (e) => cb(e.payload)),
   onAppUpdateAvailable: (cb: (info: AppUpdateInfo) => void) =>

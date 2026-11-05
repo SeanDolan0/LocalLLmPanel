@@ -190,6 +190,7 @@ pub fn run() {
             commands::install_cuda_build_tools,
             commands::check_app_update,
             commands::download_and_install_update,
+            commands::last_update_status,
             commands::discovery_feed,
             commands::inspect_model_artifacts,
             commands::download_start,

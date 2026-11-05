@@ -4610,6 +4610,11 @@ pub async fn download_and_install_update(
     crate::updater::download_and_install_update(app, state).await
 }
 
+#[tauri::command]
+pub async fn last_update_status() -> Result<Option<crate::updater::LastUpdateStatus>, String> {
+    Ok(crate::updater::read_last_update_status())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

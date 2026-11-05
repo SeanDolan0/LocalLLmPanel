@@ -138,7 +138,7 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
                   {progress.phase === "verifying"
                     ? "Verifying checksum (SHA256)..."
                     : progress.phase === "ready"
-                    ? "Installing silently & restarting..."
+                    ? "Update verified. Preparing installer..."
                     : "Downloading update..."}
                 </span>
                 <span className="text-indigo-300">{progress.percent.toFixed(1)}%</span>
@@ -159,11 +159,19 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
             </div>
           )}
 
-          {/* Success notice */}
+          {/* Handoff notice */}
           {launchSuccess && (
             <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3.5 text-xs text-emerald-300 space-y-1">
-              <div className="font-semibold text-emerald-200">✓ Restarting to finish the update</div>
+              <div className="font-semibold text-emerald-200">✓ Closing to apply update</div>
               <div>{launchSuccess}</div>
+            </div>
+          )}
+
+          {/* Previous Error notice */}
+          {info.error && !error && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs text-amber-300 space-y-1">
+              <div className="font-semibold text-amber-200">Previous Update Notice</div>
+              <div>{info.error}</div>
             </div>
           )}
 
