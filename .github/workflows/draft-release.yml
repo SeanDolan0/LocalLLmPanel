@@ -27,7 +27,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
 
