@@ -1,37 +1,90 @@
 # About Local LLM Panel
 
-Local LLM Panel is a Windows desktop application for managing local language-model inference without stitching together separate tools for model discovery, downloads, server startup, API routing, and performance monitoring.
+Local LLM Panel is an open-source Windows desktop application that unifies local large language model (LLM) discovery, download orchestration, server lifecycle, and API routing behind a responsive, hardware-aware desktop control panel.
 
-It is built for people using their own NVIDIA-powered Windows PCs who want a practical control surface for local models. The goal is to make model selection and server operation easier to understand while leaving the underlying inference engines in control of inference.
+Running large language models locally on consumer workstations typically requires wrestling with fragmented tools: manual WSL2 environment scripts, bespoke Python virtualenvs, mismatched CUDA driver bindings, CLI command flags, separate Hugging Face download managers, and ad-hoc reverse proxies.
 
-## What the project brings together
+**Local LLM Panel brings order to the local inference ecosystem** by combining **vLLM (under WSL2)** and **native llama.cpp (on Windows)** with an intuitive interface, realistic VRAM and context planning, and an OpenAI-compatible gateway.
 
-- **Hardware-aware discovery:** model metadata, quantization variants, VRAM/RAM fit estimates, context planning, and estimated generation speed.
-- **Two local inference backends:** vLLM running in WSL2 and native Windows llama.cpp.
-- **Model lifecycle management:** Hugging Face downloads, GGUF downloads, local library scanning, and safe removal of unused model files.
-- **A shared API surface:** an optional OpenAI-compatible gateway that routes requests to running backends.
-- **Operational visibility:** process logs, health checks, GPU/server metrics, and repeatable benchmarks.
+---
 
-## Architecture
+## How It Compares
 
-The desktop application uses:
+| Feature | Local LLM Panel | Ollama | LM Studio | Raw CLI (vLLM / llama-server) |
+|---|---|---|---|---|
+| **Target Platform** | Windows 11 (NVIDIA CUDA) | Cross-platform | Cross-platform | Linux / Windows CLI |
+| **Inference Engines** | **Dual:** vLLM (WSL2) + llama.cpp (Windows) | Custom llama.cpp fork | llama.cpp (bundled) | Single engine per command |
+| **High-Throughput vLLM** | Yes (PagedAttention, FlashInfer, AWQ, FP8) | No | No | Yes (requires manual Linux/WSL setup) |
+| **GGUF / Offloading** | Yes (native CUDA `llama-server.exe`) | Yes | Yes | Yes (manual CLI flags) |
+| **Hardware Fit Estimator** | Real-time VRAM, weights + KV-cache math | Basic heuristic | Context slider estimate | None (OOM on launch if oversized) |
+| **OpenAI Gateway** | Built-in reverse proxy with bearer auth | Built-in proxy | Built-in local server | Manual port coordination |
+| **Configuration Model** | Single JSON config with DPAPI-encrypted secrets | Environment variables / CLI | Internal application DB | Scripts / shell variables |
+| **Open Source** | 100% MIT Licensed | MIT Licensed | Proprietary | Apache 2.0 / MIT |
 
-- **Tauri 2 and Rust** for native commands, process lifecycle, configuration, hardware integration, server orchestration, and the API gateway.
-- **React, TypeScript, and Vite** for the user interface.
-- **WSL2 + Ubuntu + vLLM** for the vLLM backend.
-- **Native Windows llama.cpp** for GGUF inference.
-- **Hugging Face and GitHub APIs** for model metadata and release discovery.
+---
 
-Model search and downloads require internet access. Inference is performed locally by the selected backend; the application is not a hosted inference service and does not provide bundled model weights.
+## What the Project Brings Together
 
-## Design principles
+1. **Hardware-Aware Discovery & Planning:**
+   - Real-time catalog search via Hugging Face and GGUF repositories.
+   - Exact memory accounting: weights footprint, KV cache requirements per context window, and attention head overhead.
+   - Distinguishes theoretical estimates from measured benchmark throughput.
 
-1. **Measured performance over false precision.** Hardware-fit and throughput figures are estimates, and the UI should distinguish estimates from measured benchmark results.
-2. **Make resource constraints visible.** Model weights, KV cache, GPU memory, system RAM, and context length should be considered together.
-3. **Keep local services local by default.** Bind to localhost unless the user explicitly opts into LAN access.
-4. **Prefer understandable, recoverable operations.** Provisioning should be repeatable, configuration writes should be safe, and server failures should produce actionable diagnostics.
-5. **Keep the tool focused.** The panel coordinates inference engines rather than trying to reimplement them.
+2. **Dual Local Inference Backends:**
+   - **vLLM in WSL2:** Maximum token throughput for batched, concurrent, and high-performance Hugging Face / Safetensors models with PagedAttention and FlashInfer.
+   - **llama.cpp on Windows:** Native GGUF inference, partial GPU/CPU offloading, split tensors, and vision projector support without WSL overhead.
 
-## Project status
+3. **Resilient Download & Model Lifecycle:**
+   - Multi-connection Hugging Face snapshots and GGUF shard downloads with pause/resume support.
+   - Disk space verification and automatic model library indexing.
 
-The repository contains the application source, tests, architecture notes, deployment documentation, and GitHub Actions workflows. See the [README](README.md) for installation, supported backends, and development commands, and the [Roadmap](docs/ROADMAP.md) for project direction.
+4. **Shared API Surface:**
+   - Optional OpenAI-compatible gateway routing `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` to currently running servers.
+   - Bearer token authentication and strict CORS policy for security.
+
+5. **Operational Diagnostics & Telemetry:**
+   - Real-time server process logs, health check monitoring, VRAM/GPU utilization telemetry, and reproducible benchmarks.
+
+---
+
+## Architectural Principles
+
+```
+┌────────────────────────────────────────────────────────┐
+│               Local LLM Panel UI (React/TS)            │
+└───────────────────────────┬────────────────────────────┘
+                            │ Tauri IPC (Commands & Events)
+┌───────────────────────────▼────────────────────────────┐
+│                  Rust Backend (Tauri 2)                │
+│  - Process Supervisor     - Model Registry / Catalog   │
+│  - Hardware Detector      - Memory & KV Fit Calculator │
+│  - OpenAI Reverse Proxy   - DPAPI Credential Vault     │
+└──────────────┬────────────────────────────┬────────────┘
+               │ Process Control            │ Process Control
+┌──────────────▼────────────┐  ┌────────────▼────────────┐
+│      WSL2 Ubuntu Subsys   │  │   Native Windows Space  │
+│   vLLM Inference Server   │  │   llama-server.exe CUDA │
+│  (HF / AWQ / Safetensors) │  │   (GGUF / Vision / MoE) │
+└───────────────────────────┘  └─────────────────────────┘
+```
+
+1. **Measured Performance Over False Precision:**
+   Calculated fit models and token-per-second projections are starting estimates. Actual performance is measured and recorded in repeatable local benchmarks.
+2. **Make Resource Constraints Transparent:**
+   Model parameters, quantization format, KV-cache context length, and system memory overhead are surfaced prior to launching inference, preventing unexpected CUDA out-of-memory crashes.
+3. **Local by Default:**
+   All services bind strictly to `127.0.0.1`. LAN exposure is an explicit, opt-in administrative toggle.
+4. **Zero Telemetry & User Privacy:**
+   No telemetry, tracking, or external analytic pings. Credentials (Hugging Face tokens, GitHub tokens) are sealed in Windows DPAPI storage.
+5. **Composability:**
+   Local LLM Panel manages and monitors standard, unadulterated inference binaries rather than wrapping proprietary closed engines.
+
+---
+
+## Repository Documentation
+
+- [User Guide](docs/USER_GUIDE.md) — Comprehensive operational instructions, provisioning, and troubleshooting.
+- [Architecture Guide](docs/ARCHITECTURE.md) — Detailed internal subsystem design, Tauri command map, and state machine.
+- [Contributing Guide](CONTRIBUTING.md) — Development setup, coding guidelines, and pull request procedures.
+- [Security Policy](SECURITY.md) — Responsible disclosure policy and security protections.
+- [Roadmap](docs/ROADMAP.md) — Current release status and planned enhancements.

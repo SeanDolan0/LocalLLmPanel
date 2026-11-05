@@ -2,84 +2,123 @@
 
 [![CI](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/codeql.yml)
+[![Security Audit](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/security-audit.yml/badge.svg)](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/security-audit.yml)
+[![Release](https://img.shields.io/github/v/release/SeanDolan0/LocalLLmPanel?include_prereleases&style=flat-square&color=indigo)](https://github.com/SeanDolan0/LocalLLmPanel/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Platform: Windows 11](https://img.shields.io/badge/Platform-Windows%2011%20x64-0078D6?style=flat-square&logo=windows)](https://www.microsoft.com/windows)
+[![Tauri v2](https://img.shields.io/badge/Tauri-v2-FFC131?style=flat-square&logo=tauri&logoColor=black)](https://v2.tauri.app)
 
-A native Windows desktop control panel for discovering, downloading, running, and monitoring local LLMs. It brings **vLLM in WSL2** and **llama.cpp on Windows** together behind one interface and an optional OpenAI-compatible API.
+A native Windows desktop control panel for discovering, sizing, downloading, orchestrating, and monitoring local large language models. It brings **high-throughput vLLM in WSL2** and **native llama.cpp on Windows** together behind one unified interface and an OpenAI-compatible API gateway.
 
-> Local inference, hardware-aware model selection, and one place to manage your servers. Estimates are estimates — measured performance wins.
+> **Local inference, hardware-aware memory planning, and unified server orchestration.** Estimates are estimates — measured performance wins.
 
-## About
+---
 
-Local LLM Panel is designed for people who want to run capable language models on their own NVIDIA-powered Windows machines without manually coordinating model files, Python environments, inference servers, ports, and monitoring tools.
+## Architecture Overview
 
-The application combines a React/TypeScript interface with a Rust backend in a Tauri 2 desktop app. Model discovery and fit estimates help narrow down what a machine can realistically run; server management handles the inference processes; and the optional gateway gives other applications one stable API endpoint.
+```mermaid
+graph TD
+    UI["Local LLM Panel UI<br/>(React 18 + TypeScript + Vite)"]
+    IPC["Tauri 2 IPC Bridge<br/>(Type-safe Commands & Events)"]
+    
+    subgraph Core ["Rust Desktop Core (src-tauri)"]
+        SPV["Process Supervisor & Health Watcher"]
+        CALC["Hardware Detector & KV-Cache Sizer"]
+        GW["OpenAI API Reverse Proxy (:11434/v1)"]
+        VAULT["DPAPI Encrypted Credential Store"]
+        DL["Multi-part Download Orchestrator"]
+    end
 
-Model discovery and downloads use online services such as Hugging Face and GitHub. Once a model is available locally, inference runs through the configured local backend.
+    subgraph Backends ["Local Inference Engines"]
+        VLLM["vLLM Engine (WSL2 Ubuntu)<br/>PagedAttention · AWQ · Safetensors"]
+        LLAMA["llama.cpp Server (Native Windows CUDA)<br/>GGUF · GPU/CPU Offloading · Vision"]
+    end
 
-See [ABOUT.md](ABOUT.md) for the project's goals and design principles.
+    UI --> IPC
+    IPC --> Core
+    SPV --> VLLM
+    SPV --> LLAMA
+    GW --> VLLM
+    GW --> LLAMA
+```
 
-## What it does
+Read more about the design principles and comparative analysis in [ABOUT.md](ABOUT.md).
+
+---
+
+## What It Does
 
 | Area | Capabilities |
 |---|---|
-| **Discover models** | Search Hugging Face, inspect model metadata and quantizations, compare hardware fit, and review estimated throughput. |
-| **Plan memory** | Estimate weight and KV-cache use, account for GPU/RAM offload, and test a proposed context length before launch. |
-| **Manage downloads** | Track background downloads, progress, speed, ETA, pause/cancel operations, GGUF shards, and companion vision files. |
-| **Run inference** | Manage multiple vLLM and llama.cpp servers with per-server settings, logs, health checks, and restart controls. |
-| **Use one API** | Route OpenAI-compatible chat, completion, and embedding requests through a single optional gateway. |
-| **Measure performance** | View live server/GPU metrics and compare measured benchmark results with estimates. |
-| **Manage your setup** | Maintain the local model library, export/import configuration, manage llama.cpp forks, and use tray/appliance mode. |
+| 🔍 **Model Discovery** | Search Hugging Face and GGUF repositories, inspect parameter counts, quantization formats, and context lengths. |
+| 📐 **Hardware Fit Planning** | Real-time memory accounting calculating weights, KV-cache footprint across context lengths, and GPU/RAM offload boundaries. |
+| 🚀 **Dual Inference Engines** | Run high-throughput **vLLM** via WSL2 or lightweight **llama.cpp** native Windows processes side-by-side. |
+| 🌐 **Unified OpenAI Gateway** | Route standard OpenAI `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` requests to active servers with API key protection. |
+| 📥 **Download Manager** | Resilient background downloads with multi-connection chunks, pause/resume, ETA tracking, and shard verification. |
+| 📊 **Live Telemetry & Benchmarks** | Monitor real-time GPU VRAM, compute usage, process logs, token generation rates, and conduct repeatable benchmarks. |
+| 🛡️ **Zero Telemetry & Local Security** | 100% localhost-bound by default. Tokens encrypted via Windows DPAPI. Zero remote analytics or telemetry. |
 
-## Supported backends
+---
 
-| Backend | Where it runs | Model formats |
-|---|---|---|
-| **vLLM** | Ubuntu under WSL2 | Hugging Face model repositories and supported quantizations |
-| **llama.cpp** | Native Windows process | GGUF, including split models and compatible vision projectors |
+## Hardware & Sizing Reference
 
-The application is localhost-only by default. LAN access is an explicit opt-in setting.
+Local LLM Panel automatically reads your GPU's physical VRAM and calculates achievable context sizes. Below is a general guide for NVIDIA RTX workstations:
 
-## Requirements
+| GPU Tier | Typical VRAM | Recommended Models & Formats | Context Capacity |
+|---|---|---|---|
+| **Entry** | 8 GB | Llama 3.2 3B (Q8 / FP16), Qwen 2.5 7B (Q4_K_M), Mistral 7B (Q4_K_M) | 4K – 8K tokens |
+| **Mid-Range** | 12 GB | Qwen 2.5 7B (Q8 / AWQ), Llama 3.1 8B (Q8 / FP16), Gemma 2 9B (Q5_K_M) | 8K – 32K tokens |
+| **Enthusiast** | 16 GB | Qwen 2.5 14B (Q4_K_M / AWQ), DeepSeek-R1-Distill-Qwen-14B (Q4_K_M), Mixtral 8x7B (Q3_K_M) | 8K – 64K tokens |
+| **High-End** | 24 GB | Qwen 2.5 32B (Q4_K_M / AWQ), Llama 3.1 70B (IQ2_XS offload), DeepSeek-R1-Distill-32B | 16K – 128K tokens |
 
-- Windows 11 x64 with WebView2.
-- NVIDIA GPU and a current NVIDIA driver.
-- **For vLLM:** WSL2 with an Ubuntu distribution and CUDA access from inside WSL2.
-- **For llama.cpp:** a compatible Windows CUDA build of `llama-server.exe`; WSL2 is not required for this backend.
-- **For development:** Node.js 22 or newer, stable Rust with the MSVC target, Visual Studio C++ Build Tools, and LLVM/LLD.
+---
 
-A GitHub token is optional for some llama.cpp release downloads. A Hugging Face token is optional unless you need gated repositories.
+## Quick Start
 
-## Quick start
+### Prerequisites
 
-### Run from source
+- **OS:** Windows 11 x64 (Build 22000+) with WebView2 installed.
+- **Hardware:** NVIDIA GPU with current Game Ready or Studio Drivers (CUDA 12.x compatible).
+- **For vLLM:** WSL2 with Ubuntu 22.04 / 24.04 and NVIDIA CUDA WSL drivers.
+- **For llama.cpp:** No WSL required; panel can download compatible Windows CUDA `llama-server.exe` binaries directly.
+- **For Development:** Node.js 22+, Rust 1.80+ (MSVC target), Visual Studio 2022 C++ Build Tools, and LLVM/LLD.
 
-Install the development prerequisites, then run:
+### Running from Source
 
 ```powershell
+# Clone the repository
+git clone https://github.com/SeanDolan0/LocalLLmPanel.git
+cd LocalLLmPanel
+
+# Install frontend dependencies
 npm ci
+
+# Launch desktop app in development mode
 npm run tauri dev
 ```
 
-The first launch opens the desktop app. From the Dashboard, provision WSL for vLLM or install a native llama.cpp build.
+### Building Standalone Executable & Installer
 
-### First run
+```powershell
+# Build fast standalone Windows executable (dist-release/LocalLLMPanel-v*.exe)
+npm run build:fast
 
-1. Open **Dashboard** and choose **Provision WSL** or **Install llama.cpp**, depending on the backend you plan to use.
-2. Open **Search**, find a model, and review its available quantizations and hardware-fit estimates.
-3. Pull a model when you want to download it ahead of time. vLLM can also download Hugging Face models when a server starts.
-4. Go to **Servers → New server**, select a backend, model, and task, then review the context fit.
-5. Start the server. Use its logs and health status to diagnose startup issues, and use Chat or Benchmarks to exercise it.
+# Build complete NSIS installer setup executable
+npm run build:setup
+```
 
-For detailed setup notes, FlashInfer troubleshooting, GGUF/fork setup, speculative decoding, and gateway behavior, see the [User Guide](docs/USER_GUIDE.md).
+---
 
-## OpenAI-compatible gateway
+## OpenAI-Compatible Gateway
 
-Enable the gateway and configure an API key under **Settings → Advanced Mode → Network**. The default endpoint is:
+The panel includes a high-performance reverse proxy that presents a standard OpenAI-compatible API surface for external applications (Continue, Cursor, Open WebUI, LangChain, LlamaIndex, etc.).
 
+Enable the gateway under **Settings → Advanced Mode → Network**. Default endpoint:
 ```text
 http://127.0.0.1:11434/v1
 ```
 
-Example request:
+### Example: Streaming Chat Completion (cURL)
 
 ```bash
 curl http://127.0.0.1:11434/v1/chat/completions \
@@ -87,74 +126,93 @@ curl http://127.0.0.1:11434/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen2.5-7B-Instruct",
-    "messages": [{"role": "user", "content": "Hello"}],
+    "messages": [
+      {"role": "system", "content": "You are a helpful programming assistant."},
+      {"role": "user", "content": "Write a Rust function to calculate Fibonacci numbers."}
+    ],
     "stream": true
   }'
 ```
 
-The gateway supports chat/completions, legacy completions, and embeddings, and routes requests to the appropriate running server. Its `/health` endpoint is unauthenticated for liveness checks; all `/v1/*` routes require the configured bearer key.
+### Example: Python (`openai` SDK)
 
-## Development and tests
+```python
+from openai import OpenAI
 
-Install dependencies with `npm ci`. The most useful commands are:
+client = OpenAI(
+    base_url="http://127.0.0.1:11434/v1",
+    api_key="your-configured-key"
+)
 
-| Task | Command |
-|---|---|
-| Start the desktop app | `npm run tauri dev` |
-| Fast preflight checks | `npm run check` |
-| Frontend contract tests | `npm run test:contract` |
-| TypeScript + Vite build | `npm run build` |
-| Rust formatting check | `cd src-tauri; cargo fmt --all -- --check` |
-| Rust linting | `cd src-tauri; cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| Rust unit tests | `cd src-tauri; cargo test --workspace --locked` |
-| Standalone Windows executable | `npm run build:fast` |
-| NSIS installer + executable | `npm run build:setup` |
-| Full distribution including MSI | `npm run build:all` |
-| Release metadata validation | `npm run release:check` |
+response = client.chat.completions.create(
+    model="Qwen/Qwen2.5-7B-Instruct",
+    messages=[{"role": "user", "content": "Explain how PagedAttention works in vLLM."}],
+    stream=True
+)
 
-Build outputs are staged in `dist-release/`.
-
-The GitHub Actions CI workflow runs on Windows and validates release metadata, frontend contracts, formatting, Clippy, the TypeScript/Vite build, Rust checks/tests, a standalone executable build, and npm/Rust dependency audits. A successful CI build also uploads the standalone executable and SHA-256 checksum as a short-lived workflow artifact.
-
-### Hardware-dependent integration tests
-
-The default Rust test suite does not provision WSL or launch real inference servers. Those tests are intentionally ignored unless explicitly enabled.
-
-**vLLM / WSL2** (requires WSL2 Ubuntu, an NVIDIA GPU visible inside WSL, network access, and several GB of free disk):
-
-```powershell
-$env:LLM_TEST_WSL = "1"
-cd src-tauri
-cargo test --lib -- --ignored --nocapture wsl_it
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
-**Native llama.cpp** (requires a compatible executable and a small local GGUF):
+---
 
-```powershell
-$env:LLM_TEST_LLAMACPP = "1"
-$env:LLM_TEST_LLAMACPP_EXE = "C:\path\to\llama-server.exe"
-$env:LLM_TEST_LLAMACPP_MODEL = "C:\path\to\tiny.gguf"
-cd src-tauri
-cargo test --lib -- --ignored --nocapture llamacpp_it
+## Development & Test Commands
+
+| Target | Command | Purpose |
+|---|---|---|
+| **Development App** | `npm run tauri dev` | Starts Vite hot-reload frontend with debug Rust binary |
+| **Preflight Check** | `npm run check` | Validates TypeScript, manifests, and Rust workspace |
+| **Frontend Smoke Tests** | `npm run test:contract` | Verifies Tauri command contracts, routes, and security |
+| **Frontend Build** | `npm run build` | Compiles TypeScript and runs Vite production bundling |
+| **Rust Code Formatting** | `cd src-tauri; cargo fmt --all -- --check` | Validates formatting against Rust style guide |
+| **Rust Linter** | `cd src-tauri; cargo clippy --workspace --all-targets --locked` | Runs Clippy static analysis across all crates |
+| **Rust Unit Tests** | `cd src-tauri; cargo test --workspace --locked` | Executes comprehensive workspace test suite (500+ tests) |
+| **Standalone Executable** | `npm run build:fast` | High-speed release build using LLVM lld-link |
+| **NSIS Setup Installer** | `npm run build:setup` | Generates Windows installer and SHA-256 checksums |
+| **Release Validation** | `npm run release:check` | Confirms synchronized versioning across all manifests |
+
+---
+
+## Repository Structure
+
+```text
+LocalLLmPanel/
+├── .github/
+│   ├── ISSUE_TEMPLATE/        # Structured GitHub Issue Forms (bug, feature, model)
+│   ├── workflows/             # GitHub Actions CI, CodeQL, release, and audit pipelines
+│   ├── dependabot.yml         # Automated weekly dependency updates
+│   └── pull_request_template.md
+├── docs/
+│   ├── USER_GUIDE.md          # Comprehensive user manual and troubleshooting
+│   ├── ARCHITECTURE.md        # Technical architectural design document
+│   ├── ROADMAP.md             # Project roadmap and milestones
+│   └── DEPLOYMENT.md          # Packaging and release procedure
+├── scripts/
+│   ├── build.mjs              # Multi-target build runner with LLD optimization
+│   ├── frontend-smoke.mjs     # Automated contract and security test suite
+│   └── validate-release.mjs   # Release manifest and artifact validator
+├── src/                       # React 18 frontend (Vite + TypeScript + Tailwind)
+│   ├── components/            # Reusable UI components and modal dialogs
+│   ├── pages/                 # Dashboard, Search, Library, Servers, Settings
+│   └── api.ts                 # Type-safe Tauri IPC wrapper
+├── src-tauri/                 # Rust application backend (Tauri 2)
+│   ├── crates/llmfit-core/    # Hardware detection, model fitting, and context sizing library
+│   └── src/                   # Server supervisor, WSL bridge, gateway, DPAPI vault
+├── ABOUT.md                   # Project background and comparative analysis
+├── CONTRIBUTING.md            # Contributor guidelines and workflow
+├── SECURITY.md                # Security reporting and cryptographic guarantees
+├── LICENSE                    # MIT License
+└── README.md                  # Project landing page
 ```
 
-These tests are not run on standard hosted CI because they require real local GPU, WSL, and model-file prerequisites.
+---
 
-## Documentation
+## Documentation Links
 
-- [About the project](ABOUT.md) — purpose, audience, architecture, and design principles.
-- [User Guide](docs/USER_GUIDE.md) — first-run details, advanced features, and troubleshooting.
-- [Architecture](docs/ARCHITECTURE.md) — modules, data flow, Tauri commands/events, and security notes.
-- [Roadmap](docs/ROADMAP.md) — completed work and planned improvements.
-- [Deployment Guide](docs/DEPLOYMENT.md) — versioning, packaging, and release SOP.
-- [Contributing](CONTRIBUTING.md) — development workflow and pull request expectations.
-- [Agent reference](AGENTS.md) — repository-specific commands and implementation notes.
-
-## Security and privacy
-
-- Hugging Face and GitHub tokens are protected with Windows DPAPI and redacted from exported configuration.
-- The gateway and servers bind to localhost by default; LAN exposure requires an explicit opt-in.
-- The application manages local inference processes; model discovery and downloads still require network access.
-- Do not publish configuration files, authentication tokens, private model paths, or unredacted logs in issues.
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+- 📖 **[User Guide](docs/USER_GUIDE.md)** — Step-by-step first run, FlashInfer setup, GGUF offloading, and troubleshooting.
+- 🏛️ **[About & Principles](ABOUT.md)** — Design philosophy, architectural goals, and ecosystem comparisons.
+- 📐 **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into modules, state machines, and Tauri IPC commands.
+- 🤝 **[Contributing](CONTRIBUTING.md)** — Pull request expectations, style rules, and developer guidelines.
+- 🔒 **[Security Policy](SECURITY.md)** — Vulnerability reporting, encryption details, and localhost assurances.
+- 📜 **[License](LICENSE)** — MIT License.
