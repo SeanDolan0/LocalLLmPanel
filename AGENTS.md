@@ -4,15 +4,20 @@ Tauri 2 (Rust + React/TypeScript) desktop app managing vLLM in WSL2 and native l
 
 ## Quick Commands
 
-| Task | Command | Time |
-|------|---------|------|
-| Dev server | `npm run tauri dev` | — |
-| Preflight (typecheck + cargo check) | `npm run check` | ~3s |
-| Fast binary | `npm run build:fast` | ~20s |
-| Standard release (NSIS installer) | `npm run build:setup` | ~40s |
-| Full dist (NSIS + MSI) | `npm run build:all` | ~2–3m |
-| Unit tests | `cd src-tauri && cargo test` | ~5–10s |
-| WSL integration test (gated) | `cd src-tauri && $env:LLM_TEST_WSL="1"; cargo test --lib -- --ignored --nocapture wsl_it` | — |
+| Task | Command |
+|------|---------|
+| Dev server | `npm run tauri dev` |
+| Preflight (type check + cargo check + frontend contracts) | `npm run check` |
+| Release metadata | `npm run release:check` |
+| Frontend contract tests | `npm run test:contract` |
+| Frontend build | `npm run build` |
+| Rust formatting | `cd src-tauri && cargo fmt --all -- --check` |
+| Rust lint | `cd src-tauri && cargo clippy --workspace --all-targets --locked` |
+| Unit tests | `cd src-tauri && cargo test --workspace --locked` |
+| Fast binary | `npm run build:fast` |
+| Standard release (NSIS installer) | `npm run build:setup` |
+| Full dist (NSIS + MSI) | `npm run build:all` |
+| WSL integration test (gated) | `$env:LLM_TEST_WSL="1"; cd src-tauri; cargo test --lib -- --ignored --nocapture wsl_it` |
 
 ## Version Synchronization (4 files)
 
@@ -22,7 +27,7 @@ Update **all four** on version bump:
 3. `src-tauri/Cargo.toml` → `version = "x.y.z"`
 4. `src-tauri/tauri.conf.json` → `"version": "x.y.z"`
 
-Build script (`scripts/build.mjs`) warns on mismatch.
+Build script and `npm run release:check` validate version synchronization.
 
 ## Build Gotchas
 
@@ -33,9 +38,13 @@ Build script (`scripts/build.mjs`) warns on mismatch.
 
 ## Test Notes
 
-- Unit tests run via `cargo test` (estimate math, port alloc, config round-trip, llmfit-core).
-- WSL integration test is `#[ignore]`-gated; requires WSL2 Ubuntu + NVIDIA GPU + ~5GB disk.
-- Set `LLM_TEST_WSL=1` to run; skips if `nvidia-smi` unavailable in WSL.
+- Frontend contract checks run with `npm run test:contract`.
+- Rust unit tests run with `cargo test --workspace --locked` (estimate math, port allocation, config round-trip, llmfit-core, and related modules).
+- CI runs on Windows and validates metadata, contracts, Rust formatting/lint/tests, frontend build, standalone executable build, and npm/Rust dependency audits.
+- WSL integration tests are `#[ignore]`-gated; they require WSL2 Ubuntu + NVIDIA GPU + ~5GB disk.
+- Set `LLM_TEST_WSL=1` to run; the test may skip if `nvidia-smi` is unavailable in WSL.
+- Native llama.cpp integration tests require a compatible local executable and a small GGUF; see the README test instructions.
+- GPU/WSL end-to-end tests are intentionally not part of standard hosted CI.
 
 ## Architecture Highlights
 
@@ -47,20 +56,25 @@ Build script (`scripts/build.mjs`) warns on mismatch.
 
 ## Release Workflow
 
-1. `npm run check` + `cd src-tauri && cargo test`
-2. Bump version in 4 files
-3. `npm run build:setup` (or `build:all`)
-4. Verify `dist-release/` artifacts
-5. `git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock dist-release/`
-6. `git commit -m "release: vX.Y.Z" && git tag -a "vX.Y.Z" -m "Release vX.Y.Z"`
-7. `git push origin main && git push origin "vX.Y.Z"`
-8. `gh release create "vX.Y.Z" dist-release/* --title "vX.Y.Z" --generate-notes`
+1. Run `npm run check`, `npm run test:contract`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked`, and `cargo test --workspace --locked`.
+2. Bump the version in all four files listed above.
+3. Run `npm run release:check`.
+4. Build with `npm run build:setup` (or `npm run build:all` for the MSI).
+5. Verify the contents of `dist-release/` and the adjacent SHA-256 checksums.
+6. Commit and push the versioned source, then create and push an annotated `vX.Y.Z` tag.
+7. The `Draft release` workflow builds and uploads the Windows executable, NSIS installer, and checksums as a **draft** GitHub Release. Review the draft and publish it when ready.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidance and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full manual release SOP.
 
 ## Key Files
 
 - `scripts/build.mjs` — build runner with linker auto-resolution & artifact staging
+- `scripts/validate-release.mjs` — manifest and artifact validation
 - `src-tauri/.cargo/config.toml` — Windows 11 getrandom workaround + lld-link
-- `src-tauri/Cargo.toml` — release profile tuned for speed
+- `src-tauri/Cargo.toml` — workspace and release profile
+- `.github/workflows/ci.yml` — Windows checks and artifact build
+- `.github/workflows/codeql.yml` — scheduled static analysis (JavaScript/TypeScript, Rust, Actions)
+- `.github/workflows/draft-release.yml` — tag-triggered draft releases
 - `docs/DEPLOYMENT.md` — full SOP
 - `docs/ARCHITECTURE.md` — system diagram & module details
 
