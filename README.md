@@ -1,159 +1,87 @@
 # Local LLM Panel
 
-A native Windows desktop app (**Tauri 2** + React/TypeScript) for running local LLMs on your own hardware. It manages **vLLM inside WSL2** and **native Windows llama.cpp** servers from one UI, and exposes everything through a single OpenAI-compatible endpoint.
+[![CI](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/SeanDolan0/LocalLLmPanel/actions/workflows/codeql.yml)
 
-No cloud, no containers, no per-server port juggling. Estimates are estimates — measured data wins.
+A native Windows desktop control panel for discovering, downloading, running, and monitoring local LLMs. It brings **vLLM in WSL2** and **llama.cpp on Windows** together behind one interface and an optional OpenAI-compatible API.
 
-## Highlights
+> Local inference, hardware-aware model selection, and one place to manage your servers. Estimates are estimates — measured performance wins.
 
-### Find & prepare models
-- **Search Hugging Face** live, with real `config.json` context length, architecture, parameter count, and per-GPU **estimated tok/s**.
-- **Quant-aware fit scoring** — AWQ/GPTQ/FP8/BNB repos and GGUF quants are discovered per model and ranked against your actual VRAM. Verdicts: **Comfortable / Constrained / DoesNotFit**.
-- **VRAM → RAM overflow planning** — see usable context on GPU alone and the extended context available by swapping KV cache into WSL2 RAM, plus weight-offload modes. Configurable GPU utilization, overhead, safety reserve, and context cap in **Settings → Advanced Mode → Memory**.
-- **Context fit test** — check a planned context length against current free VRAM/RAM before starting a server.
-- **Download with control** — background pulls with progress, ETA, byte counts, and cancel. GGUF downloads go to a native Windows directory and handle split shards and `mmproj` companions.
-- **Library management** — scan the HF cache and GGUF folders, see per-model disk usage, delete safely (blocked while a server is using the model), or import a local GGUF.
+## About
 
-### Run & observe servers
-- **Run multiple servers concurrently** — instruct and embedding tasks side by side, with per-server quantization, GPU memory utilization, max model length, port, served model name, and API key.
-- **vLLM auto-provisioning (WSL2)** — idempotent phases: apt basics → `uv` venv (CPython 3.12) → vLLM CUDA wheels → torch/GPU verification. Re-running repairs or upgrades.
-- **Native llama.cpp** — install CUDA builds of `llama-server.exe`, use GGUF and `mmproj` vision files, MoE CPU offload, `--fit` auto-fit, Jinja tool calling, per-fork installs, and add custom llama.cpp forks (e.g. PrismML for ternary formats) via Settings → llama.cpp Forks.
-- **Environment variables** — global defaults merged with per-server overrides. Launch scripts are written to WSL files to avoid quoting issues; boolean `VLLM_USE_*` flags are validated.
-- **Live logs and metrics** — streamed logs, request/queue/KV-cache/TTFT/tok-s metrics, per-server metrics panel, and VRAM/GPU sparklines on the Dashboard.
-- **Chat playground** — streaming responses, cancellation, saved conversations, markdown rendering, and an OpenAI tool-call smoke test.
-- **Benchmark suite** — standardized prompt set, prompt/decode tok-s, latency, and history across runs and quants.
-- **Appliance mode** — tray icon (open panel, stop all, quit), minimize-to-tray, start at login, automatic restart of crashed servers, and optional **WSL shutdown when idle**. Fully quitting the app (tray → Quit, or closing the window when minimize-to-tray is off) always stops any servers it launched, including native llama.cpp processes, before the app exits.
+Local LLM Panel is designed for people who want to run capable language models on their own NVIDIA-powered Windows machines without manually coordinating model files, Python environments, inference servers, ports, and monitoring tools.
 
-### One endpoint for every client
-- **OpenAI-compatible gateway** on port `11434` by default:
-  - `GET /v1/models` and `GET /v1/models/{id}` — running instruct and embedding servers with context limits, capabilities, quantization, and thinking metadata.
-  - `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings` — routed by model name to the correct vLLM/llama.cpp server.
-  - `GET /health` — gateway liveness (no authentication).
-  - SSE streaming, CORS handling, and mandatory `Authorization: Bearer <key>` authentication on all `/v1/*` routes.
-- Works with Cursor, Continue.dev, LibreChat, and any OpenAI-compatible client.
-- **Harness-controlled thinking** — the gateway normalizes `reasoning_effort`, `thinking`, Ollama `think`, and `chat_template_kwargs` variants so the client's request wins over launch defaults, mapping standard effort labels onto the target backend generically across all model types.
-- **LAN opt-in** — localhost-only by default; exposing servers or the gateway on `0.0.0.0` requires an explicit consent toggle.
+The application combines a React/TypeScript interface with a Rust backend in a Tauri 2 desktop app. Model discovery and fit estimates help narrow down what a machine can realistically run; server management handles the inference processes; and the optional gateway gives other applications one stable API endpoint.
 
-### Security & portability
-- **DPAPI-encrypted tokens** for Hugging Face and GitHub (Windows Credential Guard); plaintext is never written to disk.
-- **Config export/import** and copy-to-clipboard **server recipes**.
-- **Atomic config writes** and isolated test configs, so a failed save can't destroy the last known-good state.
+Model discovery and downloads use online services such as Hugging Face and GitHub. Once a model is available locally, inference runs through the configured local backend.
+
+See [ABOUT.md](ABOUT.md) for the project's goals and design principles.
+
+## What it does
+
+| Area | Capabilities |
+|---|---|
+| **Discover models** | Search Hugging Face, inspect model metadata and quantizations, compare hardware fit, and review estimated throughput. |
+| **Plan memory** | Estimate weight and KV-cache use, account for GPU/RAM offload, and test a proposed context length before launch. |
+| **Manage downloads** | Track background downloads, progress, speed, ETA, pause/cancel operations, GGUF shards, and companion vision files. |
+| **Run inference** | Manage multiple vLLM and llama.cpp servers with per-server settings, logs, health checks, and restart controls. |
+| **Use one API** | Route OpenAI-compatible chat, completion, and embedding requests through a single optional gateway. |
+| **Measure performance** | View live server/GPU metrics and compare measured benchmark results with estimates. |
+| **Manage your setup** | Maintain the local model library, export/import configuration, manage llama.cpp forks, and use tray/appliance mode. |
+
+## Supported backends
+
+| Backend | Where it runs | Model formats |
+|---|---|---|
+| **vLLM** | Ubuntu under WSL2 | Hugging Face model repositories and supported quantizations |
+| **llama.cpp** | Native Windows process | GGUF, including split models and compatible vision projectors |
+
+The application is localhost-only by default. LAN access is an explicit opt-in setting.
 
 ## Requirements
 
-- Windows 11 (WebView2), NVIDIA GPU and driver
-- **For vLLM:** WSL2 with an Ubuntu distro and a CUDA ≥ 12.4 driver visible inside WSL (`.wslconfig` memory of `24GB` is what the dev machine uses)
-- **For llama.cpp:** a recent CUDA-enabled `llama-server.exe`; WSL provisioning is not required for this backend
-- Rust toolchain (MSVC target; VS Build Tools with "Desktop development with C++"), LLVM/LLD on `PATH`, Node ≥ 20
-- Optional: GitHub token (llama.cpp release downloads), Hugging Face token (gated models)
+- Windows 11 x64 with WebView2.
+- NVIDIA GPU and a current NVIDIA driver.
+- **For vLLM:** WSL2 with an Ubuntu distribution and CUDA access from inside WSL2.
+- **For llama.cpp:** a compatible Windows CUDA build of `llama-server.exe`; WSL2 is not required for this backend.
+- **For development:** Node.js 22 or newer, stable Rust with the MSVC target, Visual Studio C++ Build Tools, and LLVM/LLD.
 
-## Development setup
+A GitHub token is optional for some llama.cpp release downloads. A Hugging Face token is optional unless you need gated repositories.
 
-```bash
-npm install
-npm run tauri dev        # builds the web UI + Rust, launches the app
-```
+## Quick start
 
-Build and release commands:
+### Run from source
 
-```bash
-npm run check              # fast preflight: type check + cargo check (~3s)
-npm run build              # frontend-only TypeScript + Vite build
-npm run build:fast         # fast standalone executable (~20s, no bundling)
-npm run build:setup        # standard release: standalone + NSIS installer (~40s)
-npm run build:all          # full distribution: standalone + NSIS + WiX MSI
-npm run release:check      # validate release metadata/version sync
-npm run test:contract      # frontend API-contract smoke tests
-```
-
-Staged binaries and installers are written to `dist-release/`.
-
-The build runner (`scripts/build.mjs`) locates LLVM's `lld-link.exe` (from `C:\Program Files\LLVM\bin` or Visual Studio VC tools) automatically.
-
-For the release SOP, version-sync rules, and GitHub publishing steps, see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`skills/github-deployment/SKILL.md`](skills/github-deployment/SKILL.md). Agent quick reference: [`AGENTS.md`](AGENTS.md).
-
-## Tests
-
-```bash
-cd src-tauri
-cargo test                                   # unit tests across the workspace
-cargo test --workspace --locked              # same suite as CI
-```
-
-Environment-gated integration tests are `#[ignore]`d by default. They are compiled as lib tests because the standalone integration-test harness has link issues on Windows.
-
-**vLLM/WSL end-to-end** (provisions an isolated venv, starts two servers, checks `/health`, `/v1/models`, chat, `/metrics`, then stops both):
+Install the development prerequisites, then run:
 
 ```powershell
-$env:LLM_TEST_WSL = "1"
-cargo test --lib -- --ignored --nocapture wsl_it
+npm ci
+npm run tauri dev
 ```
 
-Requires ~5 GB disk and network; first run can take 20–60 minutes. It skips if `nvidia-smi` is unavailable in WSL. Server state is written to a temporary config directory, never your real config.
+The first launch opens the desktop app. From the Dashboard, provision WSL for vLLM or install a native llama.cpp build.
 
-**Native llama.cpp end-to-end** (starts `llama-server.exe` with a tiny GGUF, checks health and chat, then verifies shutdown):
+### First run
 
-```powershell
-$env:LLM_TEST_LLAMACPP = "1"
-$env:LLM_TEST_LLAMACPP_EXE = "C:\path\to\llama-server.exe"
-$env:LLM_TEST_LLAMACPP_MODEL = "C:\path\to\tiny.gguf"
-cargo test --lib -- --ignored --nocapture llamacpp_it
+1. Open **Dashboard** and choose **Provision WSL** or **Install llama.cpp**, depending on the backend you plan to use.
+2. Open **Search**, find a model, and review its available quantizations and hardware-fit estimates.
+3. Pull a model when you want to download it ahead of time. vLLM can also download Hugging Face models when a server starts.
+4. Go to **Servers → New server**, select a backend, model, and task, then review the context fit.
+5. Start the server. Use its logs and health status to diagnose startup issues, and use Chat or Benchmarks to exercise it.
+
+For detailed setup notes, FlashInfer troubleshooting, GGUF/fork setup, speculative decoding, and gateway behavior, see the [User Guide](docs/USER_GUIDE.md).
+
+## OpenAI-compatible gateway
+
+Enable the gateway and configure an API key under **Settings → Advanced Mode → Network**. The default endpoint is:
+
+```text
+http://127.0.0.1:11434/v1
 ```
 
-CI (`.github/workflows/ci.yml`) runs release-metadata validation, frontend contract tests, TypeScript/Vite build, `cargo check`, workspace tests, a standalone artifact build, and dependency audits.
-
-## First-run walkthrough
-
-1. Open the app → **Dashboard** → **Provision WSL** (or **Install llama.cpp** if you only want the Windows backend). Progress streams into the provisioning log.
-2. **Search** for a model, e.g. `Qwen2.5-0.5B`. Context, fit verdict, and tok/s are estimates based on your detected hardware.
-3. Review the **quant variants** and optionally **Pull** one first. vLLM can also download at first start.
-4. **Servers → New server** → choose the backend, model, and task (`instruct` or `embed`). Use **Context fit test** to validate your planned context length.
-5. Press **Start**. Logs stream live, `/health` turns green, and the chat drawer becomes available. Measured tok/s replaces the estimate after the first generation run.
-6. **Metrics** shows request, KV-cache, latency, and throughput series; the Dashboard shows VRAM/GPU sparklines.
-7. Optional: **Settings → Advanced Mode → Network** → set an API key, enable the **OpenAI-Compatible Gateway**, and point any client at `http://127.0.0.1:11434/v1`.
-
-### vLLM FlashInfer sampler workaround
-
-vLLM's FlashInfer top-k/top-p sampler JIT-compiles a CUDA kernel on first use, requiring `nvcc`, a C compiler (`gcc`), and `ninja` inside WSL. Without them vLLM fails with `RuntimeError: Could not find nvcc`.
-
-- **Recommended fix (default):** the panel sets `VLLM_USE_FLASHINFER_SAMPLER=0` globally, so vLLM uses its built-in PyTorch sampler and avoids JIT entirely.
-- **Optional full toolkit:** **Dashboard → FlashInfer JIT Ready → Check → Install CUDA Build Tools** installs `gcc`, `python3.12-dev`, `ninja-build`, and a matching NVIDIA CUDA toolkit from the WSL-Ubuntu repo. This downloads several GB and takes 5–15 minutes.
-- When a startup log contains a known failure pattern, the server card shows an actionable hint — including a one-click restart with the FlashInfer sampler disabled, and a pointer to the environment editor for malformed values.
-
-### Native llama.cpp first run
-
-1. **Dashboard → Install llama.cpp**. The installer lists recent releases, selects the highest Windows x64 CUDA build supported by your NVIDIA driver, installs the matching `cudart` archive, and probes `--version` / `--help`. Vulkan and CPU-only archives are never silently substituted.
-2. In **Settings**, review the llama.cpp install directories and GGUF directory, or set a custom `llama-server.exe` path.
-3. Download a GGUF from **Search** (native Windows download) or place an existing `.gguf` in the GGUF directory, or import it from the **Library** page.
-4. In **Servers → New server**, select **llama.cpp (Windows)**, choose the channel (**Upstream** or **PrismML**), and pick the first shard for split files. Use the **MoE auto-fit** preset when the binary supports `--fit`, or set `n_cpu_moe` manually. The PrismML channel adds a **Bonsai 2 / ternary** preset.
-5. Point an external harness at `http://127.0.0.1:<port>/v1`, or use the gateway for stable model discovery. Native logs persist under `%APPDATA%\local-llm-panel\logs`.
-6. Use **Copy log** on a server's log pane when reporting startup failures.
-
-GitHub API access uses a separate optional token; the HF token is never sent to GitHub. A rejected GitHub token is retried anonymously, with diagnostics explaining the fallback. If GitHub is unreachable, download the Windows x64 CUDA zip plus the matching `cudart` zip manually, extract them together, and set **Custom llama-server.exe** in Settings.
-
-### Speculative decoding (optional)
-
-Accelerate inference token generation on `instruct` servers by running a smaller draft model alongside the main model. Speculative decoding is disabled by default per server and preserves existing server behavior when unused.
-
-1. **How to configure:** In **Servers → New/Edit server**, scroll to the **Speculative decoding (optional)** section (available for `instruct` servers only).
-2. **Enable & select a draft model:**
-   - **vLLM (WSL2):** Enter a Hugging Face model repository ID or local path (e.g., `Qwen/Qwen2.5-0.5B-Instruct` drafting for `Qwen/Qwen2.5-7B-Instruct`).
-   - **llama.cpp (Windows native):** Select or browse for a `.gguf` file using the **Browse…** picker (e.g. a 0.5B or 1.5B GGUF draft model).
-3. **Draft tokens:** Set the number of speculative tokens to draft per verification step (default: `5`).
-4. **Important considerations:**
-   - **Tokenizer & Family Compatibility:** The draft model must share the same tokenizer family, vocabulary, and formatting as the main target model (e.g. Qwen 2.5 draft for Qwen 2.5 main; Llama 3.2 draft for Llama 3.1 main).
-   - **Memory Usage:** The draft model weights and draft KV cache consume additional VRAM/RAM beyond the main model. Use the **Context fit test** before starting the server to verify your hardware headroom.
-   - **Backend Support:** Modern vLLM (0.30.0+ and 0.7.0+) automatically uses `--speculative-config`, while vLLM 0.4.0–0.6.x uses model-based flags. Native llama.cpp binaries detect `--model-draft`/`--spec-draft-model` and `--spec-draft-n-max`. If an installed binary does not support speculative decoding, startup fails explicitly with an actionable message instead of silently falling back.
-5. **Recipes & Presets:** Speculative decoding configurations are included when exporting and importing server recipes.
-
-## Using the gateway
-
-Enable it in **Settings → Advanced Mode → Network → OpenAI-Compatible Gateway**, and configure an **API Key** in the same section. The key is required for every `/v1/*` route; a gateway without one returns `503` rather than exposing models to any local process.
+Example request:
 
 ```bash
-curl http://127.0.0.1:11434/v1/models \
-  -H "Authorization: Bearer $LOCAL_LLM_KEY"
-
 curl http://127.0.0.1:11434/v1/chat/completions \
   -H "Authorization: Bearer $LOCAL_LLM_KEY" \
   -H "Content-Type: application/json" \
@@ -164,40 +92,69 @@ curl http://127.0.0.1:11434/v1/chat/completions \
   }'
 ```
 
-- Routing is exact-first (served model name or HF id), then fuzzy suffix, so `Qwen2.5-7B-Instruct` finds `Qwen/Qwen2.5-7B-Instruct`.
-- `/v1/models` reports the effective context limit, quantization, task, and capability/thinking metadata for each running server, including hints when a capability needs a launch flag. The advertised `id` is the served model name or, for llama.cpp, the GGUF file stem rather than a full file path.
-- Model rows expose the same limits under every name harnesses read: `max_model_len`, `context_length`, `max_context_length`, `context_window`, `n_ctx`, `max_output_tokens`, `max_completion_tokens`, and `max_tokens`. Vision support is advertised both as `architecture.input_modalities` and as a top-level `input` array (`["text","image"]`), which is the only shape Pi's compat extension parses.
-- Pi's `pi-openai-compat` extension caches the catalog on first login and does not refresh automatically. After changing servers or model metadata, run `/compat-refresh` (or `/compat-logout` then `/compat-login`) so the new ids and limits appear; otherwise Pi keeps using the old `thinking=no` / 4096-token output caps.
-- Thinking metadata exposes a boolean `reasoning` plus a detailed `reasoning_config` (aliased as `thinking`) with standard `reasoning_effort` controls, levels, and OpenRouter/Pi metadata (`supported_efforts`, `mandatory`, `default_effort`, `thinkingLevelMap`). The gateway canonicalizes standard and extended effort labels across all model types, and rounds llama.cpp efforts onto the effort vocabulary its actual Jinja template accepts (Qwen3.8 only knows `xhigh`/`medium`/`low`, so a harness `high` becomes `xhigh` instead of failing with a Jinja 500).
-- Authentication uses the `Authorization: Bearer <key>` header only. `/health` stays open for liveness checks.
-- Requests that don't touch thinking or token-limit aliases are forwarded byte-for-byte — the gateway does not inject defaults.
+The gateway supports chat/completions, legacy completions, and embeddings, and routes requests to the appropriate running server. Its `/health` endpoint is unauthenticated for liveness checks; all `/v1/*` routes require the configured bearer key.
 
-## Configuration & data locations
+## Development and tests
 
-| Data | Location |
-|------|----------|
-| Config, measured stats, benchmarks | `%APPDATA%\local-llm-panel\config.json` (atomic write) |
-| Conversations | `%APPDATA%\local-llm-panel\conversations.json` |
-| Native llama.cpp logs | `%APPDATA%\local-llm-panel\logs\<server-id>.log` |
-| GGUF models (Windows) | `%APPDATA%\local-llm-panel\gguf` (configurable) |
-| llama.cpp installs | `%APPDATA%\local-llm-panel\llama.cpp\<release-tag>` (configurable per channel) |
-| vLLM venv / logs (WSL) | `~/llm-lp/.venv`, `~/llm-lp/logs` |
-| HF cache (WSL) | `~/.cache/huggingface` (custom `HF_HOME` supported in Advanced) |
+Install dependencies with `npm ci`. The most useful commands are:
 
-Tokens for Hugging Face and GitHub are stored as DPAPI-encrypted blobs and redacted from UI/config-export payloads.
+| Task | Command |
+|---|---|
+| Start the desktop app | `npm run tauri dev` |
+| Fast preflight checks | `npm run check` |
+| Frontend contract tests | `npm run test:contract` |
+| TypeScript + Vite build | `npm run build` |
+| Rust formatting check | `cd src-tauri; cargo fmt --all -- --check` |
+| Rust linting | `cd src-tauri; cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| Rust unit tests | `cd src-tauri; cargo test --workspace --locked` |
+| Standalone Windows executable | `npm run build:fast` |
+| NSIS installer + executable | `npm run build:setup` |
+| Full distribution including MSI | `npm run build:all` |
+| Release metadata validation | `npm run release:check` |
 
-## Notes & gotchas
+Build outputs are staged in `dist-release/`.
 
-- **Version sync:** bump all four files together — `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`. The build script warns on mismatch.
-- **Windows 11 24H2+ crash (0xc0000139):** handled by `src-tauri/.cargo/config.toml` forcing `getrandom_backend="windows_legacy"`.
-- **`lld-link.exe` not found:** run builds through npm scripts, not raw `cargo build`; the build runner injects the LLVM path.
-- **MSVC:** if `link.exe` is not on `PATH`, cargo finds it via vswhere. The `x86_64-pc-windows-gnu` fallback exists but is not needed on the dev machine.
-- **Unknown GPUs** default to ~700 GB/s bandwidth in estimates; the estimate is always labeled and measured data wins.
-- **WSL memory** is controlled by `.wslconfig`, which the app never edits silently. Settings shows it read-only with a copy action.
-- **Gateway binds localhost** unless LAN access is explicitly enabled with the consent warning. Use an API key on any shared network.
-- **Auto-shutdown WSL** only runs when no server, pull, provisioning job, or recent WSL command is active.
-- **Release profile** keeps builds fast (`lto = false`, `codegen-units = 16`); MSI packaging is only included in `npm run build:all`.
+The GitHub Actions CI workflow runs on Windows and validates release metadata, frontend contracts, formatting, Clippy, the TypeScript/Vite build, Rust checks/tests, a standalone executable build, and npm/Rust dependency audits. A successful CI build also uploads the standalone executable and SHA-256 checksum as a short-lived workflow artifact.
 
-## Architecture
+### Hardware-dependent integration tests
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for modules, data flow, commands, events, and security notes, and [`docs/PLAN.md`](docs/PLAN.md) / [`docs/ROADMAP.md`](docs/ROADMAP.md) for design history and future work.
+The default Rust test suite does not provision WSL or launch real inference servers. Those tests are intentionally ignored unless explicitly enabled.
+
+**vLLM / WSL2** (requires WSL2 Ubuntu, an NVIDIA GPU visible inside WSL, network access, and several GB of free disk):
+
+```powershell
+$env:LLM_TEST_WSL = "1"
+cd src-tauri
+cargo test --lib -- --ignored --nocapture wsl_it
+```
+
+**Native llama.cpp** (requires a compatible executable and a small local GGUF):
+
+```powershell
+$env:LLM_TEST_LLAMACPP = "1"
+$env:LLM_TEST_LLAMACPP_EXE = "C:\path\to\llama-server.exe"
+$env:LLM_TEST_LLAMACPP_MODEL = "C:\path\to\tiny.gguf"
+cd src-tauri
+cargo test --lib -- --ignored --nocapture llamacpp_it
+```
+
+These tests are not run on standard hosted CI because they require real local GPU, WSL, and model-file prerequisites.
+
+## Documentation
+
+- [About the project](ABOUT.md) — purpose, audience, architecture, and design principles.
+- [User Guide](docs/USER_GUIDE.md) — first-run details, advanced features, and troubleshooting.
+- [Architecture](docs/ARCHITECTURE.md) — modules, data flow, Tauri commands/events, and security notes.
+- [Roadmap](docs/ROADMAP.md) — completed work and planned improvements.
+- [Deployment Guide](docs/DEPLOYMENT.md) — versioning, packaging, and release SOP.
+- [Contributing](CONTRIBUTING.md) — development workflow and pull request expectations.
+- [Agent reference](AGENTS.md) — repository-specific commands and implementation notes.
+
+## Security and privacy
+
+- Hugging Face and GitHub tokens are protected with Windows DPAPI and redacted from exported configuration.
+- The gateway and servers bind to localhost by default; LAN exposure requires an explicit opt-in.
+- The application manages local inference processes; model discovery and downloads still require network access.
+- Do not publish configuration files, authentication tokens, private model paths, or unredacted logs in issues.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
