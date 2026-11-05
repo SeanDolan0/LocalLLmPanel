@@ -1469,6 +1469,7 @@ pub struct AppState {
     /// `xhigh`/`medium`/`low` and raises on the standard `high` label.
     pub template_effort_cache: Mutex<HashMap<u16, (u64, Option<Vec<String>>)>>,
     pub app_update_cache: Mutex<Option<(crate::updater::AppUpdateInfo, Instant)>>,
+    pub is_quitting: AtomicBool,
     pub provisioning: AtomicBool,
     pub discovery_cache: Arc<crate::hf_discovery::DiscoveryCache>,
     pub model_registry: Arc<crate::model_registry::ModelRegistry>,
@@ -1564,6 +1565,7 @@ impl AppState {
             server_metrics: Mutex::new(BTreeMap::new()),
             template_effort_cache: Mutex::new(HashMap::new()),
             app_update_cache: Mutex::new(None),
+            is_quitting: AtomicBool::new(false),
             provisioning: AtomicBool::new(false),
             discovery_cache,
             model_registry,

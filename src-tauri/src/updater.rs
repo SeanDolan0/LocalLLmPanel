@@ -523,6 +523,36 @@ pub async fn download_and_install_update_impl(
     }
 }
 
+pub fn is_temp_or_disposable_path(path: &std::path::Path) -> bool {
+    let path_str = path.to_string_lossy();
+    let lower = path_str.to_ascii_lowercase();
+    let normalized = lower.replace('/', "\\");
+
+    if let Ok(temp) = std::env::var("TEMP") {
+        if !temp.is_empty() && lower.starts_with(&temp.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+    if let Ok(tmp) = std::env::var("TMP") {
+        if !tmp.is_empty() && lower.starts_with(&tmp.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+    let system_temp = std::env::temp_dir();
+    let system_temp_str = system_temp.to_string_lossy().to_ascii_lowercase();
+    if !system_temp_str.is_empty() && lower.starts_with(&system_temp_str) {
+        return true;
+    }
+
+    normalized.contains(r"\appdata\local\temp")
+        || normalized.contains(r"\temp\")
+        || normalized.contains(r"\tmp\")
+        || normalized.contains("antigravity-tmp")
+        || normalized.contains("run-")
+        || normalized.contains("llm_update_test_")
+        || normalized.contains("nsis test dir")
+}
+
 /// Determine the actual NSIS install directory and target executable path.
 pub fn resolve_nsis_target(
     current_exe: Option<&std::path::Path>,
@@ -532,7 +562,7 @@ pub fn resolve_nsis_target(
     // it was launched directly from an active installation.
     if let Some(exe) = current_exe {
         if let Some(parent) = exe.parent() {
-            if parent.join("uninstall.exe").exists() {
+            if parent.join("uninstall.exe").exists() && !is_temp_or_disposable_path(parent) {
                 let file_name = exe
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("llm-panel.exe"));
@@ -547,13 +577,18 @@ pub fn resolve_nsis_target(
     // 2. Query Windows Registry for Local LLM Panel uninstall entry.
     #[cfg(target_os = "windows")]
     if let Some(target) = query_registry_nsis_target() {
-        return target;
+        if !is_temp_or_disposable_path(&target.install_dir)
+            && (target.executable_path.exists()
+                || target.install_dir.join("uninstall.exe").exists())
+        {
+            return target;
+        }
     }
 
-    // 3. Persisted directory in configuration if it exists on disk.
+    // 3. Persisted directory in configuration if it exists on disk and is not a disposable path.
     if let Some(dir_str) = persisted_dir.map(str::trim).filter(|s| !s.is_empty()) {
         let dir = PathBuf::from(dir_str);
-        if dir.exists() {
+        if dir.exists() && !is_temp_or_disposable_path(&dir) {
             let exe = dir.join("llm-panel.exe");
             return NsisTarget {
                 install_dir: dir,
@@ -614,12 +649,14 @@ pub fn query_registry_nsis_target() -> Option<NsisTarget> {
         }
 
         if let Some(dir) = install_location {
-            let bin = binary_name.unwrap_or_else(|| "llm-panel.exe".to_string());
-            let exe = dir.join(&bin);
-            return Some(NsisTarget {
-                install_dir: dir,
-                executable_path: exe,
-            });
+            if !is_temp_or_disposable_path(&dir) {
+                let bin = binary_name.unwrap_or_else(|| "llm-panel.exe".to_string());
+                let exe = dir.join(&bin);
+                return Some(NsisTarget {
+                    install_dir: dir,
+                    executable_path: exe,
+                });
+            }
         }
     }
 
@@ -886,8 +923,15 @@ if ($env:LOCALLLMPANEL_UPDATE_NO_RELAUNCH -eq '1') {{
 # 6. Only then relaunch the installed executable
 Write-Log "Relaunching updated application: $targetExe"
 try {{
-  $workDir = Split-Path -LiteralPath $targetExe -Parent
-  Start-Process -FilePath $targetExe -WorkingDirectory $workDir -ErrorAction Stop | Out-Null
+  $workDir = [System.IO.Path]::GetDirectoryName($targetExe)
+  if (-not $workDir -and $installDir) {{
+    $workDir = $installDir
+  }}
+  if ($workDir) {{
+    Start-Process -FilePath $targetExe -WorkingDirectory $workDir -ErrorAction Stop | Out-Null
+  }} else {{
+    Start-Process -FilePath $targetExe -ErrorAction Stop | Out-Null
+  }}
   Write-Log "Relaunch initiated successfully."
   Write-Status "success" "Update to $expectedVersion successfully installed and relaunched." 0
 }} catch {{
@@ -988,12 +1032,30 @@ fn launch_silent_installer_and_exit(
         .arg(&script)
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
 
+    // Prepare application state for shutdown: mark is_quitting so CloseRequested
+    // does not minimize to tray, stop servers to release model files, and hide window.
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.is_quitting.store(true, Ordering::SeqCst);
+        let _ = crate::server::shutdown_all_servers(&state);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+
     cmd.spawn()
         .with_context(|| format!("Failed to launch update helper at {}", script.display()))?;
 
     // Give the helper a moment to start, then exit cleanly.
     std::thread::sleep(std::time::Duration::from_millis(300));
     app.exit(0);
+
+    // Ensure the process terminates even if a background thread or runtime hangs,
+    // guaranteeing that llm-panel.exe file locks are released for NSIS.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::process::exit(0);
+    });
+
     Ok(())
 }
 
@@ -1255,6 +1317,8 @@ mod tests {
         assert!(script.contains("Normalize-Ver $expectedVersion"));
         assert!(script.contains("Normalize-Ver $prodVersion"));
         assert!(script.contains("Normalize-Ver $fileVersion"));
+        assert!(script.contains("[System.IO.Path]::GetDirectoryName($targetExe)"));
+        assert!(!script.contains("Split-Path -LiteralPath $targetExe -Parent"));
 
         assert!(!script.contains("$candidates.Add($appExe)"));
     }
@@ -1482,5 +1546,32 @@ mod tests {
         assert!(log_content.contains("Version verification successful"));
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_is_temp_or_disposable_path() {
+        assert!(is_temp_or_disposable_path(&PathBuf::from(
+            r"C:\Users\sedol\AppData\Local\Temp\foo"
+        )));
+        assert!(is_temp_or_disposable_path(&PathBuf::from(
+            r"C:\Users\sedol\.t3\userdata\antigravity-tmp\run-abc\nsis test dir with spaces"
+        )));
+        assert!(is_temp_or_disposable_path(&PathBuf::from(
+            r"C:\test\llm_update_test_1234\llm-panel.exe"
+        )));
+        assert!(!is_temp_or_disposable_path(&PathBuf::from(
+            r"C:\Program Files\Local LLM Panel"
+        )));
+        assert!(!is_temp_or_disposable_path(&PathBuf::from(
+            r"C:\Users\sedol\AppData\Local\Local LLM Panel"
+        )));
+    }
+
+    #[test]
+    fn test_resolve_nsis_target_rejects_disposable_persisted_dir() {
+        let disposable =
+            r"C:\Users\sedol\.t3\userdata\antigravity-tmp\run-zpcjyS\nsis test dir with spaces";
+        let target = resolve_nsis_target(None, Some(disposable));
+        assert_ne!(target.install_dir.to_string_lossy(), disposable);
     }
 }

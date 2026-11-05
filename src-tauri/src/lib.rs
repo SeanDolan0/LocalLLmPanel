@@ -49,6 +49,8 @@ pub fn run() {
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
+                            let state: tauri::State<Arc<AppState>> = app.state();
+                            state.is_quitting.store(true, std::sync::atomic::Ordering::SeqCst);
                             app.exit(0);
                         }
                         "show" => {
@@ -100,6 +102,9 @@ pub fn run() {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let state: tauri::State<Arc<AppState>> = app_handle.state();
+                        if state.is_quitting.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
                         let minimize = state.config.lock().unwrap().minimize_to_tray;
                         if minimize {
                             api.prevent_close();
