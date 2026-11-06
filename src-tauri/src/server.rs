@@ -2675,6 +2675,37 @@ pub fn parse_sse_token(line: &str) -> Option<String> {
     None
 }
 
+/// Extract visible content from a fully-framed SSE event (multi-line
+/// `data:` fields already joined by the decoder).
+pub fn sse_event_content(event: &crate::completion::SseEvent) -> Option<String> {
+    if event.is_comment {
+        return None;
+    }
+    let joined = event.joined_data();
+    let trimmed = joined.trim();
+    if trimmed.is_empty() || trimmed == "[DONE]" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let choices = value.get("choices").and_then(|c| c.as_array())?;
+    let choice = choices.first()?;
+    if let Some(content) = choice
+        .get("delta")
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+    {
+        if !content.is_empty() {
+            return Some(content.to_string());
+        }
+    }
+    if let Some(text) = choice.get("text").and_then(|t| t.as_str()) {
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
 /// Stream chat completion tokens over SSE and emit Tauri events.
 pub async fn chat_stream(
     app: Option<tauri::AppHandle>,
@@ -2726,7 +2757,16 @@ pub async fn chat_stream(
             bail!("chat stream failed ({}): {}", status, text);
         }
 
-        let mut buffer = String::new();
+        // Robust SSE framing: multi-line `data:` fields, blank-line event
+        // boundaries, and `: keepalive` comments are handled by the shared
+        // decoder; only visible content is emitted as `chat-token`.
+        let mut decoder = crate::completion::SseDecoder::new();
+        let mut aggregator = crate::completion::StreamAggregator::new(
+            "openai-compatible",
+            &def.backend_model_name(),
+        )
+        .with_request_id(Some(request_id.clone()));
+        let mut termination: Option<crate::completion::StreamTermination> = None;
         loop {
             tokio::select! {
                 _ = cancel_notify.notified() => {
@@ -2735,11 +2775,12 @@ pub async fn chat_stream(
                 chunk_opt = resp.chunk() => {
                     match chunk_opt {
                         Ok(Some(chunk)) => {
-                            buffer.push_str(&String::from_utf8_lossy(&chunk));
-                            while let Some(newline_pos) = buffer.find('\n') {
-                                let line = buffer[..newline_pos].to_string();
-                                buffer.drain(..=newline_pos);
-                                if let Some(token) = parse_sse_token(&line) {
+                            for event in decoder.feed(&chunk) {
+                                let signal = aggregator.apply(&event);
+                                if signal == crate::completion::ChunkSignal::Malformed {
+                                    eprintln!("[chat] malformed SSE event for request {request_id}");
+                                }
+                                if let Some(token) = sse_event_content(&event) {
                                     if let Some(ref a) = app {
                                         let _ = a.emit("chat-token", ChatTokenPayload {
                                             request_id: request_id.clone(),
@@ -2754,6 +2795,7 @@ pub async fn chat_stream(
                             break;
                         }
                         Err(e) => {
+                            eprintln!("[chat] stream disconnect for request {request_id}: {e}");
                             bail!("stream read error: {e}");
                         }
                     }
@@ -2761,8 +2803,9 @@ pub async fn chat_stream(
             }
         }
 
-        if !buffer.is_empty() {
-            if let Some(token) = parse_sse_token(&buffer) {
+        if let Some(final_event) = decoder.finish() {
+            aggregator.apply(&final_event);
+            if let Some(token) = sse_event_content(&final_event) {
                 if let Some(ref a) = app {
                     let _ = a.emit(
                         "chat-token",
@@ -2774,6 +2817,28 @@ pub async fn chat_stream(
                     );
                 }
             }
+        }
+
+        let termination = termination.unwrap_or(if aggregator.saw_explicit_terminal() {
+            crate::completion::StreamTermination::ExplicitTerminal
+        } else if aggregator.saw_done() {
+            crate::completion::StreamTermination::DoneSentinel
+        } else {
+            crate::completion::StreamTermination::CleanEof
+        });
+        let normalized = aggregator.finish(termination);
+        let diagnostics = crate::completion::CompletionDiagnostics::from(&normalized);
+        eprintln!("{}", diagnostics.log_line());
+        if !normalized.explicit_terminal {
+            // Clean EOF without terminal metadata is not a successful
+            // completion; keep the partial content visible but do not emit
+            // `chat-done` as if it completed.
+            bail!(
+                "incomplete chat stream (status={} finish={:?} termination={:?}): provider omitted terminal metadata",
+                normalized.status,
+                normalized.finish_reason,
+                normalized.termination,
+            );
         }
 
         Ok(false)

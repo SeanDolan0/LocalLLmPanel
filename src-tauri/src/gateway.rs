@@ -2780,13 +2780,28 @@ async fn proxy_post(
             .map_err(|e| e.to_string())?;
         let mut upstream = resp;
         let mut line_buf = Vec::new();
+        // Completion aggregator: observes canonical SSE events without
+        // altering forwarded bytes. Diagnostics never include prompts,
+        // completions, or authorization material.
+        let requested_model = model_from_body(body).unwrap_or_default();
+        let mut aggregator =
+            crate::completion::StreamAggregator::new("openai-compatible", &requested_model);
+        let mut decoder = crate::completion::SseDecoder::new();
+        let mut termination = crate::completion::StreamTermination::CleanEof;
+        let mut saw_done_line = false;
         loop {
             match upstream.chunk().await {
                 Ok(Some(chunk)) => {
+                    for event in decoder.feed(&chunk) {
+                        aggregator.apply(&event);
+                    }
                     line_buf.extend_from_slice(&chunk);
                     while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
                         let line_bytes: Vec<u8> = line_buf.drain(..=pos).collect();
                         if let Ok(line_str) = std::str::from_utf8(&line_bytes) {
+                            if line_str.trim().trim_end_matches(['\r', '\n']) == "data: [DONE]" {
+                                saw_done_line = true;
+                            }
                             let normalized = normalize_sse_line(line_str);
                             let size = format!("{:x}\r\n", normalized.len());
                             stream
@@ -2818,9 +2833,13 @@ async fn proxy_post(
                     // changed. Log the real cause instead of silently turning a
                     // broken upstream stream into a clean EOF.
                     eprintln!("[gateway] upstream stream error on port {port}: {e}");
+                    termination = crate::completion::StreamTermination::Disconnect;
                     break;
                 }
             }
+        }
+        if let Some(final_event) = decoder.finish() {
+            aggregator.apply(&final_event);
         }
         if !line_buf.is_empty() {
             // Forward a final event that did not end in a newline as a proper
@@ -2839,11 +2858,62 @@ async fn proxy_post(
                 .map_err(|e| e.to_string())?;
             stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
         }
-        stream
-            .write_all(b"0\r\n\r\n")
-            .await
-            .map_err(|e| e.to_string())?;
-        stream.flush().await.map_err(|e| e.to_string())
+        if termination == crate::completion::StreamTermination::CleanEof {
+            termination = if aggregator.saw_explicit_terminal() {
+                crate::completion::StreamTermination::ExplicitTerminal
+            } else if saw_done_line {
+                crate::completion::StreamTermination::DoneSentinel
+            } else {
+                crate::completion::StreamTermination::CleanEof
+            };
+        }
+        let normalized = aggregator.finish(termination);
+        let diagnostics = crate::completion::CompletionDiagnostics::from(&normalized);
+        eprintln!("{}", diagnostics.log_line());
+        // Only an explicit terminal + [DONE] yields a clean chunked EOF.
+        // Otherwise shut down the client socket so OpenAI SDKs observe an
+        // interrupted stream (missing terminal/[DONE]) rather than a
+        // silently successful completion.
+        if normalized.explicit_terminal {
+            if !saw_done_line && !normalized.content.is_empty() {
+                let terminal = match serde_json::to_string(&serde_json::json!({
+                    "choices": [{
+                        "delta": {},
+                        "finish_reason": normalized.finish_reason.to_openai_chat().unwrap_or("stop"),
+                        "index": 0,
+                    }],
+                    "created": 0,
+                    "id": normalized.response_id.clone().unwrap_or_else(|| "chatcmpl-local".to_string()),
+                    "model": normalized.model,
+                    "object": "chat.completion.chunk",
+                })) {
+                    Ok(payload) => format!("data: {payload}\n\n"),
+                    Err(_) => String::new(),
+                };
+                if !terminal.is_empty() {
+                    let size = format!("{:x}\r\n", terminal.len());
+                    let _ = stream.write_all(size.as_bytes()).await;
+                    let _ = stream.write_all(terminal.as_bytes()).await;
+                    let _ = stream.write_all(b"\r\n").await;
+                    let done = "data: [DONE]\n\n";
+                    let size = format!("{:x}\r\n", done.len());
+                    let _ = stream.write_all(size.as_bytes()).await;
+                    let _ = stream.write_all(done.as_bytes()).await;
+                    let _ = stream.write_all(b"\r\n").await;
+                }
+            }
+            stream
+                .write_all(b"0\r\n\r\n")
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.flush().await.map_err(|e| e.to_string())
+        } else {
+            // Incomplete stream: flush forwarded bytes then abort without
+            // the chunked terminator so the client treats it as truncated.
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
+            Ok(())
+        }
     } else {
         let body_bytes = resp
             .bytes()
@@ -2852,6 +2922,25 @@ async fn proxy_post(
         let mut final_bytes = body_bytes.to_vec();
         if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             normalize_chat_response_json(&mut val);
+            // Truthful completion extension: preserves the provider's
+            // `finish_reason` and `usage` verbatim while making the
+            // completion contract explicit for diagnostics. A body without
+            // `finish_reason` is `unknown`, never promoted to `stop`.
+            let model_fallback = model_from_body(body).unwrap_or_default();
+            let normalized = crate::completion::normalize_non_streaming(
+                "openai-compatible",
+                &model_fallback,
+                &val,
+                None,
+            );
+            let diagnostics = crate::completion::CompletionDiagnostics::from(&normalized);
+            eprintln!("{}", diagnostics.log_line());
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "x_local_panel_completion".to_string(),
+                    crate::completion::completion_extension(&normalized),
+                );
+            }
             if let Ok(s) = serde_json::to_vec(&val) {
                 final_bytes = s;
             }

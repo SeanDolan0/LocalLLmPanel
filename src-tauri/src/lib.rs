@@ -1,6 +1,7 @@
 //! Local LLM Panel — Tauri 2 app managing vLLM inside WSL2.
 
 pub mod commands;
+pub mod completion;
 pub mod context_fit;
 pub mod download_manager;
 mod estimate;
