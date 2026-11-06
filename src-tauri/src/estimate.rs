@@ -450,7 +450,17 @@ pub fn family_fallback(model_id: &str) -> Option<usize> {
         (&["qwen3"], 131_072),
         (&["qwen2"], 131_072),
         (&["qwen"], 32_768),
-        (&["llama-3.1", "llama-3.2", "llama-3.3", "llama3.1", "llama3.2", "llama3.3"], 131_072),
+        (
+            &[
+                "llama-3.1",
+                "llama-3.2",
+                "llama-3.3",
+                "llama3.1",
+                "llama3.2",
+                "llama3.3",
+            ],
+            131_072,
+        ),
         (&["llama3", "llama-3"], 8_192),
         (&["llama"], 4_096),
         (&["spark-x2.6", "spark-x"], 36_126),
@@ -557,7 +567,7 @@ static PARAMS_NAME_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyL
 
 /// Try to parse parameter count in billions from a model ID / repo name (e.g. "Qwen3.8-27B-GGUF" -> 27.0).
 pub fn parse_params_from_name(name: &str) -> Option<f64> {
-    let base = name.split('/').last().unwrap_or(name);
+    let base = name.split('/').next_back().unwrap_or(name);
     PARAMS_NAME_RE
         .captures(base)
         .and_then(|c| c.get(1))

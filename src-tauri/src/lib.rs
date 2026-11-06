@@ -50,7 +50,9 @@ pub fn run() {
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
                             let state: tauri::State<Arc<AppState>> = app.state();
-                            state.is_quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+                            state
+                                .is_quitting
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
                             app.exit(0);
                         }
                         "show" => {

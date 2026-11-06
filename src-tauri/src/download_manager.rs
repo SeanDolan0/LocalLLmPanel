@@ -475,7 +475,7 @@ impl DownloadManager {
                     resp.headers()
                         .get(reqwest::header::CONTENT_RANGE)
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|cr| cr.split('/').last())
+                        .and_then(|cr| cr.split('/').next_back())
                         .and_then(|s| s.parse::<u64>().ok())
                         .unwrap_or(0)
                 } else {

@@ -516,7 +516,11 @@ static GGUF_QUANT_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLo
 /// that cannot run as a standalone language model.
 pub fn is_auxiliary_gguf_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    let fname = path.split('/').last().unwrap_or(path).to_ascii_lowercase();
+    let fname = path
+        .split('/')
+        .next_back()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
 
     // Multi-Token Prediction (MTP) helper files
     if lower.starts_with("mtp/")
@@ -598,7 +602,7 @@ pub fn quant_requires_prism_channel(quant_label: &str) -> bool {
 
 /// Extract base model name (part after the org/user prefix).
 pub fn extract_base_name(model_id: &str) -> &str {
-    model_id.split('/').last().unwrap_or(model_id)
+    model_id.split('/').next_back().unwrap_or(model_id)
 }
 
 /// Detect quant format from repo name suffix.

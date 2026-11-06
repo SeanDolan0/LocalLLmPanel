@@ -2039,23 +2039,14 @@ fn quality_score(model: &LlmModel, quant: &str, use_case: UseCase) -> f64 {
     let task_bump = match bench_score {
         Some(bench) => ((bench - 72.0) * 0.4).clamp(-8.0, 9.0),
         None => match use_case {
-            UseCase::Coding => {
-                if name_lower.contains("code")
+            UseCase::Coding
+                if (name_lower.contains("code")
                     || name_lower.contains("starcoder")
-                    || name_lower.contains("wizard")
-                {
-                    6.0
-                } else {
-                    0.0
-                }
+                    || name_lower.contains("wizard")) =>
+            {
+                6.0
             }
-            UseCase::Reasoning => {
-                if params >= 13.0 {
-                    5.0
-                } else {
-                    0.0
-                }
-            }
+            UseCase::Reasoning if params >= 13.0 => 5.0,
             UseCase::Multimodal
                 if (name_lower.contains("vision")
                     || model.use_case.to_lowercase().contains("vision")) =>
@@ -4553,7 +4544,7 @@ mod tests {
             let ratio = estimated / fix.measured_tps;
 
             assert!(
-                ratio >= 0.8 && ratio <= 1.2,
+                (0.8..=1.2).contains(&ratio),
                 "{}: estimate {:.1} tok/s vs measured {:.1} tok/s (ratio={:.2}). \
                  Two-component model should give ±20% across ALL quants",
                 fix.name,

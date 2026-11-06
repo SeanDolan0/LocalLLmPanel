@@ -97,23 +97,17 @@ pub fn find_server_port_for(
 
 fn configured_context_tokens(def: &ServerDef) -> Option<usize> {
     match def.backend.as_str() {
-        "vllm" => def
-            .max_model_len
-            .filter(|value| *value > 0)
-            .or_else(|| {
-                flag_value(&def.extra_args, "--max-model-len")
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .filter(|v| *v > 0)
-            }),
-        "llamacpp" => def
-            .ctx_size
-            .filter(|value| *value > 0)
-            .or_else(|| {
-                flag_value(&def.extra_args, "-c")
-                    .or_else(|| flag_value(&def.extra_args, "--ctx-size"))
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .filter(|v| *v > 0)
-            }),
+        "vllm" => def.max_model_len.filter(|value| *value > 0).or_else(|| {
+            flag_value(&def.extra_args, "--max-model-len")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        }),
+        "llamacpp" => def.ctx_size.filter(|value| *value > 0).or_else(|| {
+            flag_value(&def.extra_args, "-c")
+                .or_else(|| flag_value(&def.extra_args, "--ctx-size"))
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        }),
         _ => None,
     }
 }
@@ -157,7 +151,8 @@ fn known_model_effort_ladder(model_id: &str, model_name: &str) -> Option<Vec<Str
 
 fn template_is_toggle_only(template: Option<&str>, model_id: &str, model_name: &str) -> bool {
     let lower_name = format!("{} {}", model_id, model_name).to_ascii_lowercase();
-    if lower_name.contains("deepseek") || lower_name.contains("qwq") || lower_name.contains("spark") {
+    if lower_name.contains("deepseek") || lower_name.contains("qwq") || lower_name.contains("spark")
+    {
         return false;
     }
     if let Some(t) = template {
@@ -227,7 +222,11 @@ fn resolve_model_context_sync(def: &ServerDef, launch_args: &[String]) -> (usize
         return (ctx, "architecture");
     }
     let db = crate::llmfit_adapter::get_model_database();
-    if let Some(m) = db.find_model(&def.model_id).into_iter().find(|m| m.context_length > 0) {
+    if let Some(m) = db
+        .find_model(&def.model_id)
+        .into_iter()
+        .find(|m| m.context_length > 0)
+    {
         return (m.context_length as usize, "architecture");
     }
     if def.task == "embed" {
@@ -589,7 +588,8 @@ fn model_row_with_ladder(
         "safetensors"
     };
     let supports_template_controls = def.backend != "llamacpp" || def.jinja;
-    let is_toggle_only = traits.reasoning && template_is_toggle_only(None, &def.model_id, &def.name);
+    let is_toggle_only =
+        traits.reasoning && template_is_toggle_only(None, &def.model_id, &def.name);
     let control = if !supports_template_controls || traits.reasoning_mode == ReasoningMode::None {
         "none"
     } else if is_toggle_only {
@@ -1144,7 +1144,10 @@ async fn fetch_template_info(
             .and_then(|v| v.ok());
             val.and_then(|v| {
                 v.get("chat_template")
-                    .or_else(|| v.get("default_generation_settings").and_then(|d| d.get("chat_template")))
+                    .or_else(|| {
+                        v.get("default_generation_settings")
+                            .and_then(|d| d.get("chat_template"))
+                    })
                     .or_else(|| v.get("model_info").and_then(|m| m.get("chat_template")))
                     .and_then(|t| t.as_str())
                     .map(str::to_string)
@@ -1156,7 +1159,7 @@ async fn fetch_template_info(
         read_vllm_chat_template(&state.config().distro, def)
     };
 
-    let template_reasoning = template.as_deref().map_or(false, template_has_reasoning);
+    let template_reasoning = template.as_deref().is_some_and(template_has_reasoning);
     let ladder = template.as_deref().and_then(template_effort_ladder);
     (ladder, template_reasoning)
 }
@@ -1180,7 +1183,6 @@ async fn template_info_for(state: &Arc<AppState>, def: &ServerDef) -> (Option<Ve
         .insert(def.port, (now, ladder.clone()));
     (ladder, is_reasoning)
 }
-
 
 async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     let vllm_args = state
@@ -1383,20 +1385,15 @@ fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
         .expect("valid reasoning effort validation regex")
     });
     static MSG_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-        regex_lite::Regex::new(
-            r"(?i)supported\s+(?:types|levels|efforts)\s+are\s+([^\.\n]{2,100})",
-        )
-        .expect("valid reasoning effort message regex")
+        regex_lite::Regex::new(r"(?i)supported\s+(?:types|levels|efforts)\s+are\s+([^\.\n]{2,100})")
+            .expect("valid reasoning effort message regex")
     });
 
     let mut levels: Vec<String> = Vec::new();
     if let Some(caps) = CHECK_RE.captures(template) {
         if let Some(matched) = caps.get(1) {
             let labels = matched.as_str();
-            for (index, part) in labels
-                .split(|character| character == '\'' || character == '"')
-                .enumerate()
-            {
+            for (index, part) in labels.split(['\'', '"']).enumerate() {
                 if index % 2 == 0 {
                     continue;
                 }
@@ -1630,7 +1627,10 @@ fn apply_harness_precedence_with_ladder(
                 .and_then(serde_json::Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(toggle));
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(toggle),
+            );
             kwargs.remove("reasoning_effort");
             object.insert(
                 "chat_template_kwargs".to_string(),
@@ -1651,7 +1651,10 @@ fn apply_harness_precedence_with_ladder(
                 .and_then(serde_json::Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(toggle));
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(toggle),
+            );
             kwargs.remove("reasoning_effort");
             object.insert(
                 "chat_template_kwargs".to_string(),
@@ -1698,7 +1701,9 @@ fn apply_harness_precedence_with_ladder(
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
             {
-                if let Some(canonical) = normalize_effort_for_ladder(&current, backend, effort_ladder) {
+                if let Some(canonical) =
+                    normalize_effort_for_ladder(&current, backend, effort_ladder)
+                {
                     if canonical != current {
                         kwargs.insert(
                             "reasoning_effort".to_string(),
@@ -2710,7 +2715,7 @@ async fn proxy_chat(
         .unwrap_or_default();
     let context = match server_def.as_ref() {
         Some(def) => {
-            let (ctx, _) = resolve_context_for_server_async(state, def, &launch_args).await;
+            let (ctx, _) = resolve_context_for_server_async(state, def, launch_args).await;
             Some(ctx)
         }
         None => None,
@@ -4323,7 +4328,8 @@ mod tests {
 
     #[test]
     fn test_spark_effort_medium_clamped_to_high() {
-        let req = r#"{"model":"XHToken/Spark-X2.6-4B-INT4","messages":[],"reasoning_effort":"medium"}"#;
+        let req =
+            r#"{"model":"XHToken/Spark-X2.6-4B-INT4","messages":[],"reasoning_effort":"medium"}"#;
         let value = normalized(req, "vllm", Some(36126));
         assert_eq!(value["reasoning_effort"], "high");
         assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
@@ -4341,7 +4347,9 @@ mod tests {
         assert_eq!(value["thinking"]["type"], "enabled");
         assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
         assert!(value.get("reasoning_effort").is_none());
-        assert!(value["chat_template_kwargs"].get("reasoning_effort").is_none());
+        assert!(value["chat_template_kwargs"]
+            .get("reasoning_effort")
+            .is_none());
 
         let req_off = r#"{"model":"deepseek-reasoner","messages":[],"reasoning_effort":"none"}"#;
         let value_off = normalized(req_off, "vllm", Some(32768));
@@ -4353,13 +4361,27 @@ mod tests {
     #[test]
     fn test_toggle_only_request_normalizes_to_enable_thinking_and_strips_effort() {
         let req = r#"{"model":"my-toggle-model","messages":[],"reasoning_effort":"high"}"#;
-        let mut obj = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(req).unwrap();
+        let mut obj =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(req).unwrap();
         let raw_effort = harness_effort(&obj);
-        let toggle = raw_effort.as_deref().and_then(effort_to_toggle).unwrap_or(true);
-        let mut kwargs = obj.get("chat_template_kwargs").and_then(serde_json::Value::as_object).cloned().unwrap_or_default();
-        kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(toggle));
+        let toggle = raw_effort
+            .as_deref()
+            .and_then(effort_to_toggle)
+            .unwrap_or(true);
+        let mut kwargs = obj
+            .get("chat_template_kwargs")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        kwargs.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(toggle),
+        );
         kwargs.remove("reasoning_effort");
-        obj.insert("chat_template_kwargs".to_string(), serde_json::Value::Object(kwargs));
+        obj.insert(
+            "chat_template_kwargs".to_string(),
+            serde_json::Value::Object(kwargs),
+        );
         obj.remove("reasoning_effort");
 
         assert_eq!(obj["chat_template_kwargs"]["enable_thinking"], true);
@@ -4423,7 +4445,12 @@ mod tests {
 
         let mut headers3 = HashMap::new();
         headers3.insert("x-api-key".to_string(), "wrong-secret".to_string());
-        assert_eq!(check_gateway_auth(&headers3, Some("my-secret")).unwrap_err().0, 401);
+        assert_eq!(
+            check_gateway_auth(&headers3, Some("my-secret"))
+                .unwrap_err()
+                .0,
+            401
+        );
     }
 
     #[test]

@@ -543,7 +543,7 @@ pub fn launch_script_with_version(
             0,
             format!(
                 "export VLLM_LOGGING_LEVEL={}",
-                shell_quote(&adv.log_level.trim())
+                shell_quote(adv.log_level.trim())
             ),
         );
     }
@@ -1116,30 +1116,28 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--spec-draft-n-max"
                 | "--draft-max"
                 | "--draft"
+        ) && matches!(
+            arg.as_str(),
+            "--n-cpu-moe"
+                | "--fit"
+                | "--fit-target"
+                | "--device"
+                | "--api-key"
+                | "--alias"
+                | "-a"
+                | "--log-verbosity"
+                | "--mmproj"
+                | "-fa"
+                | "--cache-type-k"
+                | "--cache-type-v"
+                | "--model-draft"
+                | "--spec-draft-model"
+                | "-md"
+                | "--spec-draft-n-max"
+                | "--draft-max"
+                | "--draft"
         ) {
-            if matches!(
-                arg.as_str(),
-                "--n-cpu-moe"
-                    | "--fit"
-                    | "--fit-target"
-                    | "--device"
-                    | "--api-key"
-                    | "--alias"
-                    | "-a"
-                    | "--log-verbosity"
-                    | "--mmproj"
-                    | "-fa"
-                    | "--cache-type-k"
-                    | "--cache-type-v"
-                    | "--model-draft"
-                    | "--spec-draft-model"
-                    | "-md"
-                    | "--spec-draft-n-max"
-                    | "--draft-max"
-                    | "--draft"
-            ) {
-                i += 1;
-            }
+            i += 1;
         }
         i += 1;
     }
@@ -1914,7 +1912,7 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
             wsl::shell_quote_wsl(id),
         );
         let pid_from_file = wsl::run_script(&distro, &pid_script);
-        if let Some(pid) = pid_from_file.stdout.trim().parse::<u32>().ok() {
+        if let Ok(pid) = pid_from_file.stdout.trim().parse::<u32>() {
             let kill = wsl::run_script(
                 &distro,
                 &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"),
@@ -2613,7 +2611,7 @@ pub async fn chat(
         "messages": messages,
         "stream": false,
     });
-    let api_key = server_api_key(&state, &def);
+    let api_key = server_api_key(state, &def);
     let req = state.chat_http.post(&url).json(&body);
     let resp = apply_vllm_auth(req, api_key.as_deref())
         .send()
@@ -2624,7 +2622,7 @@ pub async fn chat(
         let text = resp.text().await.unwrap_or_default();
         bail!("chat failed ({}): {}", status, text);
     }
-    Ok(resp.json().await.context("chat response JSON")?)
+    resp.json().await.context("chat response JSON")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4166,7 +4164,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
 
             // Write script to file and execute
             let script_path = format!("~/.local/share/local-llm-panel/test-{}.sh", name);
-            let mkdir_cmd = format!("mkdir -p ~/.local/share/local-llm-panel");
+            let mkdir_cmd = "mkdir -p ~/.local/share/local-llm-panel".to_string();
             let write_cmd = format!("cat > {}", crate::wsl::shell_quote_wsl(&script_path));
             let chmod_cmd = format!("chmod +x {}", crate::wsl::shell_quote_wsl(&script_path));
             let exec_cmd = format!("bash -l {}", crate::wsl::shell_quote_wsl(&script_path));

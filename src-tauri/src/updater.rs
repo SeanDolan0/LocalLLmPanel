@@ -111,7 +111,7 @@ pub struct ParsedVersion {
 
 impl ParsedVersion {
     pub fn parse(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+        let trimmed = raw.trim().trim_start_matches(['v', 'V']);
         if trimmed.is_empty() {
             return None;
         }
@@ -494,14 +494,14 @@ pub async fn download_and_install_update_impl(
         #[cfg(target_os = "windows")]
         {
             launch_silent_installer_and_exit(&app, &dest_file, &expected_version, &target)?;
-            return Ok(UpdateLaunchResult {
+            Ok(UpdateLaunchResult {
                 success: true,
                 message: format!(
                     "Update to v{} downloaded and verified. Local LLM Panel will close now; the installer will update files at {} and relaunch automatically.",
                     expected_version,
                     target.install_dir.display()
                 ),
-            });
+            })
         }
         #[cfg(not(target_os = "windows"))]
         {

@@ -791,6 +791,12 @@ pub struct DiscoveryCache {
     searches: Mutex<HashMap<String, CachedFeed>>,
 }
 
+impl Default for DiscoveryCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiscoveryCache {
     pub fn new() -> Self {
         Self {

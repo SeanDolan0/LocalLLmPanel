@@ -755,12 +755,10 @@ pub fn spawn_script_via_stdin(
         let cb = on_line.clone();
         handles.push(std::thread::spawn(move || {
             let reader = BufReader::new(stream);
-            for line in reader.lines() {
-                if let Ok(l) = line {
-                    let clean: String = l.chars().filter(|c| *c != '\u{0}').collect();
-                    if let Ok(mut cb) = cb.lock() {
-                        cb(clean);
-                    }
+            for l in reader.lines().flatten() {
+                let clean: String = l.chars().filter(|c| *c != '\u{0}').collect();
+                if let Ok(mut cb) = cb.lock() {
+                    cb(clean);
                 }
             }
         }));
