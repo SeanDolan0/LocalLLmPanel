@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::estimate;
 use crate::fit::{self, FitResult, HardwareProfile, ModelArchInfo, VariantInput};
@@ -4708,8 +4708,18 @@ pub async fn download_and_install_update(
 }
 
 #[tauri::command]
-pub async fn last_update_status() -> Result<Option<crate::updater::LastUpdateStatus>, String> {
-    Ok(crate::updater::read_last_update_status())
+pub async fn last_update_status(
+    app: tauri::AppHandle,
+) -> Result<Option<crate::updater::LastUpdateStatus>, String> {
+    let status = crate::updater::read_last_update_status();
+    if let Some(ref s) = status {
+        if s.status == "success" {
+            if let Some(window) = app.get_webview_window("main") {
+                crate::updater::bring_window_to_top(&window);
+            }
+        }
+    }
+    Ok(status)
 }
 
 #[cfg(test)]

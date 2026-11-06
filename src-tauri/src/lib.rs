@@ -107,6 +107,10 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("main") {
+                if crate::updater::has_pending_update_marker() {
+                    crate::updater::bring_window_to_top(&window);
+                }
+
                 let window_clone = window.clone();
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {

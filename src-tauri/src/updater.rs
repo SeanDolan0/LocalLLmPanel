@@ -252,6 +252,26 @@ pub fn clear_pending_update_marker() {
     let _ = std::fs::remove_file(path);
 }
 
+pub fn has_pending_update_marker() -> bool {
+    pending_marker_path().exists()
+}
+
+/// Brings the main window on top and requests focus, temporarily pinning
+/// it topmost so Windows raises it over background apps, then restoring
+/// normal z-order after a brief delay.
+pub fn bring_window_to_top(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_focus();
+    let win = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let _ = win.set_always_on_top(false);
+        let _ = win.set_focus();
+    });
+}
+
 pub fn read_last_update_status() -> Option<LastUpdateStatus> {
     let path = pending_marker_path();
     if !path.exists() {
