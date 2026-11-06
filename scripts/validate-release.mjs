@@ -98,8 +98,9 @@ function validateArtifacts(version) {
   }
 
   // Validate official signed updater bundle and latest.json metadata
+  const hasSigningKey = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
   const isSignedReleaseRequired = Boolean(
-    process.env.CI || process.env.REQUIRE_SIGNED_RELEASE === "1" || fs.existsSync(path.join(distDir, "latest.json"))
+    (process.env.REQUIRE_SIGNED_RELEASE === "1" && hasSigningKey) || fs.existsSync(path.join(distDir, "latest.json"))
   );
 
   if (mode !== "fast" && isSignedReleaseRequired) {

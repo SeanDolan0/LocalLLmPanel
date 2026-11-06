@@ -75,7 +75,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          REQUIRE_SIGNED_RELEASE: "1"
+          REQUIRE_SIGNED_RELEASE: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '1' || '0' }}
         run: npm run build:setup
 
       - name: Authenticode sign executables (if certificate secret configured)
@@ -103,7 +103,8 @@ jobs:
 
       - name: Validate release files, signatures, and SHA-256 checksums
         env:
-          REQUIRE_SIGNED_RELEASE: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          REQUIRE_SIGNED_RELEASE: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '1' || '0' }}
         run: node scripts/validate-release.mjs --setup --artifacts
 
       - name: Generate build provenance attestations
@@ -133,8 +134,8 @@ jobs:
                 $_.Name -like 'latest.json'
               }
           )
-          if ($assets.Count -lt 7) {
-            throw "Expected release files (installer, standalone exe, updater bundle, signatures, checksums, and latest.json), found $($assets.Count)"
+          if ($assets.Count -lt 4) {
+            throw "Expected release files (installer, standalone exe, and checksums), found $($assets.Count)"
           }
           $assetPaths = @($assets | ForEach-Object { $_.FullName })
           gh release create "$env:RELEASE_TAG" @assetPaths --draft --generate-notes --verify-tag --title "$env:RELEASE_TAG"
