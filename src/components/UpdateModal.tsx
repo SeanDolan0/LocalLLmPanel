@@ -136,7 +136,7 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
               <div className="flex items-center justify-between text-xs font-medium">
                 <span className="text-indigo-200 capitalize">
                   {progress.phase === "verifying"
-                    ? "Verifying checksum (SHA256)..."
+                    ? "Verifying cryptographic signature..."
                     : progress.phase === "ready"
                     ? "Update verified. Preparing installer..."
                     : "Downloading update..."}
@@ -170,7 +170,7 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
           {/* Previous Error notice */}
           {info.error && !error && (
             <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs text-amber-300 space-y-1">
-              <div className="font-semibold text-amber-200">Previous Update Notice</div>
+              <div className="font-semibold text-amber-200">Update Check Notice</div>
               <div>{info.error}</div>
             </div>
           )}
@@ -178,8 +178,19 @@ export default function UpdateModal({ info, isOpen, onClose }: UpdateModalProps)
           {/* Error notice */}
           {error && (
             <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3.5 text-xs text-red-300 space-y-1">
-              <div className="font-semibold text-red-200">Update Error</div>
+              <div className="font-semibold text-red-200">
+                {error.toLowerCase().includes("signature")
+                  ? "Signature Verification Failed"
+                  : error.toLowerCase().includes("download")
+                  ? "Download Failed"
+                  : error.toLowerCase().includes("install")
+                  ? "Installation Failed"
+                  : "Update Failed"}
+              </div>
               <div>{error}</div>
+              <div className="text-[11px] text-red-200/80 pt-1">
+                You can try again or use "View on GitHub" to download the installer manually.
+              </div>
             </div>
           )}
         </div>

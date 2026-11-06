@@ -96,6 +96,82 @@ function validateArtifacts(version) {
     const recorded = readText(checksumFile).trim().split(/\s+/)[0];
     if (recorded !== digest) fail(`checksum mismatch for ${name}`);
   }
+
+  // Validate official signed updater bundle and latest.json metadata
+  const isSignedReleaseRequired = Boolean(
+    process.env.CI || process.env.REQUIRE_SIGNED_RELEASE === "1" || fs.existsSync(path.join(distDir, "latest.json"))
+  );
+
+  if (mode !== "fast" && isSignedReleaseRequired) {
+    const zipName = `Local.LLM.Panel_${version}_x64-setup.nsis.zip`;
+    const zipFile = path.join(distDir, zipName);
+    if (!fs.existsSync(zipFile)) fail(`missing updater bundle artifact: ${zipFile}`);
+    const zipStat = fs.statSync(zipFile);
+    if (!zipStat.isFile() || zipStat.size === 0) fail(`empty updater bundle artifact: ${zipFile}`);
+
+    // Verify zip checksum
+    const zipChecksumFile = `${zipFile}.sha256`;
+    if (fs.existsSync(zipChecksumFile)) {
+      const digest = crypto.createHash("sha256").update(fs.readFileSync(zipFile)).digest("hex");
+      const recorded = readText(zipChecksumFile).trim().split(/\s+/)[0];
+      if (recorded !== digest) fail(`checksum mismatch for updater bundle ${zipName}`);
+    }
+
+    // Verify signature file
+    const sigFile = `${zipFile}.sig`;
+    if (!fs.existsSync(sigFile)) fail(`missing updater signature file: ${sigFile}`);
+    const sigContent = readText(sigFile).trim();
+    let decodedSig = "";
+    try {
+      decodedSig = Buffer.from(sigContent, "base64").toString("utf8");
+    } catch {}
+    if (!decodedSig.startsWith("untrusted comment:") && !sigContent.startsWith("untrusted comment:")) {
+      fail(`invalid updater signature format in ${sigFile}`);
+    }
+
+    // Verify latest.json metadata
+    const manifestFile = path.join(distDir, "latest.json");
+    if (!fs.existsSync(manifestFile)) fail(`missing updater metadata manifest: ${manifestFile}`);
+    let manifest;
+    try {
+      manifest = JSON.parse(readText(manifestFile));
+    } catch (e) {
+      fail(`malformed latest.json manifest: ${e.message}`);
+    }
+
+    const normManifestVersion = String(manifest.version || "").replace(/^v/, "");
+    if (normManifestVersion !== version) {
+      fail(`latest.json version ${manifest.version} does not match expected version ${version}`);
+    }
+
+    if (!manifest.platforms || typeof manifest.platforms !== "object") {
+      fail("latest.json missing platforms object");
+    }
+
+    const winPlatform = manifest.platforms["windows-x86_64"];
+    if (!winPlatform) {
+      fail("latest.json does not contain platform entry for windows-x86_64");
+    }
+
+    if (!winPlatform.signature || winPlatform.signature.trim() !== sigContent) {
+      fail("latest.json signature does not match updater .sig file content");
+    }
+
+    const expectedUrl = `https://github.com/SeanDolan0/LocalLLmPanel/releases/download/v${version}/${zipName}`;
+    if (winPlatform.url !== expectedUrl) {
+      fail(`latest.json URL ${winPlatform.url} does not match expected release URL ${expectedUrl}`);
+    }
+
+    // Ensure we do not accidentally serve foreign architectures as windows-x86_64
+    for (const [key, platform] of Object.entries(manifest.platforms)) {
+      if (key !== "windows-x86_64") {
+        fail(`latest.json serves unexpected platform target: ${key}`);
+      }
+      if (!platform.url.includes("x64") || !platform.url.endsWith(".zip")) {
+        fail(`latest.json served asset is not a Windows x64 zip bundle: ${platform.url}`);
+      }
+    }
+  }
 }
 
 const pkg = readJson(path.join(rootDir, "package.json"));

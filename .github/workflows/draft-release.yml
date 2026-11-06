@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -69,11 +71,48 @@ jobs:
       - name: Validate release metadata
         run: npm run release:check
 
-      - name: Build executable and NSIS installer
+      - name: Build executable, NSIS installer, and signed updater bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          REQUIRE_SIGNED_RELEASE: "1"
         run: npm run build:setup
 
-      - name: Validate release files and SHA-256 checksums
+      - name: Authenticode sign executables (if certificate secret configured)
+        if: env.WINDOWS_CERTIFICATE_BASE64 != ''
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $certBytes = [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          $certPath = Join-Path $env:RUNNER_TEMP "authenticode.pfx"
+          [System.IO.File]::WriteAllBytes($certPath, $certBytes)
+          $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+          if (-not (Test-Path $signtool)) {
+            $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Select-Object -First 1).FullName
+          }
+          if ($signtool) {
+            Get-ChildItem dist-release -Filter "*.exe" | ForEach-Object {
+              & $signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 $_.FullName
+            }
+          } else {
+            throw "signtool.exe not found on runner"
+          }
+          Remove-Item -Force $certPath
+
+      - name: Validate release files, signatures, and SHA-256 checksums
+        env:
+          REQUIRE_SIGNED_RELEASE: "1"
         run: node scripts/validate-release.mjs --setup --artifacts
+
+      - name: Generate build provenance attestations
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-path: |
+            dist-release/*.exe
+            dist-release/*.zip
 
       - name: Create draft GitHub Release
         shell: pwsh
@@ -87,11 +126,15 @@ jobs:
                 $_.Name -like 'LocalLLMPanel-*.exe' -or
                 $_.Name -like 'LocalLLMPanel-*.exe.sha256' -or
                 $_.Name -like 'Local.LLM.Panel_*_x64-setup.exe' -or
-                $_.Name -like 'Local.LLM.Panel_*_x64-setup.exe.sha256'
+                $_.Name -like 'Local.LLM.Panel_*_x64-setup.exe.sha256' -or
+                $_.Name -like 'Local.LLM.Panel_*_x64-setup.nsis.zip' -or
+                $_.Name -like 'Local.LLM.Panel_*_x64-setup.nsis.zip.sha256' -or
+                $_.Name -like 'Local.LLM.Panel_*_x64-setup.nsis.zip.sig' -or
+                $_.Name -like 'latest.json'
               }
           )
-          if ($assets.Count -ne 4) {
-            throw "Expected four release files (two binaries and two checksums), found $($assets.Count)"
+          if ($assets.Count -lt 7) {
+            throw "Expected release files (installer, standalone exe, updater bundle, signatures, checksums, and latest.json), found $($assets.Count)"
           }
           $assetPaths = @($assets | ForEach-Object { $_.FullName })
           gh release create "$env:RELEASE_TAG" @assetPaths --draft --generate-notes --verify-tag --title "$env:RELEASE_TAG"

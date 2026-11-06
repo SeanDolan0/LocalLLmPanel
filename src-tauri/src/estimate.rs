@@ -450,7 +450,17 @@ pub fn family_fallback(model_id: &str) -> Option<usize> {
         (&["qwen3"], 131_072),
         (&["qwen2"], 131_072),
         (&["qwen"], 32_768),
-        (&["llama-3.1", "llama-3.2", "llama-3.3", "llama3.1", "llama3.2", "llama3.3"], 131_072),
+        (
+            &[
+                "llama-3.1",
+                "llama-3.2",
+                "llama-3.3",
+                "llama3.1",
+                "llama3.2",
+                "llama3.3",
+            ],
+            131_072,
+        ),
         (&["llama3", "llama-3"], 8_192),
         (&["llama"], 4_096),
         (&["spark-x2.6", "spark-x"], 36_126),

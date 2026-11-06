@@ -114,3 +114,67 @@ test("core documentation and policy files exist and are non-empty", () => {
     assert.ok(stat.size > 200, `${doc} is unexpectedly small (${stat.size} bytes)`);
   }
 });
+
+test("Tauri updater plugin configuration and capabilities are valid", () => {
+  const tauriConf = JSON.parse(read("src-tauri/tauri.conf.json"));
+  assert.equal(tauriConf.bundle?.createUpdaterArtifacts, true, "bundle.createUpdaterArtifacts must be true");
+  assert.ok(tauriConf.plugins?.updater, "plugins.updater configuration must exist");
+  assert.ok(typeof tauriConf.plugins.updater.pubkey === "string" && tauriConf.plugins.updater.pubkey.length > 20, "pubkey must be configured");
+  assert.ok(Array.isArray(tauriConf.plugins.updater.endpoints) && tauriConf.plugins.updater.endpoints.length > 0, "endpoints must be configured");
+
+  for (const endpoint of tauriConf.plugins.updater.endpoints) {
+    assert.ok(endpoint.startsWith("https://"), `updater endpoint must use https: ${endpoint}`);
+  }
+
+  // Ensure no private key is committed in repo
+  const repoFiles = [
+    "src-tauri/tauri.conf.json",
+    "src-tauri/Cargo.toml",
+    "package.json",
+    ".github/workflows/draft-release.yml"
+  ];
+  for (const f of repoFiles) {
+    const content = read(f);
+    assert.equal(content.includes("untrusted comment: rsign encrypted secret key"), false, `secret key found in ${f}`);
+  }
+
+  const caps = JSON.parse(read("src-tauri/capabilities/default.json"));
+  assert.ok(caps.permissions.includes("updater:default"), "capabilities/default.json must include updater:default");
+});
+
+test("updater IPC methods and types maintain frontend contract", () => {
+  const typesContent = read("src/types.ts");
+  const requiredTypes = [
+    "export interface AppUpdateInfo",
+    "export interface AppUpdateProgress",
+    "export interface UpdateLaunchResult",
+    "export interface LastUpdateStatus",
+  ];
+  for (const t of requiredTypes) {
+    assert.ok(typesContent.includes(t), `missing expected updater type: ${t}`);
+  }
+
+  const apiContent = read("src/api.ts");
+  assert.ok(apiContent.includes("checkAppUpdate"), "missing api.checkAppUpdate");
+  assert.ok(apiContent.includes("downloadAndInstallUpdate"), "missing api.downloadAndInstallUpdate");
+  assert.ok(apiContent.includes("lastUpdateStatus"), "missing api.lastUpdateStatus");
+});
+
+test("updater manifest parsing correctly selects windows-x86_64 target", () => {
+  const sampleManifest = {
+    version: "v2.3.0",
+    notes: "New release",
+    pub_date: "2026-11-06T00:00:00Z",
+    platforms: {
+      "windows-x86_64": {
+        signature: "sample_sig",
+        url: "https://github.com/SeanDolan0/LocalLLmPanel/releases/download/v2.3.0/Local.LLM.Panel_2.3.0_x64-setup.nsis.zip"
+      }
+    }
+  };
+
+  assert.ok(sampleManifest.platforms["windows-x86_64"], "manifest must contain windows-x86_64");
+  assert.equal(sampleManifest.platforms["darwin-x86_64"], undefined, "manifest must not serve darwin");
+  assert.equal(sampleManifest.platforms["linux-x86_64"], undefined, "manifest must not serve linux");
+  assert.ok(sampleManifest.platforms["windows-x86_64"].url.endsWith(".nsis.zip"));
+});

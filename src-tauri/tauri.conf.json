@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "category": "DeveloperTool",
     "shortDescription": "Manage vLLM servers inside WSL2",
@@ -38,5 +39,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZDRDE3QzBGODFFNUUzOUYKUldTZjQrV0JEM3pSL05MeWIwb29sRnU5WkoxeStKcTh4N0F6T0lReVVaNHM0dG01cXZtYTA2V1kK",
+      "endpoints": [
+        "https://github.com/SeanDolan0/LocalLLmPanel/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

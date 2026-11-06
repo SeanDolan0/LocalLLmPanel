@@ -32,8 +32,15 @@ mod it;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(Arc::new(AppState::new()))
         .setup(|app| {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -50,7 +57,9 @@ pub fn run() {
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
                             let state: tauri::State<Arc<AppState>> = app.state();
-                            state.is_quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+                            state
+                                .is_quitting
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
                             app.exit(0);
                         }
                         "show" => {

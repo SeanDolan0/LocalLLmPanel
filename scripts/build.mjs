@@ -168,6 +168,13 @@ if (isFast) {
   modeLabel = "Setup Release (Standalone + NSIS Installer)";
 }
 
+const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY || buildEnv.TAURI_SIGNING_PRIVATE_KEY;
+if (signingKey) {
+  tauriArgs.push("--ci");
+} else if (!isFast) {
+  tauriArgs.push("--no-sign");
+}
+
 console.log(`\nBuild Mode: ${modeLabel}`);
 const fullCmd = `npx ${tauriArgs.join(" ")}`;
 console.log(`Executing: ${fullCmd}\n`);
@@ -209,6 +216,59 @@ if (!isFast) {
       copyArtifact(src, dest);
       const sizeMb = (fs.statSync(dest).size / (1024 * 1024)).toFixed(2);
       stagedFiles.push({ name: destName, type: "NSIS Installer", size: `${sizeMb} MB`, path: dest });
+
+      // Create NSIS updater bundle zip: Local.LLM.Panel_${version}_x64-setup.nsis.zip
+      const zipName = `Local.LLM.Panel_${version}_x64-setup.nsis.zip`;
+      const zipPath = path.join(distReleaseDir, zipName);
+      if (fs.existsSync(zipPath)) {
+        fs.rmSync(zipPath, { force: true });
+      }
+      try {
+        execSync(`tar.exe -a -c -f "${zipPath}" -C "${distReleaseDir}" "${destName}"`, { stdio: "pipe" });
+      } catch {
+        // Fallback to powershell Compress-Archive
+        execSync(`powershell -NoProfile -Command "Compress-Archive -LiteralPath '${dest}' -DestinationPath '${zipPath}' -Force"`, { stdio: "inherit" });
+      }
+      const zipSizeMb = (fs.statSync(zipPath).size / (1024 * 1024)).toFixed(2);
+      stagedFiles.push({ name: zipName, type: "NSIS Updater Bundle", size: `${zipSizeMb} MB`, path: zipPath });
+
+      // Sign updater artifacts if TAURI_SIGNING_PRIVATE_KEY is available
+      if (signingKey) {
+        console.log("\n[Signing] Signing updater bundle and installer with Tauri signer...");
+        const signEnv = {
+          ...buildEnv,
+          TAURI_SIGNING_PRIVATE_KEY: signingKey,
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || "",
+        };
+
+        // Sign updater zip
+        execSync(`npx tauri signer sign "${zipPath}"`, { cwd: rootDir, env: signEnv, stdio: "pipe" });
+        const zipSigPath = `${zipPath}.sig`;
+        if (fs.existsSync(zipSigPath)) {
+          const sigContent = fs.readFileSync(zipSigPath, "utf8").trim();
+
+          // Generate latest.json
+          const latestJson = {
+            version: `v${version}`,
+            notes: `Release v${version}`,
+            pub_date: new Date().toISOString(),
+            platforms: {
+              "windows-x86_64": {
+                signature: sigContent,
+                url: `https://github.com/SeanDolan0/LocalLLmPanel/releases/download/v${version}/${zipName}`,
+              },
+            },
+          };
+          const latestJsonPath = path.join(distReleaseDir, "latest.json");
+          fs.writeFileSync(latestJsonPath, JSON.stringify(latestJson, null, 2) + "\n", "utf8");
+          console.log(`[Staging] Generated updater manifest: latest.json`);
+        }
+
+        // Also sign setup exe
+        execSync(`npx tauri signer sign "${dest}"`, { cwd: rootDir, env: signEnv, stdio: "pipe" });
+      } else {
+        console.warn("\n[WARN] TAURI_SIGNING_PRIVATE_KEY not set. Skipping updater bundle signing and latest.json generation.");
+      }
     }
   }
 

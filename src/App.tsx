@@ -86,7 +86,7 @@ export default function App() {
           } else if (status.status === "failed") {
             setUpdateBanner({
               type: "error",
-              message: `Update installation failed: ${status.message}. Diagnostic log: %TEMP%\\LocalLLMPanel-updates\\update-apply.log`,
+              message: `Update installation failed: ${status.message}`,
             });
           }
         }
