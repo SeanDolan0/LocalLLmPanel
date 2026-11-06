@@ -1608,7 +1608,7 @@ fn clamp_effort_to_ladder(effort: &str, ladder: &[String]) -> Option<String> {
 fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
     static CHECK_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"(?i)(?:reasoning|thinking)(?:_effort|_level)?[^\(\)\[\]]{0,120}?(?:not\s+in|in)\s*[\(\[]([^\(\)\]]{0,240})[\)\]]",
+            r"(?i)(?:[a-z0-9_]*reasoning|[a-z0-9_]*thinking|[a-z0-9_]*effort)[a-z0-9_]*[^\r\n]{0,80}?(?:not\s+in|in)\s*[\(\[]([^\(\)\]]{0,240})[\)\]]",
         )
         .expect("valid reasoning effort validation regex")
     });
@@ -2735,6 +2735,8 @@ async fn route(
                         "parameter_size": param_size,
                         "quantization_level": quant,
                     },
+                    "thinking_level_map": row.get("thinking_level_map").cloned().unwrap_or(serde_json::Value::Null),
+                    "thinkingLevelMap": row.get("thinkingLevelMap").cloned().unwrap_or(serde_json::Value::Null),
                     "model_info": row,
                 })
                 .to_string();

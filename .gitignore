@@ -27,3 +27,5 @@ graphify-out/
 # Python bytecode from the release tooling
 __pycache__/
 *.pyc
+# Crossbar workspace
+crossbar/
