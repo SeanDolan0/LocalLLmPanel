@@ -110,6 +110,15 @@ function validateArtifacts(version) {
     const zipStat = fs.statSync(zipFile);
     if (!zipStat.isFile() || zipStat.size === 0) fail(`empty updater bundle artifact: ${zipFile}`);
 
+    // Verify zip uses compression method 0 (Stored) for universal compatibility with older client builds
+    const zipBuf = fs.readFileSync(zipFile);
+    if (zipBuf.length >= 10 && zipBuf.readUInt32LE(0) === 0x04034b50) {
+      const method = zipBuf.readUInt16LE(8);
+      if (method !== 0) {
+        fail(`updater bundle ${zipName} uses compression method ${method}; expected method 0 (Stored) for client compatibility`);
+      }
+    }
+
     // Verify zip checksum
     const zipChecksumFile = `${zipFile}.sha256`;
     if (fs.existsSync(zipChecksumFile)) {

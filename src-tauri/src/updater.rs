@@ -682,4 +682,41 @@ mod tests {
         let res = verify_minisign_signature(data, invalid_sig_b64, pub_key_b64);
         assert!(res.is_err(), "Invalid signature must be rejected");
     }
+
+    #[test]
+    fn test_zip_decompression_support() {
+        use std::io::{Cursor, Read, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
+        // Test Stored (method 0 - compatible with all versions including v2.3.0)
+        let mut stored_buf = Vec::new();
+        {
+            let mut writer = ZipWriter::new(Cursor::new(&mut stored_buf));
+            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            writer.start_file("installer.exe", options).unwrap();
+            writer.write_all(b"fake installer binary payload").unwrap();
+            writer.finish().unwrap();
+        }
+        let mut archive_stored = ZipArchive::new(Cursor::new(&stored_buf)).unwrap();
+        let mut file_stored = archive_stored.by_name("installer.exe").unwrap();
+        let mut content_stored = Vec::new();
+        file_stored.read_to_end(&mut content_stored).unwrap();
+        assert_eq!(content_stored, b"fake installer binary payload");
+
+        // Test Deflated (method 8 - enabled via deflate-flate2)
+        let mut deflated_buf = Vec::new();
+        {
+            let mut writer = ZipWriter::new(Cursor::new(&mut deflated_buf));
+            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            writer.start_file("installer.exe", options).unwrap();
+            writer.write_all(b"fake installer binary payload").unwrap();
+            writer.finish().unwrap();
+        }
+        let mut archive_def = ZipArchive::new(Cursor::new(&deflated_buf)).unwrap();
+        let mut file_def = archive_def.by_name("installer.exe").unwrap();
+        let mut content_def = Vec::new();
+        file_def.read_to_end(&mut content_def).unwrap();
+        assert_eq!(content_def, b"fake installer binary payload");
+    }
 }
