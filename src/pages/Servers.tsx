@@ -6,7 +6,7 @@ import { Badge, Button, Card, CardTitle, Collapsible, Field, HelpBubble, Menu, i
 import { Sparkline } from "../components/Sparkline";
 import { ServerMetricsPanel } from "../components/ServerMetricsPanel";
 import { effectiveModelName } from "../types";
-import type { ContextFitReport, ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice } from "../types";
+import type { ContextFitReport, ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice, LibraryEntry } from "../types";
 
 const SECRET_PLACEHOLDER = "__LLM_PANEL_SECRET_REDACTED__";
 
@@ -445,7 +445,7 @@ export default function Servers() {
                       r.status === "starting" ? "bg-amber-400 animate-pulse" :
                       r.status === "error" ? "bg-red-400" : "bg-slate-600"
                     }`} />
-                    <span className="font-medium text-slate-200">{r.def.name}</span>
+                    <span className="font-medium text-slate-200">{cleanModelName(r.def.name)}</span>
                     <Badge color={r.status === "running" ? "emerald" : r.status === "starting" ? "amber" : r.status === "error" ? "red" : "slate"}>
                       {r.status}
                     </Badge>
@@ -551,7 +551,7 @@ export default function Servers() {
                         label: "Delete server",
                         danger: true,
                         onClick: () => {
-                          if (confirm(`Delete server "${r.def.name}"?`)) act(r.def.id, () => api.serversDelete(r.def.id));
+                          if (confirm(`Delete server "${cleanModelName(r.def.name)}"?`)) act(r.def.id, () => api.serversDelete(r.def.id));
                         },
                       },
                     ]}
@@ -651,7 +651,7 @@ export default function Servers() {
                 </div>
               }
             >
-              {selectedRow.def.name} · logs
+              {cleanModelName(selectedRow.def.name)} · logs
             </CardTitle>
             <div className="h-80 overflow-y-auto rounded-md bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-slate-300">
               {selectedLog ? (
@@ -712,6 +712,14 @@ function inferVllmQuant(modelId: string): string {
   if (id.includes("AWQ")) return "awq";
   if (id.includes("FP8")) return "fp8";
   return "auto";
+}
+
+export function cleanModelName(raw: string): string {
+  if (!raw) return "";
+  const trimmed = raw.trim();
+  const withoutPath = trimmed.split(/[\\/]/).pop() || trimmed;
+  const stripped = withoutPath.replace(/\.(gguf|bin|safetensors)$/i, "");
+  return stripped.trim() || trimmed;
 }
 
 function inferGgufQuantLabel(modelPath: string): string {
@@ -919,7 +927,7 @@ function NewServerForm({
     Boolean(initialModelPath);
 
   const [modelId, setModelId] = useState(initialModelId);
-  const [name, setName] = useState(initialModelId ? initialModelId.split("/").pop() || "" : "");
+  const [name, setName] = useState(initialModelId ? cleanModelName(initialModelId) : "");
   const [task, setTask] = useState<"instruct" | "embed">(initialTask || "instruct");
   const [backend, setBackend] = useState<"vllm" | "llamacpp">(
     initialBackend || (isInitialGguf ? "llamacpp" : "vllm")
@@ -927,6 +935,95 @@ function NewServerForm({
   const [quant, setQuant] = useState(
     initialQuant || (isInitialGguf ? "GGUF" : inferVllmQuant(initialModelId))
   );
+  const [libraryModels, setLibraryModels] = useState<LibraryEntry[]>([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [selectedLibraryModel, setSelectedLibraryModel] = useState<string>("");
+
+  useEffect(() => {
+    let active = true;
+    setLibraryLoading(true);
+    api.libraryList()
+      .then((entries) => {
+        if (active && Array.isArray(entries)) {
+          setLibraryModels(entries);
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to load library models:", err);
+      })
+      .finally(() => {
+        if (active) setLibraryLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleSelectLibraryModel = (targetKey: string) => {
+    setSelectedLibraryModel(targetKey);
+    if (!targetKey) return;
+
+    const entry = libraryModels.find((m) => (m.model_path || m.model_id) === targetKey);
+    if (!entry) return;
+
+    const isGguf =
+      entry.quant?.toUpperCase() === "GGUF" ||
+      entry.model_id.toUpperCase().includes("GGUF") ||
+      Boolean(entry.model_path && entry.model_path.toLowerCase().endsWith(".gguf")) ||
+      Boolean(entry.is_local && entry.model_path && entry.model_path.toLowerCase().endsWith(".gguf"));
+
+    if (isGguf) {
+      setBackend("llamacpp");
+      const path = entry.model_path || entry.model_id;
+      setModelPath(path);
+      setModelId(entry.model_id);
+      setQuant(entry.quant || inferGgufQuantLabel(path));
+    } else {
+      setBackend("vllm");
+      setModelId(entry.model_id);
+      setModelPath(entry.model_path || "");
+      setQuant(entry.quant || inferVllmQuant(entry.model_id));
+    }
+
+    if (entry.task === "embed") {
+      setTask("embed");
+    } else {
+      setTask("instruct");
+    }
+
+    setName(cleanModelName(entry.model_id));
+  };
+
+  const handleBrowseFileExplorer = async () => {
+    try {
+      const selected = await open({
+        title: "Select model file from computer",
+        multiple: false,
+        filters: [
+          { name: "Model Files (*.gguf, *.safetensors, *.bin)", extensions: ["gguf", "safetensors", "bin"] },
+          { name: "GGUF Models (*.gguf)", extensions: ["gguf"] },
+          { name: "All Files (*.*)", extensions: ["*"] },
+        ],
+      });
+      if (selected && typeof selected === "string") {
+        const isGguf = selected.toLowerCase().endsWith(".gguf");
+        if (isGguf) {
+          setBackend("llamacpp");
+          setModelPath(selected);
+          setModelId(selected);
+          setQuant(inferGgufQuantLabel(selected));
+        } else {
+          setModelPath(selected);
+          setModelId(selected);
+          if (!initialServer) setQuant(inferVllmQuant(selected));
+        }
+        setName(cleanModelName(selected));
+        setSelectedLibraryModel("");
+      }
+    } catch (err) {
+      console.error("Failed to open file dialog", err);
+    }
+  };
   const [gpuUtil, setGpuUtil] = useState(initialGpuUtil !== undefined ? String(initialGpuUtil) : "0.85");
   const [maxLen, setMaxLen] = useState(initialMaxLen ? String(initialMaxLen) : "");
   const [swapSpaceGb, setSwapSpaceGb] = useState<string>(
@@ -998,7 +1095,7 @@ function NewServerForm({
   useEffect(() => {
     if (initialModelId) {
       setModelId(initialModelId);
-      setName(initialModelId.split("/").pop() || "");
+      setName(cleanModelName(initialModelId));
     }
     if (initialBackend) {
       setBackend(initialBackend);
@@ -1051,6 +1148,7 @@ function NewServerForm({
       setSpeculativeNumTokens(String(initialSpeculativeNumTokens));
     }
     if (initialServer) {
+      if (initialServer.name) setName(cleanModelName(initialServer.name));
       setEnforceEager(initialServer.enforce_eager ?? true);
       setLlamaCppChannel(initialServer.llamacpp_channel || "upstream");
       setCacheTypeK(initialServer.cache_type_k || "q8_0");
@@ -1270,9 +1368,11 @@ function NewServerForm({
         backend,
         model_id: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : chosenModelId,
         name:
-          name.trim() ||
-          (chosenModelId || chosenModelPath).split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") ||
-          "server",
+          cleanModelName(
+            name.trim() ||
+            (chosenModelId || chosenModelPath).split(/[\\/]/).pop()?.replace(/\.(gguf|bin|safetensors)$/i, "") ||
+            "server"
+          ),
         task: backend === "vllm" ? task : "instruct",
         quant,
         gpu_mem_util: backend === "vllm" ? parseFloat(gpuUtil) : undefined,
@@ -1351,6 +1451,54 @@ function NewServerForm({
         </div>
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2 rounded-lg border border-edge/60 bg-surface/50 p-3 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-1">
+            <span className="text-xs font-semibold text-slate-200">Model Selection</span>
+            <span className="text-[11px] text-slate-400">Choose from library or browse computer for external model</span>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="flex-1 min-w-0">
+              <select
+                className={inputCls}
+                value={selectedLibraryModel}
+                onChange={(e) => handleSelectLibraryModel(e.target.value)}
+              >
+                <option value="">
+                  {libraryLoading
+                    ? "Loading models from library…"
+                    : libraryModels.length === 0
+                    ? "No models found in library"
+                    : "Select a model from Library…"}
+                </option>
+                {libraryModels.map((entry) => {
+                  const key = entry.model_path || entry.model_id;
+                  const sizeGb = (entry.size_mb / 1024).toFixed(1);
+                  const isGguf =
+                    entry.quant?.toUpperCase() === "GGUF" ||
+                    entry.model_id.toUpperCase().includes("GGUF") ||
+                    Boolean(entry.model_path && entry.model_path.toLowerCase().endsWith(".gguf")) ||
+                    Boolean(entry.is_local && entry.model_path);
+                  return (
+                    <option key={key} value={key}>
+                      [{isGguf ? "GGUF" : "HF"}] {entry.model_id} ({sizeGb} GB{entry.quant && entry.quant !== "GGUF" ? ` · ${entry.quant}` : ""}{entry.is_local ? " · local" : ""})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+            <Button
+              variant="subtle"
+              className="shrink-0 flex items-center gap-1.5"
+              onClick={handleBrowseFileExplorer}
+              title="Open File Explorer window to choose a model not in the library"
+            >
+              <span>📂</span>
+              <span>Browse File Explorer…</span>
+            </Button>
+          </div>
+        </div>
+
         <Field label="Backend" help="vLLM (WSL2) for Hugging Face checkpoints; llama.cpp (Windows) for GGUF models. Backends use RAM and VRAM differently — vLLM manages GPU memory automatically, llama.cpp exposes the offload flags below.">
           <select className={inputCls} value={backend} onChange={(e) => changeBackend(e.target.value as "vllm" | "llamacpp")}>
             <option value="vllm">vLLM (WSL2)</option>
@@ -1359,45 +1507,19 @@ function NewServerForm({
         </Field>
         <Field label={backend === "llamacpp" ? "GGUF model path" : "Model id (HF)"} help={backend === "llamacpp" ? "Path to the GGUF weights file. Model size in GB decides how much VRAM/RAM the server needs — bigger quants and more layers use more VRAM." : "Hugging Face repo id (or local path). Quant/precision choice is the biggest driver of VRAM and system RAM use."}>
           {backend === "llamacpp" ? (
-            <div className="flex gap-1.5">
-              <input
-                className={inputCls}
-                placeholder="C:\models\model-Q4_K_M.gguf"
-                value={modelPath}
-                onChange={(e) => {
-                  const nextPath = e.target.value;
-                  setModelPath(nextPath);
-                  setQuant(inferGgufQuantLabel(nextPath));
-                  if (!name) {
-                    setName(nextPath.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
-                  }
-                }}
-              />
-              <Button
-                variant="ghost"
-                className="shrink-0 px-3 text-xs"
-                onClick={async () => {
-                  try {
-                    const selected = await open({
-                      title: "Select GGUF model file",
-                      filters: [{ name: "GGUF models", extensions: ["gguf"] }],
-                    });
-                    if (selected && typeof selected === "string") {
-                      setModelPath(selected);
-                      setQuant(inferGgufQuantLabel(selected));
-                      if (!modelId) setModelId(selected);
-                      if (!name) {
-                        setName(selected.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "");
-                      }
-                    }
-                  } catch (err) {
-                    console.error("Failed to open file dialog", err);
-                  }
-                }}
-              >
-                Browse…
-              </Button>
-            </div>
+            <input
+              className={inputCls}
+              placeholder="C:\models\model-Q4_K_M.gguf"
+              value={modelPath}
+              onChange={(e) => {
+                const nextPath = e.target.value;
+                setModelPath(nextPath);
+                setQuant(inferGgufQuantLabel(nextPath));
+                if (!name) {
+                  setName(cleanModelName(nextPath));
+                }
+              }}
+            />
           ) : (
             <input
               className={inputCls}
@@ -1406,11 +1528,14 @@ function NewServerForm({
               onChange={(e) => {
                 setModelId(e.target.value);
                 if (!initialServer) setQuant(inferVllmQuant(e.target.value));
+                if (!name) {
+                  setName(cleanModelName(e.target.value));
+                }
               }}
             />
           )}
         </Field>
-        <Field label="Name (optional)" help="Display name for this server. No effect on model speed or RAM.">
+        <Field label="Name (optional)" help="Display name for this server. Defaults to the model name (no paths or extensions).">
           <input className={inputCls} placeholder="coder-0.5b" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         {backend === "vllm" && <Field label="Task" help="Instruct serves chat/completions; embed serves the embeddings endpoint. No effect on model speed or RAM — it only changes which routes are exposed.">

@@ -2161,6 +2161,26 @@ pub struct ServerInput {
     pub llamacpp_channel: Option<String>,
 }
 
+/// Sanitizes a server display name so it contains only the model name and not the entire file path.
+pub fn clean_server_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_path = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed);
+    let stripped = without_path
+        .strip_suffix(".gguf")
+        .or_else(|| without_path.strip_suffix(".GGUF"))
+        .or_else(|| without_path.strip_suffix(".bin"))
+        .or_else(|| without_path.strip_suffix(".safetensors"))
+        .unwrap_or(without_path);
+    if stripped.trim().is_empty() {
+        trimmed.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
 #[tauri::command]
 pub async fn servers_create(
     state: State<'_, Arc<AppState>>,
@@ -2168,11 +2188,12 @@ pub async fn servers_create(
 ) -> Result<ServerDef, String> {
     let st = (*state).clone();
     let cfg = st.config();
-    let name = input
+    let name_raw = input
         .name
         .clone()
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| "name is required".to_string())?;
+    let name = clean_server_name(&name_raw);
     let model_id = input
         .model_id
         .clone()
@@ -2573,7 +2594,7 @@ pub async fn servers_update(
             updated.llamacpp_channel = value;
         }
         if let Some(value) = input.name.clone() {
-            updated.name = value;
+            updated.name = clean_server_name(&value);
         }
         if let Some(value) = input.model_id.clone() {
             updated.model_id = value;
@@ -5570,5 +5591,14 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
         let model_id = "meta-llama/Llama-3.1-8B";
         let script = format!("pkill -f 'hf download.*[ /]{}(\\s|$)' || true", model_id);
         assert!(script.contains("[ /]meta-llama/Llama-3.1-8B(\\s|$)"));
+    }
+
+    #[test]
+    fn test_clean_server_name() {
+        assert_eq!(clean_server_name("C:\\models\\qwen-0.5b.gguf"), "qwen-0.5b");
+        assert_eq!(clean_server_name("/home/user/models/qwen-0.5b.gguf"), "qwen-0.5b");
+        assert_eq!(clean_server_name("meta-llama/Llama-3-8B.safetensors"), "Llama-3-8B");
+        assert_eq!(clean_server_name("Qwen/Qwen2.5-0.5B-Instruct"), "Qwen2.5-0.5B-Instruct");
+        assert_eq!(clean_server_name("custom-server-name"), "custom-server-name");
     }
 }

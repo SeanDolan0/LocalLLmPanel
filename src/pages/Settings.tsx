@@ -137,10 +137,35 @@ export default function Settings() {
   const [hfTokenDirty, setHfTokenDirty] = useState(false);
   const [githubTokenDirty, setGithubTokenDirty] = useState(false);
   const [apiKeyDirty, setApiKeyDirty] = useState(false);
+  const [apiKeyCopied, setApiKeyCopied] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [customEnvDirty, setCustomEnvDirty] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+
+  const generateGatewayApiKey = () => {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    const randomHex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const key = `sk-${randomHex}`;
+    updateAdv({ api_key: key });
+    setApiKeyDirty(true);
+    setShowApiKey(true);
+    return key;
+  };
+
+  const copyApiKey = async (customKey?: string) => {
+    const key = customKey ?? adv.api_key;
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      setApiKeyCopied(true);
+      setTimeout(() => setApiKeyCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
 
   // Simple vs. Advanced mode toggle with localStorage persistence
   const [mode, setMode] = useState<"simple" | "advanced">(() => {
@@ -1441,21 +1466,62 @@ export default function Settings() {
                 help="Optional key gating the server and gateway endpoints. No effect on model speed or RAM; if the gateway is enabled, a key is required to call it."
                 hint={
                   s.api_key_configured
-                    ? "A key is stored securely. Leave blank to keep it; enter a replacement to rotate it."
-                    : "Required for the local gateway. Leave blank to keep an existing key."
+                    ? "A key is stored securely. Leave blank to keep it; enter or generate a replacement to rotate it."
+                    : "Required for the local gateway. Click 'Auto-generate Key' to create a random key."
                 }
               >
-                <input
-                  className={inputCls}
-                  type="password"
-                  placeholder="Optional (e.g. sk-my-secret-key)"
-                  value={adv.api_key ?? ""}
-                  onChange={(e) => {
-                    const v = e.target.value.trim();
-                    updateAdv({ api_key: v === "" ? null : v });
-                    setApiKeyDirty(true);
-                  }}
-                />
+                <div className="space-y-2">
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        className={`${inputCls} pr-10`}
+                        type={showApiKey ? "text" : "password"}
+                        placeholder={s.api_key_configured && !adv.api_key ? "•••••••••••••••••••••••• (Stored)" : "Optional (e.g. sk-my-secret-key)"}
+                        value={adv.api_key ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value.trim();
+                          updateAdv({ api_key: v === "" ? null : v });
+                          setApiKeyDirty(true);
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-200 focus:outline-none"
+                        title={showApiKey ? "Hide key" : "Show key"}
+                      >
+                        {showApiKey ? "🙈" : "👁️"}
+                      </button>
+                    </div>
+                    <Button
+                      variant="subtle"
+                      className="shrink-0 flex items-center gap-1.5"
+                      onClick={() => {
+                        const newKey = generateGatewayApiKey();
+                        copyApiKey(newKey);
+                      }}
+                      title="Generate a random secure API key for the gateway and copy to clipboard"
+                    >
+                      <span>⚡</span>
+                      <span>Auto-generate Key</span>
+                    </Button>
+                    {adv.api_key && (
+                      <Button
+                        variant="ghost"
+                        className="shrink-0"
+                        onClick={() => copyApiKey()}
+                        title="Copy API key to clipboard"
+                      >
+                        {apiKeyCopied ? "Copied" : "Copy"}
+                      </Button>
+                    )}
+                  </div>
+                  {apiKeyCopied && (
+                    <div className="text-[11px] text-emerald-400">
+                      ✓ API key copied to clipboard! Remember to click &quot;Save Network Settings&quot; below.
+                    </div>
+                  )}
+                </div>
               </Field>
             </div>
 
@@ -1500,9 +1566,19 @@ export default function Settings() {
                 )}
               </div>
 
-              {adv.gateway_enabled && !s.api_key_configured && (
-                <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
-                  The gateway is enabled but has no API key. Set one above before using client routes; unauthenticated /v1 access is denied.
+              {adv.gateway_enabled && !s.api_key_configured && !adv.api_key && (
+                <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span>The gateway is enabled but has no API key. Set one above before using client routes; unauthenticated /v1 access is denied.</span>
+                  <Button
+                    variant="subtle"
+                    className="shrink-0 text-xs"
+                    onClick={() => {
+                      const newKey = generateGatewayApiKey();
+                      copyApiKey(newKey);
+                    }}
+                  >
+                    ⚡ Auto-generate Key
+                  </Button>
                 </div>
               )}
               {adv.gateway_enabled && (
@@ -1561,6 +1637,7 @@ export default function Settings() {
                   gatewayPort={adv.gateway_port}
                   instructModel={gwInstruct}
                   embedModel={gwEmbed}
+                  apiKey={adv.api_key}
                   copied={snippetCopied}
                   setCopied={setSnippetCopied}
                 />
@@ -1925,43 +2002,46 @@ function ClientSnippets({
   gatewayPort,
   instructModel,
   embedModel,
+  apiKey,
   copied,
   setCopied,
 }: {
   gatewayPort: number;
   instructModel: string | null;
   embedModel: string | null;
+  apiKey?: string | null;
   copied: string | null;
   setCopied: (k: string | null) => void;
 }) {
   const base = `http://127.0.0.1:${gatewayPort}/v1`;
   const chat = instructModel ?? "your-instruct-model";
   const embed = embedModel ?? "your-embed-model";
+  const keyToUse = apiKey || "REPLACE_WITH_GATEWAY_API_KEY";
 
   const snippets: { key: string; label: string; hint: string; text: string }[] = [
     {
       key: "continue",
       label: "Continue config.yaml",
       hint: "Paste into ~/.continue/config.yaml",
-      text: `name: Local Assistant\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Local Instruct\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: "REPLACE_WITH_GATEWAY_API_KEY"\n  - name: Local Autocomplete\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: "REPLACE_WITH_GATEWAY_API_KEY"\n    capabilities: [autocomplete]\n  - name: Local Embed\n    provider: openai\n    model: ${embed}\n    apiBase: ${base}\n    apiKey: "REPLACE_WITH_GATEWAY_API_KEY"\n    capabilities: [embed]\n`,
+      text: `name: Local Assistant\nversion: 1.0.0\nschema: v1\nmodels:\n  - name: Local Instruct\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: "${keyToUse}"\n  - name: Local Autocomplete\n    provider: openai\n    model: ${chat}\n    apiBase: ${base}\n    apiKey: "${keyToUse}"\n    capabilities: [autocomplete]\n  - name: Local Embed\n    provider: openai\n    model: ${embed}\n    apiBase: ${base}\n    apiKey: "${keyToUse}"\n    capabilities: [embed]\n`,
     },
     {
       key: "cursor",
       label: "Cursor / Cline",
       hint: "Base URL + model override",
-      text: `Base URL: ${base}\nChat model: ${chat}\nAutocomplete model: ${chat}\nEmbeddings model: ${embed}\nAPI key: REPLACE_WITH_GATEWAY_API_KEY\n`,
+      text: `Base URL: ${base}\nChat model: ${chat}\nAutocomplete model: ${chat}\nEmbeddings model: ${embed}\nAPI key: ${keyToUse}\n`,
     },
     {
       key: "curl-chat",
       label: "curl chat",
       hint: "Chat + FIM completions smoke test",
-      text: `GATEWAY_API_KEY='REPLACE_WITH_GATEWAY_API_KEY'; curl ${base}/chat/completions -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${chat}","messages":[{"role":"user","content":"hi"}]}'\n`,
+      text: `GATEWAY_API_KEY='${keyToUse}'; curl ${base}/chat/completions -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${chat}","messages":[{"role":"user","content":"hi"}]}'\n`,
     },
     {
       key: "curl-embed",
       label: "curl embeddings",
       hint: "Embeddings smoke test",
-      text: `GATEWAY_API_KEY='REPLACE_WITH_GATEWAY_API_KEY'; curl ${base}/embeddings -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${embed}","input":"hello world"}'\n`,
+      text: `GATEWAY_API_KEY='${keyToUse}'; curl ${base}/embeddings -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${embed}","input":"hello world"}'\n`,
     },
   ];
 
