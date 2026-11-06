@@ -2,7 +2,7 @@
 
 pub fn base64_encode(data: &[u8]) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 {
@@ -158,8 +158,7 @@ pub fn decrypt_token(cipher: &str) -> Result<String, String> {
 
     #[cfg(target_os = "windows")]
     {
-        if payload.starts_with("mock:") {
-            let b64 = &payload["mock:".len()..];
+        if let Some(b64) = payload.strip_prefix("mock:") {
             let bytes = base64_decode(b64).ok_or("invalid base64 in mock token")?;
             return String::from_utf8(bytes).map_err(|e| e.to_string());
         }

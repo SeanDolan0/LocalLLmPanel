@@ -186,7 +186,11 @@ pub fn infer_model_family(
     } else if is_embedding {
         "Embeddings".to_string()
     } else {
-        model_id.split('/').last().unwrap_or(model_id).to_string()
+        model_id
+            .split('/')
+            .next_back()
+            .unwrap_or(model_id)
+            .to_string()
     };
 
     // Extract parameter class (e.g. "7B", "8B", "14B", "70B")
@@ -228,7 +232,7 @@ pub fn infer_base_model_id(repo_id: &str) -> Option<String> {
         return None;
     }
 
-    let repo_name = repo_id.split('/').last().unwrap_or(repo_id);
+    let repo_name = repo_id.split('/').next_back().unwrap_or(repo_id);
     let mut base_name = repo_name.to_string();
 
     for suffix in [

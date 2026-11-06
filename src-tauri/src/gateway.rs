@@ -1159,7 +1159,7 @@ async fn fetch_template_info(
         read_vllm_chat_template(&state.config().distro, def)
     };
 
-    let template_reasoning = template.as_deref().map_or(false, template_has_reasoning);
+    let template_reasoning = template.as_deref().is_some_and(template_has_reasoning);
     let ladder = template.as_deref().and_then(template_effort_ladder);
     (ladder, template_reasoning)
 }
@@ -1393,10 +1393,7 @@ fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
     if let Some(caps) = CHECK_RE.captures(template) {
         if let Some(matched) = caps.get(1) {
             let labels = matched.as_str();
-            for (index, part) in labels
-                .split(|character| character == '\'' || character == '"')
-                .enumerate()
-            {
+            for (index, part) in labels.split(['\'', '"']).enumerate() {
                 if index % 2 == 0 {
                     continue;
                 }
@@ -2718,7 +2715,7 @@ async fn proxy_chat(
         .unwrap_or_default();
     let context = match server_def.as_ref() {
         Some(def) => {
-            let (ctx, _) = resolve_context_for_server_async(state, def, &launch_args).await;
+            let (ctx, _) = resolve_context_for_server_async(state, def, launch_args).await;
             Some(ctx)
         }
         None => None,

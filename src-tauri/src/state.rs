@@ -15,7 +15,7 @@ pub struct ProvisionReportCache {
 
 pub fn provision_report_cache_path() -> PathBuf {
     let dir = dirs::data_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
         .join(CONFIG_DIR_NAME);
     dir.join("provision-report.json")
 }
@@ -558,7 +558,7 @@ impl ServerDef {
                 if self
                     .speculative_model
                     .as_deref()
-                    .map_or(false, |m| m.ends_with(".gguf") || m.contains('\\'))
+                    .is_some_and(|m| m.ends_with(".gguf") || m.contains('\\'))
                 {
                     self.speculative_model = None;
                     self.speculative_enabled = false;
@@ -919,10 +919,9 @@ pub(crate) fn migrate_llamacpp_config(cfg: &mut PersistedConfig) {
         .map(|fork| fork.id.clone())
         .collect();
     for fork_id in fork_ids {
-        if !cfg.llamacpp_channels.contains_key(&fork_id) {
-            cfg.llamacpp_channels
-                .insert(fork_id, LlamaCppChannelConfig::default());
-        }
+        cfg.llamacpp_channels
+            .entry(fork_id)
+            .or_insert_with(LlamaCppChannelConfig::default);
     }
 }
 
@@ -1394,6 +1393,12 @@ pub struct VecDequeLog {
     pub total: usize,
 }
 
+impl Default for VecDequeLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VecDequeLog {
     pub fn new() -> Self {
         VecDequeLog {
@@ -1521,6 +1526,12 @@ pub struct GpuSnapshot {
     pub util_percent: u32,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
@@ -1591,9 +1602,7 @@ impl AppState {
 
     pub fn record_server_metric(&self, server_id: &str, pt: ServerMetricPoint) {
         let mut sm = self.server_metrics.lock().unwrap();
-        let q = sm
-            .entry(server_id.to_string())
-            .or_insert_with(VecDeque::new);
+        let q = sm.entry(server_id.to_string()).or_default();
         if q.len() >= METRICS_SERIES_CAPACITY {
             q.pop_front();
         }
@@ -2350,9 +2359,9 @@ mod tests {
 
         let text = serde_json::to_string(&cfg).unwrap();
         let parsed: PersistedConfig = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed.minimize_to_tray, false);
-        assert_eq!(parsed.launch_at_login, true);
-        assert_eq!(parsed.servers[0].was_running, true);
+        assert!(!parsed.minimize_to_tray);
+        assert!(parsed.launch_at_login);
+        assert!(parsed.servers[0].was_running);
     }
 
     #[test]
@@ -2409,7 +2418,7 @@ mod tests {
         assert_eq!(recipe.port, 8088);
         assert_eq!(recipe.swap_space_gb, Some(4));
         assert_eq!(recipe.kv_cache_dtype.as_deref(), Some("fp8_e4m3"));
-        assert_eq!(recipe.speculative_enabled, true);
+        assert!(recipe.speculative_enabled);
         assert_eq!(
             recipe.speculative_model.as_deref(),
             Some("Qwen/Qwen2.5-0.5B-Instruct")
@@ -2447,7 +2456,10 @@ mod tests {
             "server_export_secret",
             "env_export_secret",
         ] {
-            assert!(!secret_json.contains(secret), "export leaked {secret}");
+            assert!(
+                !secret_json.contains(secret),
+                "export leaked a redacted secret"
+            );
         }
         assert!(secret_json.contains(SECRET_PLACEHOLDER));
         let public_json = serde_json::to_string(&redact_config_for_display(&secret_cfg)).unwrap();
@@ -2635,7 +2647,7 @@ mod tests {
         let cfg: PersistedConfig = serde_json::from_str(old).unwrap();
         assert_eq!(cfg.servers.len(), 1);
         let s = &cfg.servers[0];
-        assert_eq!(s.speculative_enabled, false);
+        assert!(!s.speculative_enabled);
         assert_eq!(s.speculative_model, None);
         assert_eq!(s.speculative_model_path, None);
         assert_eq!(s.speculative_num_tokens, None);
@@ -2693,7 +2705,7 @@ mod tests {
         // vLLM instruct with speculative decoding enabled:
         // clears speculative_model_path (GGUF only) and retains speculative_model and tokens
         def.normalize_for_backend().unwrap();
-        assert_eq!(def.speculative_enabled, true);
+        assert!(def.speculative_enabled);
         assert_eq!(
             def.speculative_model.as_deref(),
             Some("Qwen/Qwen2.5-0.5B-Instruct")
@@ -2704,7 +2716,7 @@ mod tests {
         // When disabled, all speculative fields are cleared
         def.speculative_enabled = false;
         def.normalize_for_backend().unwrap();
-        assert_eq!(def.speculative_enabled, false);
+        assert!(!def.speculative_enabled);
         assert_eq!(def.speculative_model, None);
         assert_eq!(def.speculative_model_path, None);
         assert_eq!(def.speculative_num_tokens, None);
@@ -2715,7 +2727,7 @@ mod tests {
         def.speculative_model = Some("draft-model".into());
         def.speculative_num_tokens = Some(5);
         def.normalize_for_backend().unwrap();
-        assert_eq!(def.speculative_enabled, false);
+        assert!(!def.speculative_enabled);
         assert_eq!(def.speculative_model, None);
         assert_eq!(def.speculative_num_tokens, None);
     }

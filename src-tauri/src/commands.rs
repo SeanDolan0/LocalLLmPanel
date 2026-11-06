@@ -1351,7 +1351,7 @@ pub async fn search_models_with_fit_impl(
     // 1. Search local curated database
     let mut local_results =
         crate::llmfit_adapter::search_models_local(&parsed.clean_text, 25, &specs, &config);
-    hydrate_gguf_variants(&st, &mut local_results, &hw, &mem).await;
+    hydrate_gguf_variants(st, &mut local_results, &hw, &mem).await;
 
     // 2. Concurrently search live Hugging Face
     let token = st.hf_token();
@@ -1378,8 +1378,8 @@ pub async fn search_models_with_fit_impl(
         } else {
             crate::hf_discovery::DiscoveryCategory::ForYou
         };
-        let mut scored = process_records_with_fit(&st, hf_records, cat).await;
-        hydrate_gguf_variants(&st, &mut scored, &hw, &mem).await;
+        let mut scored = process_records_with_fit(st, hf_records, cat).await;
+        hydrate_gguf_variants(st, &mut scored, &hw, &mem).await;
         scored
     } else {
         Vec::new()
@@ -3094,7 +3094,7 @@ fn validate_imported_wsl_path(path: &str) -> Result<(), String> {
     if path.is_empty()
         || !path.starts_with('/')
         || components.len() < 3
-        || components.iter().any(|part| *part == "..")
+        || components.contains(&"..")
         || path.contains('\0')
         || path.contains('\r')
         || path.contains('\n')

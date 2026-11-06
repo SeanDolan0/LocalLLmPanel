@@ -567,7 +567,7 @@ static PARAMS_NAME_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyL
 
 /// Try to parse parameter count in billions from a model ID / repo name (e.g. "Qwen3.8-27B-GGUF" -> 27.0).
 pub fn parse_params_from_name(name: &str) -> Option<f64> {
-    let base = name.split('/').last().unwrap_or(name);
+    let base = name.split('/').next_back().unwrap_or(name);
     PARAMS_NAME_RE
         .captures(base)
         .and_then(|c| c.get(1))

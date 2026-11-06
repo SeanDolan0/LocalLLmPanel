@@ -583,12 +583,12 @@ pub fn parse_generation(architecture: Option<&str>, name: &str) -> Option<f64> {
             return Some(1.0);
         }
         // Llama: llama, llama4
-        if let Some(suffix) = arch_lower.strip_prefix("llama") {
-            if suffix.starts_with('4') {
-                return Some(4.0);
-            }
-            // Architecture is just "llama" — fall through to name-based parsing
+        if let Some(suffix) = arch_lower.strip_prefix("llama")
+            && suffix.starts_with('4')
+        {
+            return Some(4.0);
         }
+        // Architecture is just "llama" — fall through to name-based parsing
         // Gemma: gemma, gemma2, gemma3, gemma4
         if let Some(suffix) = arch_lower.strip_prefix("gemma") {
             if suffix.starts_with('4') {

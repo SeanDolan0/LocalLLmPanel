@@ -419,14 +419,13 @@ pub fn phase_cuda_build_tools(distro: &str, on_log: &mut impl FnMut(&str, &str))
     );
 
     // Install basic build tools first (gcc, python3.12-dev, ninja-build)
-    let apt_script = format!(
-        r#"
+    let apt_script = r#"
         set -e
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y -qq
         apt-get install -y -qq gcc python3.12-dev ninja-build wget gpg
         "#
-    );
+    .to_string();
     let out = wsl::run_script_root(distro, &apt_script);
     if !out.ok {
         on_log(

@@ -220,11 +220,11 @@ fn choose_assets_for_machine_config(
     mains.sort_by(|a, b| b.0.cmp(&a.0));
     let usable = mains
         .iter()
-        .filter(|(version, _)| driver.map_or(true, |max| *version <= max));
+        .filter(|(version, _)| driver.is_none_or(|max| *version <= max));
     let (version, main) = usable
         .clone()
         .find(|(version, _)| {
-            compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version >= CudaVersion(12, 8)
+            compute_cap.is_some_and(|cc| cc >= (12, 0)) && *version >= CudaVersion(12, 8)
         })
         .or_else(|| usable.clone().next())
         .ok_or_else(|| anyhow!(diagnostic_channel(assets, driver, config).join("\n")))?;
@@ -232,8 +232,7 @@ fn choose_assets_for_machine_config(
         .iter()
         .find(|asset| parse_runtime_channel(&asset.name, config) == Some(*version))
         .cloned();
-    let warning = if compute_cap.map_or(false, |cc| cc >= (12, 0)) && *version < CudaVersion(12, 8)
-    {
+    let warning = if compute_cap.is_some_and(|cc| cc >= (12, 0)) && *version < CudaVersion(12, 8) {
         Some(format!("CUDA {} predates Blackwell native support; it may be slow or fail. Update the NVIDIA driver to use CUDA 12.8 or newer.", version))
     } else {
         None
@@ -776,11 +775,10 @@ pub fn check_update(
     match latest_release_for_channel(&config, token) {
         Ok(selection) => {
             let latest = selection.tag.clone();
-            let update_available =
-                match (installed_tag.map(tag_number).flatten(), tag_number(&latest)) {
-                    (Some(inst), Some(lat)) => lat > inst,
-                    _ => installed_tag != Some(latest.as_str()),
-                };
+            let update_available = match (installed_tag.and_then(tag_number), tag_number(&latest)) {
+                (Some(inst), Some(lat)) => lat > inst,
+                _ => installed_tag != Some(latest.as_str()),
+            };
             LlamaCppUpdateStatus {
                 channel: fork.id.clone(),
                 installed_tag: installed_tag.map(str::to_string),
@@ -907,6 +905,24 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|dir| dir.join(name))
         .find(|path| path.is_file())
+}
+
+pub fn windows_gpu_snapshot() -> Option<crate::state::GpuSnapshot> {
+    let output = hidden_command("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,memory.free,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&output.stdout);
+    let mut it = line.lines().next()?.split(',');
+    Some(crate::state::GpuSnapshot {
+        name: it.next()?.trim().to_string(),
+        vram_total_mb: it.next()?.trim().parse().ok()?,
+        vram_free_mb: it.next()?.trim().parse().ok()?,
+        util_percent: it.next()?.trim().parse().unwrap_or(0),
+    })
 }
 
 #[cfg(test)]
@@ -1279,7 +1295,7 @@ mod tests {
             .user_agent("LocalLLmPanel/1.0")
             .build()
             .unwrap()
-            .get(&upstream_api())
+            .get(upstream_api())
             .send()
             .unwrap()
             .error_for_status()
@@ -1391,22 +1407,4 @@ mod tests {
             );
         }
     }
-}
-
-pub fn windows_gpu_snapshot() -> Option<crate::state::GpuSnapshot> {
-    let output = hidden_command("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total,memory.free,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&output.stdout);
-    let mut it = line.lines().next()?.split(',');
-    Some(crate::state::GpuSnapshot {
-        name: it.next()?.trim().to_string(),
-        vram_total_mb: it.next()?.trim().parse().ok()?,
-        vram_free_mb: it.next()?.trim().parse().ok()?,
-        util_percent: it.next()?.trim().parse().unwrap_or(0),
-    })
 }
