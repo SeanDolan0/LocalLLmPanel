@@ -1439,6 +1439,14 @@ impl VecDequeLog {
 // App state
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TemplateEffortInfo {
+    pub ladder: Option<Vec<String>>,
+    pub default_effort: Option<String>,
+    pub is_reasoning: bool,
+    pub is_toggle_only: bool,
+}
+
 pub struct AppState {
     pub config: Mutex<PersistedConfig>,
     pub servers: Mutex<BTreeMap<String, LiveServer>>,
@@ -1469,10 +1477,9 @@ pub struct AppState {
     pub benchmark_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub system_metrics: Mutex<VecDeque<SystemMetricPoint>>,
     pub server_metrics: Mutex<BTreeMap<String, VecDeque<ServerMetricPoint>>>,
-    /// Effort labels each llama.cpp chat template accepts, keyed by port.
-    /// Fetched from `/props`; a template such as Qwen3.8 only knows
-    /// `xhigh`/`medium`/`low` and raises on the standard `high` label.
-    pub template_effort_cache: Mutex<HashMap<u16, (u64, Option<Vec<String>>)>>,
+    /// Reasoning effort info for each model chat template, keyed by port.
+    /// Derived directly from the model's chat template on disk or from runtime props.
+    pub template_effort_cache: Mutex<HashMap<u16, (u64, TemplateEffortInfo)>>,
     pub app_update_cache: Mutex<Option<(crate::updater::AppUpdateInfo, Instant)>>,
     pub is_quitting: AtomicBool,
     pub provisioning: AtomicBool,

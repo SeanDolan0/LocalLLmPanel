@@ -140,24 +140,16 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
-fn known_model_effort_ladder(model_id: &str, model_name: &str) -> Option<Vec<String>> {
-    let lower = format!("{} {}", model_id, model_name).to_ascii_lowercase();
-    if lower.contains("spark") {
-        Some(vec!["low".to_string(), "high".to_string()])
-    } else {
-        None
-    }
-}
-
-fn template_is_toggle_only(template: Option<&str>, model_id: &str, model_name: &str) -> bool {
-    let lower_name = format!("{} {}", model_id, model_name).to_ascii_lowercase();
-    if lower_name.contains("deepseek") || lower_name.contains("qwq") || lower_name.contains("spark")
-    {
+fn template_is_toggle_only(template: Option<&str>, has_ladder: bool) -> bool {
+    if has_ladder {
         return false;
     }
     if let Some(t) = template {
         let lower = t.to_ascii_lowercase();
-        if lower.contains("enable_thinking") && !lower.contains("reasoning_effort") {
+        if lower.contains("enable_thinking")
+            && !lower.contains("reasoning_effort")
+            && !lower.contains("thinking_effort")
+        {
             return true;
         }
     }
@@ -501,9 +493,16 @@ fn model_row(
     context_source: &str,
     launch_args: &[String],
 ) -> serde_json::Value {
-    model_row_with_ladder(def, context, context_source, launch_args, None, false)
+    model_row_with_template(
+        def,
+        context,
+        context_source,
+        launch_args,
+        &crate::state::TemplateEffortInfo::default(),
+    )
 }
 
+#[cfg(test)]
 fn model_row_with_ladder(
     def: &ServerDef,
     context: Option<usize>,
@@ -512,10 +511,33 @@ fn model_row_with_ladder(
     effort_ladder: Option<&[String]>,
     template_reasoning: bool,
 ) -> serde_json::Value {
-    let derived_ladder = known_model_effort_ladder(&def.model_id, &def.name);
-    let effort_ladder = effort_ladder
-        .filter(|ladder| ladder.len() >= 2)
-        .or(derived_ladder.as_deref());
+    let ladder = effort_ladder
+        .filter(|l| l.len() >= 2)
+        .map(|l| l.to_vec());
+    let default_effort = ladder.as_deref().and_then(|l| {
+        if l.iter().any(|level| level.eq_ignore_ascii_case("medium")) {
+            Some("medium".to_string())
+        } else {
+            clamp_effort_to_ladder("medium", l)
+        }
+    });
+    let info = crate::state::TemplateEffortInfo {
+        ladder,
+        default_effort,
+        is_reasoning: template_reasoning,
+        is_toggle_only: false,
+    };
+    model_row_with_template(def, context, context_source, launch_args, &info)
+}
+
+fn model_row_with_template(
+    def: &ServerDef,
+    context: Option<usize>,
+    context_source: &str,
+    launch_args: &[String],
+    info: &crate::state::TemplateEffortInfo,
+) -> serde_json::Value {
+    let effort_ladder = info.ladder.as_deref();
 
     let (context, context_source) = match context.filter(|value| *value > 0) {
         Some(ctx) => (Some(ctx), context_source),
@@ -547,7 +569,7 @@ fn model_row_with_ladder(
     let traits = model_traits(
         def,
         launch_args,
-        template_reasoning || effort_ladder.is_some(),
+        info.is_reasoning || effort_ladder.is_some(),
     );
     let hints = model_hints(def, &traits, launch_args);
     let model_name = def.effective_model_name();
@@ -588,8 +610,7 @@ fn model_row_with_ladder(
         "safetensors"
     };
     let supports_template_controls = def.backend != "llamacpp" || def.jinja;
-    let is_toggle_only =
-        traits.reasoning && template_is_toggle_only(None, &def.model_id, &def.name);
+    let is_toggle_only = traits.reasoning && info.is_toggle_only;
     let control = if !supports_template_controls || traits.reasoning_mode == ReasoningMode::None {
         "none"
     } else if is_toggle_only {
@@ -682,15 +703,20 @@ fn model_row_with_ladder(
         match traits.reasoning_mode {
             ReasoningMode::None => None,
             mode => {
-                let base = mode.default_level().unwrap_or("medium").to_string();
-                Some(match effort_ladder {
-                    Some(ladder) => clamp_effort_to_ladder(&base, ladder).unwrap_or(base),
-                    None => base,
-                })
+                if let Some(def_eff) = &info.default_effort {
+                    Some(def_eff.clone())
+                } else if let Some(ladder) = effort_ladder {
+                    clamp_effort_to_ladder("medium", ladder)
+                } else {
+                    mode.default_level().map(str::to_string)
+                }
             }
         }
     };
     let level_map_val = |level: &str| -> serde_json::Value {
+        if is_toggle_only || traits.reasoning_mode == ReasoningMode::None {
+            return serde_json::Value::Null;
+        }
         let is_supported = match effort_ladder {
             Some(ladder) => ladder.iter().any(|l| l.eq_ignore_ascii_case(level)),
             None => matches!(level, "low" | "medium" | "high"),
@@ -870,14 +896,14 @@ fn model_rows_with_launch_args(
         for server in running_servers(servers, task) {
             let args = effective_launch_args(&server.def, vllm_args);
             let (context, source) = resolve_model_context_sync(&server.def, args);
-            let ladder = known_model_effort_ladder(&server.def.model_id, &server.def.name);
-            rows.push(model_row_with_ladder(
+            let template = read_model_chat_template(&server.def, "", "");
+            let info = analyze_chat_template(template.as_deref());
+            rows.push(model_row_with_template(
                 &server.def,
                 Some(context),
                 source,
                 args,
-                ladder.as_deref(),
-                false,
+                &info,
             ));
         }
     }
@@ -1122,11 +1148,33 @@ async fn resolve_context_for_server_async(
     resolve_model_context_sync(def, launch_args)
 }
 
+fn read_model_chat_template(def: &ServerDef, gguf_dir: &str, distro: &str) -> Option<String> {
+    if def.backend == "llamacpp" {
+        let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
+        if let Some(resolved) = crate::server::resolve_gguf_model_path(raw_model, gguf_dir, distro) {
+            if let Ok(Some(template)) = crate::gguf::chat_template_from_path(&resolved) {
+                if !template.trim().is_empty() {
+                    return Some(template);
+                }
+            }
+        }
+    } else if def.backend == "vllm" {
+        if let Some(template) = read_vllm_chat_template(distro, def) {
+            if !template.trim().is_empty() {
+                return Some(template);
+            }
+        }
+    }
+    None
+}
+
 async fn fetch_template_info(
     state: &Arc<AppState>,
     def: &ServerDef,
-) -> (Option<Vec<String>>, bool) {
-    let template = if def.backend == "llamacpp" {
+) -> crate::state::TemplateEffortInfo {
+    let cfg = state.config();
+    let mut template = read_model_chat_template(def, &cfg.gguf_dir, &cfg.distro);
+    if template.is_none() && def.backend == "llamacpp" {
         let api_key = crate::server::server_api_key(state, def);
         let url = format!("http://127.0.0.1:{}/props", def.port);
         let request = apply_vllm_auth(state.http.get(&url), api_key.as_deref());
@@ -1142,7 +1190,7 @@ async fn fetch_template_info(
             .await
             .ok()
             .and_then(|v| v.ok());
-            val.and_then(|v| {
+            template = val.and_then(|v| {
                 v.get("chat_template")
                     .or_else(|| {
                         v.get("default_generation_settings")
@@ -1151,37 +1199,33 @@ async fn fetch_template_info(
                     .or_else(|| v.get("model_info").and_then(|m| m.get("chat_template")))
                     .and_then(|t| t.as_str())
                     .map(str::to_string)
-            })
-        } else {
-            None
+            });
         }
-    } else {
-        read_vllm_chat_template(&state.config().distro, def)
-    };
+    }
 
-    let template_reasoning = template.as_deref().is_some_and(template_has_reasoning);
-    let ladder = template.as_deref().and_then(template_effort_ladder);
-    (ladder, template_reasoning)
+    analyze_chat_template(template.as_deref())
 }
 
-async fn template_info_for(state: &Arc<AppState>, def: &ServerDef) -> (Option<Vec<String>>, bool) {
+async fn template_info_for(
+    state: &Arc<AppState>,
+    def: &ServerDef,
+) -> crate::state::TemplateEffortInfo {
     let now = crate::state::now_ms();
     {
         let cache = state.template_effort_cache.lock().unwrap();
-        if let Some((fetched_at, ladder)) = cache.get(&def.port) {
+        if let Some((fetched_at, info)) = cache.get(&def.port) {
             if now.saturating_sub(*fetched_at) < EFFORT_LADDER_TTL_MS {
-                let is_reasoning = ladder.is_some();
-                return (ladder.clone(), is_reasoning);
+                return info.clone();
             }
         }
     }
-    let (ladder, is_reasoning) = fetch_template_info(state, def).await;
+    let info = fetch_template_info(state, def).await;
     state
         .template_effort_cache
         .lock()
         .unwrap()
-        .insert(def.port, (now, ladder.clone()));
-    (ladder, is_reasoning)
+        .insert(def.port, (now, info.clone()));
+    info
 }
 
 async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
@@ -1208,17 +1252,13 @@ async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     for def in defs {
         let args = effective_launch_args(&def, &vllm_args);
         let (context, source) = resolve_context_for_server_async(state, &def, args).await;
-        let (mut ladder, template_reasoning) = template_info_for(state, &def).await;
-        if ladder.is_none() {
-            ladder = known_model_effort_ladder(&def.model_id, &def.name);
-        }
-        rows.push(model_row_with_ladder(
+        let info = template_info_for(state, &def).await;
+        rows.push(model_row_with_template(
             &def,
             Some(context),
             source,
             args,
-            ladder.as_deref(),
-            template_reasoning,
+            &info,
         ));
     }
     rows
@@ -1380,12 +1420,12 @@ fn clamp_effort_to_ladder(effort: &str, ladder: &[String]) -> Option<String> {
 fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
     static CHECK_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"(?i)reasoning_effort[^\n]{0,120}?(?:not\s+in|in)\s*[\(\[]([^\)\]]{0,240})[\)\]]",
+            r"(?i)(?:reasoning|thinking)(?:_effort|_level)?[^\(\)\[\]]{0,120}?(?:not\s+in|in)\s*[\(\[]([^\(\)\]]{0,240})[\)\]]",
         )
         .expect("valid reasoning effort validation regex")
     });
     static MSG_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?i)supported\s+(?:types|levels|efforts)\s+are\s+([^\.\n]{2,100})")
+        regex_lite::Regex::new(r"(?i)supported\s+(?:types|levels|efforts|values)\s+(?:are|include|:)\s+([^\.\n]{2,100})")
             .expect("valid reasoning effort message regex")
     });
 
@@ -1431,6 +1471,94 @@ fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
 
     levels.sort_by_key(|level| effort_rank(level).unwrap_or(usize::MAX));
     (levels.len() >= 2).then_some(levels)
+}
+
+fn template_default_effort(template: &str, ladder: Option<&[String]>) -> Option<String> {
+    static DEFAULT_FILTER_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r#"(?i)(?:reasoning|thinking)(?:_effort|_level)?\s*\|\s*default\(\s*['"]([a-z0-9_-]+)['"]\s*\)"#,
+        )
+        .expect("valid default filter regex")
+    });
+    static DEFAULT_MSG_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+        regex_lite::Regex::new(r#"(?i)\b([a-z0-9_-]+)\s*\(\s*default\s*\)"#)
+            .expect("valid default message regex")
+    });
+    static DEFAULT_SET_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+        regex_lite::Regex::new(r#"(?i)set\s+(?:[a-z0-9_]*reasoning|[a-z0-9_]*thinking)[a-z0-9_]*\s*=\s*['"]([a-z0-9_-]+)['"]"#)
+            .expect("valid default set regex")
+    });
+
+    if let Some(caps) = DEFAULT_FILTER_RE.captures(template) {
+        if let Some(matched) = caps.get(1) {
+            let val = matched.as_str().trim().to_ascii_lowercase();
+            if effort_rank(&val).is_some() {
+                if let Some(ladder) = ladder {
+                    if ladder.iter().any(|l| l.eq_ignore_ascii_case(&val)) {
+                        return Some(val);
+                    }
+                } else {
+                    return Some(val);
+                }
+            }
+        }
+    }
+
+    if let Some(caps) = DEFAULT_MSG_RE.captures(template) {
+        if let Some(matched) = caps.get(1) {
+            let val = matched.as_str().trim().to_ascii_lowercase();
+            if effort_rank(&val).is_some() {
+                if let Some(ladder) = ladder {
+                    if ladder.iter().any(|l| l.eq_ignore_ascii_case(&val)) {
+                        return Some(val);
+                    }
+                } else {
+                    return Some(val);
+                }
+            }
+        }
+    }
+
+    if let Some(caps) = DEFAULT_SET_RE.captures(template) {
+        if let Some(matched) = caps.get(1) {
+            let val = matched.as_str().trim().to_ascii_lowercase();
+            if effort_rank(&val).is_some() {
+                if let Some(ladder) = ladder {
+                    if ladder.iter().any(|l| l.eq_ignore_ascii_case(&val)) {
+                        return Some(val);
+                    }
+                } else {
+                    return Some(val);
+                }
+            }
+        }
+    }
+
+    if let Some(ladder) = ladder {
+        if ladder.iter().any(|l| l.eq_ignore_ascii_case("medium")) {
+            Some("medium".to_string())
+        } else {
+            clamp_effort_to_ladder("medium", ladder)
+        }
+    } else {
+        None
+    }
+}
+
+fn analyze_chat_template(template: Option<&str>) -> crate::state::TemplateEffortInfo {
+    let Some(template) = template.filter(|t| !t.trim().is_empty()) else {
+        return crate::state::TemplateEffortInfo::default();
+    };
+    let is_reasoning = template_has_reasoning(template);
+    let ladder = template_effort_ladder(template);
+    let default_effort = template_default_effort(template, ladder.as_deref());
+    let is_toggle_only = template_is_toggle_only(Some(template), ladder.is_some());
+    crate::state::TemplateEffortInfo {
+        ladder,
+        default_effort,
+        is_reasoning,
+        is_toggle_only,
+    }
 }
 
 /// Normalize an effort label for the target backend, then round it onto the
@@ -1594,13 +1722,10 @@ fn apply_harness_precedence_with_ladder(
         .unwrap_or("")
         .to_string();
 
-    let resolved_ladder = effort_ladder
-        .map(|l| l.to_vec())
-        .or_else(|| known_model_effort_ladder(&model_name, &model_name));
-    let effort_ladder = resolved_ladder.as_deref();
+    let effort_ladder = effort_ladder;
 
     let is_deepseek = model_is_deepseek(&model_name, &model_name);
-    let is_toggle_only = template_is_toggle_only(None, &model_name, &model_name);
+    let is_toggle_only = template_is_toggle_only(None, effort_ladder.is_some());
 
     let raw_effort = harness_effort(object);
     let explicit_toggle = harness_toggle(object);
@@ -2725,8 +2850,8 @@ async fn proxy_chat(
     // harness value onto that subset instead of letting the template raise.
     let ladder = match server_def.as_ref() {
         Some(def) => {
-            let (ladder, _) = template_info_for(state, def).await;
-            ladder.or_else(|| known_model_effort_ladder(&def.model_id, &def.name))
+            let info = template_info_for(state, def).await;
+            info.ladder
         }
         None => None,
     };
@@ -4417,16 +4542,40 @@ mod tests {
 
     #[test]
     fn test_spark_effort_medium_clamped_to_high() {
+        let ladder = vec!["low".to_string(), "high".to_string()];
         let req =
             r#"{"model":"XHToken/Spark-X2.6-4B-INT4","messages":[],"reasoning_effort":"medium"}"#;
-        let value = normalized(req, "vllm", Some(36126));
+        let value = normalized_with_ladder(req, "vllm", Some(36126), &ladder);
         assert_eq!(value["reasoning_effort"], "high");
         assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
 
         let req_with_kwargs = r#"{"model":"Spark-X","messages":[],"chat_template_kwargs":{"reasoning_effort":"medium"}}"#;
-        let value2 = normalized(req_with_kwargs, "llamacpp", Some(36126));
+        let value2 = normalized_with_ladder(req_with_kwargs, "llamacpp", Some(36126), &ladder);
         assert_eq!(value2["chat_template_kwargs"]["reasoning_effort"], "high");
         assert_eq!(value2["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn test_spark_chat_template_analysis() {
+        let template = r#"{%- set enable_thinking = enable_thinking | default(true) %}{%- set reasoning_instructions = '' %}{%- if enable_thinking is true %}{%- set resolved_reasoning_effort = reasoning_effort|default('high') %}{%- if resolved_reasoning_effort not in ('high', 'low') %}{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are high (default) and low.') }}{%- endif %}{%- endif %}"#;
+        let info = analyze_chat_template(Some(template));
+        assert_eq!(info.ladder, Some(vec!["low".to_string(), "high".to_string()]));
+        assert_eq!(info.default_effort, Some("high".to_string()));
+        assert_eq!(info.is_reasoning, true);
+        assert_eq!(info.is_toggle_only, false);
+
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.name = "Spark-X2.6-4B-Q4_K_M".into();
+        def.model_id = "XHToken/Spark-X2.6-4B-GGUF".into();
+        def.backend = "llamacpp".into();
+        let row = model_row_with_template(&def, Some(64000), "configured", &[], &info);
+        assert_eq!(row["reasoning_config"]["levels"], serde_json::json!(["low", "high"]));
+        assert_eq!(row["reasoning_config"]["default_level"], "high");
+        assert_eq!(row["reasoning_config"]["supported_efforts"], serde_json::json!(["low", "high"]));
+        assert_eq!(row["reasoning_config"]["default_effort"], "high");
+        assert_eq!(row["thinkingLevelMap"]["low"], "low");
+        assert_eq!(row["thinkingLevelMap"]["high"], "high");
+        assert_eq!(row["thinkingLevelMap"]["medium"], serde_json::Value::Null);
     }
 
     #[test]

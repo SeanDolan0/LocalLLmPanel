@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 const MAX_METADATA_ENTRIES: usize = 100_000;
 const MAX_STRING_BYTES: u64 = 64 * 1024 * 1024;
@@ -42,6 +42,7 @@ pub(crate) struct GgufMetadata {
     pub head_count_kv: Option<usize>,
     pub key_head_dim: Option<usize>,
     pub value_head_dim: Option<usize>,
+    pub chat_template: Option<String>,
 }
 
 struct GgufReader<R> {
@@ -122,12 +123,44 @@ impl<R: Read + Seek> GgufReader<R> {
         }
         let mut values = Vec::new();
         let retain = len <= 1_024 && matches!(element_type, 0 | 1 | 2 | 3 | 4 | 5 | 10 | 11);
+        if !retain {
+            match element_type {
+                0 | 1 | 7 => {
+                    self.inner.seek(SeekFrom::Current(len as i64))?;
+                }
+                2 | 3 => {
+                    self.inner.seek(SeekFrom::Current((len * 2) as i64))?;
+                }
+                4 | 5 | 6 => {
+                    self.inner.seek(SeekFrom::Current((len * 4) as i64))?;
+                }
+                10 | 11 | 12 => {
+                    self.inner.seek(SeekFrom::Current((len * 8) as i64))?;
+                }
+                8 => {
+                    for _ in 0..len {
+                        let str_len = self.read_u64()?;
+                        if str_len > MAX_STRING_BYTES {
+                            bail!("GGUF string is too large: {str_len} bytes");
+                        }
+                        self.inner.seek(SeekFrom::Current(str_len as i64))?;
+                    }
+                }
+                _ => {
+                    for _ in 0..len {
+                        let _ = self.read_typed_value(element_type)?;
+                    }
+                }
+            }
+            return Ok(GgufValue::Array {
+                element_type,
+                values,
+            });
+        }
         for _ in 0..len {
             let value = self.read_typed_value(element_type)?;
-            if retain {
-                if let Some(value) = value.as_u64() {
-                    values.push(value);
-                }
+            if let Some(value) = value.as_u64() {
+                values.push(value);
             }
         }
         Ok(GgufValue::Array {
@@ -212,6 +245,18 @@ pub(crate) fn read_metadata<R: Read + Seek>(reader: R) -> Result<GgufMetadata> {
     let key_head_dim = get_arch("attention.key_length").or(fallback_head_dim);
     let value_head_dim = get_arch("attention.value_length").or(fallback_head_dim);
 
+    let chat_template = values
+        .get("tokenizer.chat_template")
+        .or_else(|| values.get("chat_template"))
+        .or_else(|| {
+            values
+                .iter()
+                .find(|(k, v)| k.contains("chat_template") && matches!(v, GgufValue::String(_)))
+                .map(|(_, v)| v)
+        })
+        .and_then(GgufValue::as_str)
+        .map(str::to_string);
+
     Ok(GgufMetadata {
         context_length: get_arch("context_length"),
         block_count: get_arch("block_count"),
@@ -219,6 +264,7 @@ pub(crate) fn read_metadata<R: Read + Seek>(reader: R) -> Result<GgufMetadata> {
         head_count_kv: get_arch("attention.head_count_kv").or(head_count),
         key_head_dim,
         value_head_dim,
+        chat_template,
     })
 }
 
@@ -227,6 +273,11 @@ pub(crate) fn metadata_from_path(path: &std::path::Path) -> Result<GgufMetadata>
         .with_context(|| format!("open GGUF metadata for {}", path.display()))?;
     let reader = std::io::BufReader::new(file);
     read_metadata(reader)
+}
+
+pub(crate) fn chat_template_from_path(path: &std::path::Path) -> Result<Option<String>> {
+    let metadata = metadata_from_path(path)?;
+    Ok(metadata.chat_template)
 }
 
 #[cfg(test)]
@@ -275,7 +326,7 @@ mod tests {
         buf.extend_from_slice(b"GGUF");
         push_u32(&mut buf, 3);
         push_u64(&mut buf, 1);
-        push_u64(&mut buf, 7);
+        push_u64(&mut buf, 8);
         push_meta(
             &mut buf,
             "general.architecture",
@@ -290,6 +341,11 @@ mod tests {
             GgufValue::Uint(4),
         );
         push_meta(&mut buf, "qwen2.embedding_length", GgufValue::Uint(3_584));
+        push_meta(
+            &mut buf,
+            "tokenizer.chat_template",
+            GgufValue::String("{% set effort = reasoning_effort|default('high') %}".into()),
+        );
         push_meta(
             &mut buf,
             "tokenizer.ggml.tokens",
@@ -310,6 +366,22 @@ mod tests {
         assert_eq!(metadata.head_count_kv, Some(4));
         assert_eq!(metadata.key_head_dim, Some(128));
         assert_eq!(metadata.value_head_dim, Some(128));
+        assert_eq!(
+            metadata.chat_template.as_deref(),
+            Some("{% set effort = reasoning_effort|default('high') %}")
+        );
+    }
+
+    #[test]
+    fn test_extract_spark_chat_template_if_present() {
+        let path = std::path::Path::new(
+            r"C:\Users\sedol\AppData\Roaming\local-llm-panel\gguf\XHToken__Spark-X2.6-4B-GGUF\Spark-X2.6-4B-Q4_K_M.gguf",
+        );
+        if path.is_file() {
+            let tmpl = chat_template_from_path(path).unwrap().expect("chat template exists");
+            eprintln!("Extracted template: {tmpl}");
+            assert!(tmpl.contains("reasoning_effort"));
+        }
     }
 
     #[test]
