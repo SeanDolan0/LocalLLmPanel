@@ -173,13 +173,17 @@ fn resolve_model_context_sync(def: &ServerDef, launch_args: &[String]) -> (usize
         {
             return (ctx, "configured");
         }
-        if let Some(path_str) = &def.model_path {
-            let path = std::path::Path::new(path_str);
-            if path.is_file() {
-                if let Ok(meta) = crate::gguf::metadata_from_path(path) {
-                    if let Some(ctx) = meta.context_length.filter(|v| *v > 0) {
-                        return (ctx, "gguf_metadata");
-                    }
+        let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
+        let resolved_path = def
+            .model_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| crate::server::resolve_gguf_model_path(raw_model, "", ""));
+        if let Some(path) = resolved_path {
+            if let Ok(meta) = crate::gguf::metadata_from_path(&path) {
+                if let Some(ctx) = meta.context_length.filter(|v| *v > 0) {
+                    return (ctx, "gguf_metadata");
                 }
             }
         }
@@ -190,6 +194,7 @@ fn resolve_model_context_sync(def: &ServerDef, launch_args: &[String]) -> (usize
         {
             return (ctx, "configured");
         }
+        let mut cfg_val: Option<serde_json::Value> = None;
         if let Some(path_str) = &def.model_path {
             let path = std::path::Path::new(path_str);
             let cfg_path = if path.is_dir() {
@@ -199,13 +204,42 @@ fn resolve_model_context_sync(def: &ServerDef, launch_args: &[String]) -> (usize
             };
             if cfg_path.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&cfg_path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let (ctx, _) = crate::estimate::parse_context(&val);
-                        if ctx > 0 {
-                            return (ctx, "model_config");
+                    cfg_val = serde_json::from_str::<serde_json::Value>(&content).ok();
+                }
+            }
+        }
+        if cfg_val.is_none() {
+            if let Some(home) = dirs::home_dir() {
+                let folder = format!("models--{}", def.model_id.replace('/', "--"));
+                let hub_path = home
+                    .join(".cache")
+                    .join("huggingface")
+                    .join("hub")
+                    .join(folder)
+                    .join("snapshots");
+                if hub_path.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&hub_path) {
+                        for entry in entries.flatten() {
+                            let p = entry.path().join("config.json");
+                            if p.is_file() {
+                                if let Ok(content) = std::fs::read_to_string(&p) {
+                                    if let Ok(val) =
+                                        serde_json::from_str::<serde_json::Value>(&content)
+                                    {
+                                        cfg_val = Some(val);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+            }
+        }
+        if let Some(val) = cfg_val {
+            let (ctx, _) = crate::estimate::parse_context(&val);
+            if ctx > 0 {
+                return (ctx, "model_config");
             }
         }
     }
@@ -370,12 +404,62 @@ pub fn template_has_reasoning(template: &str) -> bool {
         || lower.contains("thinking_effort")
 }
 
-fn model_traits(def: &ServerDef, launch_args: &[String], template_reasoning: bool) -> ModelTraits {
+fn def_is_vision(def: &ServerDef) -> bool {
+    if crate::model_intelligence::infer_model_family(&def.model_id, None, &[]).is_multimodal {
+        return true;
+    }
+    if let Some(path_str) = &def.model_path {
+        let path = std::path::Path::new(path_str);
+        let cfg_path = if path.is_dir() {
+            path.join("config.json")
+        } else {
+            path.with_file_name("config.json")
+        };
+        if cfg_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&cfg_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if val.get("vision_config").is_some()
+                        || val.get("image_token_id").is_some()
+                        || val.get("image_token_index").is_some()
+                        || val.get("visual").is_some()
+                    {
+                        return true;
+                    }
+                    if let Some(archs) = val.get("architectures").and_then(|a| a.as_array()) {
+                        for arch in archs {
+                            if let Some(s) = arch.as_str() {
+                                if s.contains("VL")
+                                    || s.contains("Vision")
+                                    || s.contains("MultiModal")
+                                    || s.contains("Llava")
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn model_traits(
+    def: &ServerDef,
+    launch_args: &[String],
+    info: &crate::state::TemplateEffortInfo,
+) -> ModelTraits {
     let name = format!("{} {}", def.model_id, def.effective_model_name()).to_ascii_lowercase();
     let is_instruct = def.task == "instruct";
 
-    let family_reasoning = template_reasoning || looks_like_reasoning_model(&name);
-    let family_always_on = reasoning_is_always_on(&name);
+    let family_reasoning =
+        info.is_reasoning || info.ladder.is_some() || looks_like_reasoning_model(&name);
+    let family_always_on = if info.is_reasoning {
+        info.is_always_on
+    } else {
+        reasoning_is_always_on(&name)
+    };
 
     let (reasoning, reasoning_output, configured, reasoning_enabled) = if def.backend == "llamacpp"
     {
@@ -434,6 +518,7 @@ fn model_traits(def: &ServerDef, launch_args: &[String], template_reasoning: boo
             .mmproj_path
             .as_deref()
             .is_some_and(|path| !path.trim().is_empty())
+            || def_is_vision(def)
             || looks_like_vision_model(&name));
 
     ModelTraits {
@@ -526,6 +611,8 @@ fn model_row_with_ladder(
         default_effort,
         is_reasoning: template_reasoning,
         is_toggle_only: false,
+        is_always_on: false,
+        template: None,
     };
     model_row_with_template(def, context, context_source, launch_args, &info)
 }
@@ -566,11 +653,7 @@ fn model_row_with_template(
         (Some(8192), "default_ceiling")
     };
 
-    let traits = model_traits(
-        def,
-        launch_args,
-        info.is_reasoning || effort_ladder.is_some(),
-    );
+    let traits = model_traits(def, launch_args, info);
     let hints = model_hints(def, &traits, launch_args);
     let model_name = def.effective_model_name();
 
@@ -623,7 +706,7 @@ fn model_row_with_template(
     // parses reasoning tags. The gateway canonicalizes reasoning_effort
     // across all reasoning models and formats.
     let supports_effort_parameter =
-        traits.reasoning_mode != ReasoningMode::None && supports_template_controls;
+        traits.reasoning_mode != ReasoningMode::None && supports_template_controls && !is_toggle_only;
     let supports_thinking_toggle =
         traits.reasoning_mode == ReasoningMode::Effort && supports_template_controls;
     let budget_parameter = if traits.reasoning_mode == ReasoningMode::None {
@@ -878,6 +961,9 @@ fn model_row_with_template(
         row["thinkingLevelMap"] = thinking_level_map.clone();
         row["thinking_level_map"] = thinking_level_map;
     }
+    if let Some(template) = &info.template {
+        row["chat_template"] = serde_json::json!(template);
+    }
     if !hints.is_empty() {
         row["configuration_hints"] = serde_json::json!(hints);
     }
@@ -1023,6 +1109,26 @@ fn read_symlink_or_file(path: &std::path::Path) -> Option<String> {
     None
 }
 
+fn extract_chat_template_from_json(content: &str) -> Option<String> {
+    let val = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    if let Some(tmpl) = val.get("chat_template") {
+        if let Some(s) = tmpl.as_str() {
+            if !s.trim().is_empty() {
+                return Some(s.to_string());
+            }
+        } else if let Some(arr) = tmpl.as_array() {
+            for item in arr {
+                if let Some(t) = item.get("template").and_then(|t| t.as_str()) {
+                    if !t.trim().is_empty() {
+                        return Some(t.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn read_vllm_chat_template(distro: &str, def: &ServerDef) -> Option<String> {
     if let Some(path) = &def.model_path {
         let p = std::path::Path::new(path);
@@ -1036,9 +1142,41 @@ fn read_vllm_chat_template(distro: &str, def: &ServerDef) -> Option<String> {
                 if file.ends_with(".jinja") {
                     return Some(content);
                 }
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(tmpl) = val.get("chat_template").and_then(|v| v.as_str()) {
-                        return Some(tmpl.to_string());
+                if let Some(tmpl) = extract_chat_template_from_json(&content) {
+                    return Some(tmpl);
+                }
+            }
+        }
+    }
+    // Also check local Windows Hugging Face hub cache
+    if let Some(home) = dirs::home_dir() {
+        let folder = format!("models--{}", def.model_id.replace('/', "--"));
+        let hub_path = home
+            .join(".cache")
+            .join("huggingface")
+            .join("hub")
+            .join(folder)
+            .join("snapshots");
+        if hub_path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&hub_path) {
+                for entry in entries.flatten() {
+                    let snapshot_dir = entry.path();
+                    if snapshot_dir.is_dir() {
+                        for file in [
+                            "tokenizer_config.json",
+                            "chat_template.json",
+                            "chat_template.jinja",
+                        ] {
+                            let candidate = snapshot_dir.join(file);
+                            if let Some(content) = read_symlink_or_file(&candidate) {
+                                if file.ends_with(".jinja") {
+                                    return Some(content);
+                                }
+                                if let Some(tmpl) = extract_chat_template_from_json(&content) {
+                                    return Some(tmpl);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1080,6 +1218,38 @@ for pat in [f'/root/.cache/huggingface/hub/{{folder}}/snapshots/*', f'/home/*/.c
 }
 
 fn read_vllm_config_context(distro: &str, def: &ServerDef) -> Option<usize> {
+    if let Some(home) = dirs::home_dir() {
+        let folder = format!("models--{}", def.model_id.replace('/', "--"));
+        let hub_path = home
+            .join(".cache")
+            .join("huggingface")
+            .join("hub")
+            .join(folder)
+            .join("snapshots");
+        if hub_path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&hub_path) {
+                for entry in entries.flatten() {
+                    let p = entry.path().join("config.json");
+                    if p.is_file() {
+                        if let Ok(content) = std::fs::read_to_string(&p) {
+                            if let Ok(d) = serde_json::from_str::<serde_json::Value>(&content) {
+                                for k in [
+                                    "max_position_embeddings",
+                                    "max_sequence_length",
+                                    "model_max_length",
+                                    "max_seq_len",
+                                ] {
+                                    if let Some(ctx) = d.get(k).and_then(json_usize) {
+                                        return Some(ctx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if distro.is_empty() {
         return None;
     }
@@ -1553,11 +1723,20 @@ fn analyze_chat_template(template: Option<&str>) -> crate::state::TemplateEffort
     let ladder = template_effort_ladder(template);
     let default_effort = template_default_effort(template, ladder.as_deref());
     let is_toggle_only = template_is_toggle_only(Some(template), ladder.is_some());
+    let lower = template.to_ascii_lowercase();
+    let is_always_on = is_reasoning
+        && !is_toggle_only
+        && ladder.is_none()
+        && (!lower.contains("enable_thinking")
+            && !lower.contains("reasoning_effort")
+            && !lower.contains("thinking_effort"));
     crate::state::TemplateEffortInfo {
         ladder,
         default_effort,
         is_reasoning,
         is_toggle_only,
+        is_always_on,
+        template: Some(template.to_string()),
     }
 }
 
@@ -1709,11 +1888,29 @@ fn harness_budget(object: &serde_json::Map<String, serde_json::Value>) -> Option
 /// `enable_thinking=true` on toggle-style templates.  Canonicalizing here
 /// closes that gap.  Nothing is injected when the harness does not ask for
 /// thinking, so panel settings remain the default for other clients.
+#[allow(dead_code)]
 fn apply_harness_precedence_with_ladder(
     object: &mut serde_json::Map<String, serde_json::Value>,
     backend: &str,
     context_tokens: Option<usize>,
     effort_ladder: Option<&[String]>,
+) {
+    let info = effort_ladder.map(|l| crate::state::TemplateEffortInfo {
+        ladder: Some(l.to_vec()),
+        default_effort: None,
+        is_reasoning: true,
+        is_toggle_only: false,
+        is_always_on: false,
+        template: None,
+    });
+    apply_harness_precedence_with_info(object, backend, context_tokens, info.as_ref());
+}
+
+fn apply_harness_precedence_with_info(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    backend: &str,
+    context_tokens: Option<usize>,
+    template_info: Option<&crate::state::TemplateEffortInfo>,
 ) {
     let model_name = object
         .get("model")
@@ -1722,16 +1919,16 @@ fn apply_harness_precedence_with_ladder(
         .unwrap_or("")
         .to_string();
 
-    let effort_ladder = effort_ladder;
-
-    let is_deepseek = model_is_deepseek(&model_name, &model_name);
-    let is_toggle_only = template_is_toggle_only(None, effort_ladder.is_some());
+    let effort_ladder = template_info.and_then(|info| info.ladder.as_deref());
+    let is_toggle_only = template_info
+        .map(|info| info.is_toggle_only)
+        .unwrap_or_else(|| model_is_deepseek(&model_name, &model_name));
 
     let raw_effort = harness_effort(object);
     let explicit_toggle = harness_toggle(object);
     let budget = harness_budget(object);
 
-    if is_deepseek {
+    if is_toggle_only {
         if raw_effort.is_some() || explicit_toggle.is_some() || budget.is_some() {
             let toggle = explicit_toggle
                 .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
@@ -1746,30 +1943,6 @@ fn apply_harness_precedence_with_ladder(
                     }),
                 );
             }
-
-            let mut kwargs = object
-                .get("chat_template_kwargs")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            kwargs.insert(
-                "enable_thinking".to_string(),
-                serde_json::Value::Bool(toggle),
-            );
-            kwargs.remove("reasoning_effort");
-            object.insert(
-                "chat_template_kwargs".to_string(),
-                serde_json::Value::Object(kwargs),
-            );
-
-            object.remove("reasoning_effort");
-        }
-    } else if is_toggle_only {
-        if raw_effort.is_some() || explicit_toggle.is_some() || budget.is_some() {
-            let toggle = explicit_toggle
-                .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
-                .or_else(|| budget.filter(|value| *value > 0).map(|_| true))
-                .unwrap_or(true);
 
             let mut kwargs = object
                 .get("chat_template_kwargs")
@@ -2022,11 +2195,11 @@ fn normalize_chat_request(body: &[u8], backend: &str, context_tokens: Option<usi
     normalize_chat_request_with_ladder(body, backend, context_tokens, None)
 }
 
-fn normalize_chat_request_with_ladder(
+fn normalize_chat_request_with_info(
     body: &[u8],
     backend: &str,
     context_tokens: Option<usize>,
-    effort_ladder: Option<&[String]>,
+    template_info: Option<&crate::state::TemplateEffortInfo>,
 ) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
@@ -2035,11 +2208,29 @@ fn normalize_chat_request_with_ladder(
         return body.to_vec();
     };
     let original = object.clone();
-    apply_harness_precedence_with_ladder(object, backend, context_tokens, effort_ladder);
+    apply_harness_precedence_with_info(object, backend, context_tokens, template_info);
     if *object == original {
         return body.to_vec();
     }
     serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
+}
+
+#[cfg(test)]
+fn normalize_chat_request_with_ladder(
+    body: &[u8],
+    backend: &str,
+    context_tokens: Option<usize>,
+    effort_ladder: Option<&[String]>,
+) -> Vec<u8> {
+    let info = effort_ladder.map(|l| crate::state::TemplateEffortInfo {
+        ladder: Some(l.to_vec()),
+        default_effort: None,
+        is_reasoning: true,
+        is_toggle_only: false,
+        is_always_on: false,
+        template: None,
+    });
+    normalize_chat_request_with_info(body, backend, context_tokens, info.as_ref())
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -2166,10 +2357,16 @@ pub fn cors_headers(origin: Option<&str>) -> String {
 }
 
 fn is_allowed_origin(origin: &str) -> bool {
-    if origin == "tauri://localhost" || origin == "https://tauri.localhost" {
+    if origin == "tauri://localhost"
+        || origin == "https://tauri.localhost"
+        || origin == "http://localhost"
+        || origin == "http://127.0.0.1"
+        || origin == "https://localhost"
+        || origin == "https://127.0.0.1"
+    {
         return true;
     }
-    ["http://127.0.0.1:", "http://localhost:"]
+    ["http://127.0.0.1:", "http://localhost:", "https://127.0.0.1:", "https://localhost:"]
         .iter()
         .any(|prefix| {
             origin.strip_prefix(prefix).is_some_and(|port| {
@@ -2462,15 +2659,31 @@ async fn route(
                     .get("parameters_billions")
                     .and_then(serde_json::Value::as_f64);
                 let param_size = params.map(|p| format!("{:.0}B", p)).unwrap_or_default();
+                let family_info = crate::model_intelligence::infer_model_family(id, None, &[]);
+                let family_name = if !family_info.family_name.is_empty() {
+                    family_info.family_name
+                } else {
+                    id.split(['-', '/', '_']).next().unwrap_or("model").to_string()
+                };
+                let template_str = row
+                    .get("chat_template")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ctx = row
+                    .get("context_length")
+                    .or_else(|| row.get("max_model_len"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(32768);
+                let parameters_str = format!("num_ctx {ctx}\nstop \"<|im_end|>\"\nstop \"<|endoftext|>\"");
                 let payload = serde_json::json!({
                     "modelfile": format!("FROM {id}"),
-                    "parameters": "",
-                    "template": "",
+                    "parameters": parameters_str,
+                    "template": template_str,
                     "details": {
                         "parent_model": "",
                         "format": format,
-                        "family": id.split(['-', '/', '_']).next().unwrap_or("model"),
-                        "families": [id.split(['-', '/', '_']).next().unwrap_or("model")],
+                        "family": family_name,
+                        "families": [family_name],
                         "parameter_size": param_size,
                         "quantization_level": quant,
                     },
@@ -2552,7 +2765,7 @@ async fn route(
                 }
             }
         }
-        ("POST", "/v1/embeddings") => {
+        ("POST", "/v1/embeddings") | ("POST", "/api/embeddings") | ("POST", "/api/embed") => {
             let model = model_from_body(body)
                 .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
             let port = {
@@ -2694,6 +2907,12 @@ async fn ollama_tags_payload(state: &Arc<AppState>) -> serde_json::Value {
                 .get("parameter_count")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            let family_info = crate::model_intelligence::infer_model_family(id, None, &[]);
+            let family_name = if !family_info.family_name.is_empty() {
+                family_info.family_name
+            } else {
+                id.split(['-', '/', '_']).next().unwrap_or("model").to_string()
+            };
             serde_json::json!({
                 "name": format!("{id}:latest"),
                 "model": format!("{id}:latest"),
@@ -2703,8 +2922,8 @@ async fn ollama_tags_payload(state: &Arc<AppState>) -> serde_json::Value {
                 "details": {
                     "parent_model": "",
                     "format": format,
-                    "family": id.split(['-', '/', '_']).next().unwrap_or("model"),
-                    "families": [id.split(['-', '/', '_']).next().unwrap_or("model")],
+                    "family": family_name,
+                    "families": [family_name],
                     "parameter_size": param_size,
                     "quantization_level": quant,
                 }
@@ -2848,14 +3067,11 @@ async fn proxy_chat(
     // llama.cpp forwards the effort label to the model's Jinja template, and
     // a template may only accept a subset of the standard ladder. Round the
     // harness value onto that subset instead of letting the template raise.
-    let ladder = match server_def.as_ref() {
-        Some(def) => {
-            let info = template_info_for(state, def).await;
-            info.ladder
-        }
+    let template_info = match server_def.as_ref() {
+        Some(def) => Some(template_info_for(state, def).await),
         None => None,
     };
-    let body = normalize_chat_request_with_ladder(body, &backend, context, ladder.as_deref());
+    let body = normalize_chat_request_with_info(body, &backend, context, template_info.as_ref());
     proxy_post(stream, state, port, "/v1/chat/completions", &body, origin).await
 }
 
@@ -2875,12 +3091,21 @@ async fn proxy_post(
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
-    let api_key = state
-        .config()
-        .servers
-        .iter()
-        .find(|server| server.port == port)
-        .and_then(|server| crate::server::server_api_key(state, server));
+    let api_key = {
+        let servers = state.servers.lock().unwrap();
+        servers
+            .values()
+            .find(|server| server.def.port == port)
+            .and_then(|server| crate::server::server_api_key(state, &server.def))
+    }
+    .or_else(|| {
+        state
+            .config()
+            .servers
+            .iter()
+            .find(|server| server.port == port)
+            .and_then(|server| crate::server::server_api_key(state, server))
+    });
     let req = state
         .chat_http
         .post(&url)
@@ -4599,31 +4824,22 @@ mod tests {
     #[test]
     fn test_toggle_only_request_normalizes_to_enable_thinking_and_strips_effort() {
         let req = r#"{"model":"my-toggle-model","messages":[],"reasoning_effort":"high"}"#;
-        let mut obj =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(req).unwrap();
-        let raw_effort = harness_effort(&obj);
-        let toggle = raw_effort
-            .as_deref()
-            .and_then(effort_to_toggle)
-            .unwrap_or(true);
-        let mut kwargs = obj
-            .get("chat_template_kwargs")
-            .and_then(serde_json::Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        kwargs.insert(
-            "enable_thinking".to_string(),
-            serde_json::Value::Bool(toggle),
-        );
-        kwargs.remove("reasoning_effort");
-        obj.insert(
-            "chat_template_kwargs".to_string(),
-            serde_json::Value::Object(kwargs),
-        );
-        obj.remove("reasoning_effort");
+        let info = crate::state::TemplateEffortInfo {
+            ladder: None,
+            default_effort: None,
+            is_reasoning: true,
+            is_toggle_only: true,
+            is_always_on: false,
+            template: Some("{% if enable_thinking %}...{% endif %}".into()),
+        };
+        let bytes =
+            normalize_chat_request_with_info(req.as_bytes(), "vllm", Some(32768), Some(&info));
+        let obj: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(obj["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(obj["thinking"]["type"], "enabled");
         assert!(obj.get("reasoning_effort").is_none());
+        assert!(obj["chat_template_kwargs"].get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -4707,5 +4923,49 @@ mod tests {
         assert!(trusted.contains("X-Stainless-Lang"));
         assert!(trusted.contains("Access-Control-Max-Age: 86400"));
         assert!(trusted.contains("PUT, DELETE"));
+    }
+
+    #[test]
+    fn test_allowed_origins_include_portless_localhost() {
+        assert!(is_allowed_origin("http://localhost"));
+        assert!(is_allowed_origin("http://127.0.0.1"));
+        assert!(is_allowed_origin("https://localhost"));
+        assert!(is_allowed_origin("https://127.0.0.1"));
+        assert!(!is_allowed_origin("http://evil.com"));
+    }
+
+    #[test]
+    fn test_dynamic_always_on_reasoning_from_template() {
+        let template = "{% if message.role == 'assistant' %}<think>\n{{ message.thought }}</think>{{ message.content }}{% endif %}";
+        let info = analyze_chat_template(Some(template));
+        assert!(info.is_reasoning);
+        assert!(info.is_always_on);
+        assert!(!info.is_toggle_only);
+
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.name = "Custom-Thinker-7B".into();
+        def.model_id = "custom-org/Custom-Thinker-7B".into();
+        let row = model_row_with_template(&def, Some(16384), "configured", &[], &info);
+        assert_eq!(row["reasoning_config"]["mode"], "always_on");
+        assert_eq!(row["reasoning_config"]["mandatory"], true);
+        assert_eq!(row["reasoning_config"]["control"], "reasoning_effort");
+        assert_eq!(row["chat_template"], template);
+    }
+
+    #[test]
+    fn test_dynamic_toggle_only_from_template() {
+        let template = "{% if enable_thinking %}<think>{{ message.thought }}</think>{% endif %}{{ message.content }}";
+        let info = analyze_chat_template(Some(template));
+        assert!(info.is_reasoning);
+        assert!(!info.is_always_on);
+        assert!(info.is_toggle_only);
+
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.name = "Custom-Toggle-7B".into();
+        def.model_id = "custom-org/Custom-Toggle-7B".into();
+        let row = model_row_with_template(&def, Some(16384), "configured", &[], &info);
+        assert_eq!(row["reasoning_config"]["control"], "enable_thinking");
+        assert_eq!(row["reasoning_config"]["parameters"]["reasoning_effort"], false);
+        assert_eq!(row["reasoning_config"]["parameters"]["chat_template_kwargs"]["enable_thinking"], true);
     }
 }

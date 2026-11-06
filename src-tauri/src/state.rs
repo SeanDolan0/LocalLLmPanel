@@ -1445,6 +1445,8 @@ pub struct TemplateEffortInfo {
     pub default_effort: Option<String>,
     pub is_reasoning: bool,
     pub is_toggle_only: bool,
+    pub is_always_on: bool,
+    pub template: Option<String>,
 }
 
 pub struct AppState {
