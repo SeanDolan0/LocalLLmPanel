@@ -42,7 +42,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZDRDE3QzBGODFFNUUzOUYKUldTZjQrV0JEM3pSL05MeWIwb29sRnU5WkoxeStKcTh4N0F6T0lReVVaNHM0dG01cXZtYTA2V1kK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFRkUwNjQ1OTI4RTdDNUQKUldSZGZJNlNSUWIrVGh0bVRHNGs5UGt6SzF6ZzRmQktZUURiQlkySU5SWGpEeFVKeWRpaldvNzkK",
       "endpoints": [
         "https://github.com/SeanDolan0/LocalLLmPanel/releases/latest/download/latest.json"
       ],
