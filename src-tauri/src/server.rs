@@ -395,7 +395,21 @@ pub fn launch_script_with_version(
     if def.enforce_eager {
         args.push("--enforce-eager".into());
     }
-    if let Some(served) = &def.served_model_name {
+    let served = def
+        .served_model_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let eff = def.effective_model_name();
+            if eff != def.model_id {
+                Some(eff)
+            } else {
+                None
+            }
+        });
+    if let Some(served) = &served {
         args.push("--served-model-name".into());
         args.push(shell_quote(served));
     }
@@ -753,13 +767,15 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
     let mut structured_flags = Vec::new();
     let model = def.model_path.as_deref().unwrap_or(&def.model_id);
     args.extend(["-m".into(), model.into()]);
-    if let Some(alias) = def
+    let alias = def
         .served_model_name
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        args.extend(["--alias".into(), alias.into()]);
+        .map(str::to_string)
+        .unwrap_or_else(|| def.effective_model_name());
+    if !alias.is_empty() {
+        args.extend(["--alias".into(), alias]);
         structured_flags.extend(["--alias", "-a"]);
     }
     if let Some(mmproj) = def.mmproj_path.as_deref().filter(|p| !p.is_empty()) {
@@ -1876,9 +1892,6 @@ fn prepare_crashed_server_for_restart(state: &Arc<AppState>, id: &str) -> u32 {
 /// Stop a server: SIGTERM to the WSL-side PID via pidfile, then wait; on
 /// timeout kill the wsl.exe process tree. Idempotent.
 pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &str) -> Result<()> {
-    let cfg = state.config();
-    validate_venv_dir(&cfg.venv_dir).map_err(|e| anyhow!(e))?;
-    let distro = state.resolve_distro();
     // A start request owns a permit until its child is registered.  Wait for
     // that registration so Stop cannot race past a still-starting process.
     let start_wait_deadline = Instant::now() + Duration::from_secs(30);
@@ -1902,70 +1915,6 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
         }
     };
 
-    // 1) Ask the backend process to terminate gracefully.
-    let mut term_ok = false;
-    if wsl_child.is_some() {
-        let pid_script = format!(
-            "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\ncat \"$venv_dir/../run/$run_id.pid\" 2>/dev/null || true",
-            wsl::WSL_TILDE_EXPANSION_SNIPPET,
-            wsl::shell_quote_wsl(&cfg.venv_dir),
-            wsl::shell_quote_wsl(id),
-        );
-        let pid_from_file = wsl::run_script(&distro, &pid_script);
-        if let Ok(pid) = pid_from_file.stdout.trim().parse::<u32>() {
-            let kill = wsl::run_script(
-                &distro,
-                &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"),
-            );
-            term_ok = kill.stdout.contains("killed");
-        }
-    }
-
-    // 2) Wait up to 30s for the child to exit on its own.
-    if let Some(c) = wsl_child.as_mut() {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = c.try_wait() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        let still_alive = c.try_wait().map(|r| r.is_none()).unwrap_or(false);
-        if still_alive {
-            // 3) Fallback: kill the wsl.exe tree from Windows.
-            let mut cmd = std::process::Command::new("taskkill");
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000);
-            }
-            let _ = cmd
-                .args(["/T", "/F", "/PID", &c.pid().to_string()])
-                .status();
-        }
-        if let Some(c) = wsl_child.take() {
-            let mut c = c;
-            c.join();
-        }
-    }
-    if let Some(c) = native_child.as_mut() {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = c.try_wait() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        if c.try_wait().map(|r| r.is_none()).unwrap_or(false) {
-            let _ = c.kill();
-        }
-        if let Some(mut c) = native_child.take() {
-            c.join();
-        }
-    }
-
-    // Remove the WSL pidfile after the process is gone; stale pidfiles can
-    // otherwise make a later recovery attempt signal an unrelated process.
     let had_wsl_child_stop = wsl_child.is_some();
     let backend_is_wsl = if had_wsl_child_stop {
         true
@@ -1978,14 +1927,79 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
             .map(|s| s.backend == "vllm" || s.backend == "Vllm")
             .unwrap_or(false)
     };
-    if backend_is_wsl && crate::wsl::is_running(&distro) {
-        let pid_cleanup_script = format!(
-            "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\nrm -f -- \"$venv_dir/../run/$run_id.pid\"",
-            wsl::WSL_TILDE_EXPANSION_SNIPPET,
-            wsl::shell_quote_wsl(&cfg.venv_dir),
-            wsl::shell_quote_wsl(id),
-        );
-        let _ = wsl::run_script(&distro, &pid_cleanup_script);
+
+    let cfg = state.config();
+    let mut term_ok = false;
+    if backend_is_wsl {
+        validate_venv_dir(&cfg.venv_dir).map_err(|e| anyhow!(e))?;
+        let distro = state.resolve_distro();
+
+        // 1) Ask the backend process to terminate gracefully.
+        if wsl_child.is_some() {
+            let pid_script = format!(
+                "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\ncat \"$venv_dir/../run/$run_id.pid\" 2>/dev/null || true",
+                wsl::WSL_TILDE_EXPANSION_SNIPPET,
+                wsl::shell_quote_wsl(&cfg.venv_dir),
+                wsl::shell_quote_wsl(id),
+            );
+            let pid_from_file = wsl::run_script(&distro, &pid_script);
+            if let Ok(pid) = pid_from_file.stdout.trim().parse::<u32>() {
+                let kill = wsl::run_script(
+                    &distro,
+                    &format!("kill -TERM {pid} 2>/dev/null && echo killed || echo nograb"),
+                );
+                term_ok = kill.stdout.contains("killed");
+            }
+        }
+
+        // 2) Wait up to 30s for the child to exit on its own.
+        if let Some(c) = wsl_child.as_mut() {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                if let Ok(Some(_)) = c.try_wait() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            let still_alive = c.try_wait().map(|r| r.is_none()).unwrap_or(false);
+            if still_alive {
+                // 3) Fallback: kill the wsl.exe tree from Windows.
+                let mut cmd = std::process::Command::new("taskkill");
+                cmd.args(["/T", "/F", "/PID", &c.pid().to_string()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000);
+                }
+                let _ = cmd.status();
+            }
+            if let Some(c) = wsl_child.take() {
+                let mut c = c;
+                c.join();
+            }
+        }
+
+        // Remove the WSL pidfile after the process is gone; stale pidfiles can
+        // otherwise make a later recovery attempt signal an unrelated process.
+        if crate::wsl::is_running(&distro) {
+            let pid_cleanup_script = format!(
+                "{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\nrm -f -- \"$venv_dir/../run/$run_id.pid\"",
+                wsl::WSL_TILDE_EXPANSION_SNIPPET,
+                wsl::shell_quote_wsl(&cfg.venv_dir),
+                wsl::shell_quote_wsl(id),
+            );
+            let _ = wsl::run_script(&distro, &pid_cleanup_script);
+        }
+    }
+
+    if let Some(mut c) = native_child.take() {
+        if c.try_wait().map(|r| r.is_none()).unwrap_or(true) {
+            let _ = c.kill();
+        }
+        c.join();
     }
 
     // Mark stopped.
@@ -3371,6 +3385,66 @@ mod tests {
         );
     }
 
+    /// `stop_server` must stop native llama.cpp-style children quickly without
+    /// waiting for the 30-second graceful timeout.
+    #[cfg(windows)]
+    #[test]
+    fn stop_server_stops_native_child_quickly() {
+        let state = Arc::new(AppState::new());
+        let mut server_def = def("org/model", "instruct", 8124, "fp16", None);
+        server_def.id = "s_native".into();
+        server_def.backend = "llamacpp".into();
+        state.config.lock().unwrap().servers.push(server_def.clone());
+
+        let child = wsl::NativeChild::spawn(
+            std::path::Path::new(r"C:\Windows\System32\ping.exe"),
+            &["-n".into(), "60".into(), "127.0.0.1".into()],
+            |_| {},
+        )
+        .expect("spawn ping");
+        let pid = child.pid();
+        state.servers.lock().unwrap().insert(
+            "s_native".into(),
+            LiveServer {
+                def: server_def,
+                status: ServerStatus::Running,
+                error: None,
+                wsl_child: None,
+                native_child: Some(child),
+                wsl_pid: None,
+                log_ring: std::sync::Mutex::new(VecDequeLog::new()),
+                last_metrics: None,
+                stopping: false,
+                crash_retry_count: 0,
+            },
+        );
+
+        let start = Instant::now();
+        stop_server(&state, None, "s_native").expect("stop_server");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "stopping native child took too long: {elapsed:?}"
+        );
+
+        {
+            let servers = state.servers.lock().unwrap();
+            let live = servers.get("s_native").unwrap();
+            assert_eq!(live.status, ServerStatus::Stopped);
+            assert!(live.native_child.is_none());
+        }
+
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .expect("tasklist");
+        let listing = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !listing.contains(&pid.to_string()),
+            "native child {pid} survived stop_server:\n{listing}"
+        );
+    }
+
     #[test]
     fn port_allocator_skips_bound_ports() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -3570,6 +3644,16 @@ mod tests {
         ] {
             assert!(!args.contains(&vllm_flag.to_string()));
         }
+    }
+
+    #[test]
+    fn llamacpp_args_fallback_to_effective_model_name_alias() {
+        let mut d = def("model.gguf", "instruct", 8123, "gguf", None);
+        d.backend = "llamacpp".into();
+        d.name = "My Set Model".into();
+        d.model_path = Some(r"C:\models\model.gguf".into());
+        let args = build_llamacpp_args_with_help(&d, "");
+        assert!(args.windows(2).any(|w| w == ["--alias", "My Set Model"]));
     }
 
     #[test]

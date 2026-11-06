@@ -80,6 +80,8 @@ pub fn find_server_port_for(
     for ls in &running {
         if ls.def.effective_model_name().eq_ignore_ascii_case(m)
             || ls.def.model_id.eq_ignore_ascii_case(m)
+            || ls.def.name.eq_ignore_ascii_case(m)
+            || ls.def.served_model_name.as_deref().map(|s| s.eq_ignore_ascii_case(m)).unwrap_or(false)
         {
             return Some(ls.def.port);
         }
@@ -88,7 +90,14 @@ pub fn find_server_port_for(
     for ls in &running {
         let hf = ls.def.model_id.to_lowercase();
         let name = ls.def.effective_model_name().to_lowercase();
-        if hf.ends_with(&lower) || name.ends_with(&lower) || lower.ends_with(&hf) {
+        let sname = ls.def.name.to_lowercase();
+        if hf.ends_with(&lower)
+            || name.ends_with(&lower)
+            || sname.ends_with(&lower)
+            || lower.ends_with(&hf)
+            || lower.ends_with(&name)
+            || lower.ends_with(&sname)
+        {
             return Some(ls.def.port);
         }
     }
@@ -397,11 +406,20 @@ pub fn template_has_reasoning(template: &str) -> bool {
     let lower = template.to_ascii_lowercase();
     lower.contains("<think>")
         || lower.contains("</think>")
+        || lower.contains("<thought>")
+        || lower.contains("</thought>")
+        || lower.contains("<|thought|>")
+        || lower.contains("<|endofthought|>")
+        || lower.contains("[think]")
+        || lower.contains("[/think]")
+        || lower.contains("[thought]")
+        || lower.contains("[/thought]")
         || lower.contains("enable_thinking")
         || lower.contains("reasoning_content")
         || lower.contains("reasoning_effort")
-        || lower.contains("<thought>")
         || lower.contains("thinking_effort")
+        || lower.contains("reasoning_budget")
+        || lower.contains("thinking_token_budget")
 }
 
 fn def_is_vision(def: &ServerDef) -> bool {
@@ -765,7 +783,7 @@ fn model_row_with_template(
 
     let supported_efforts: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
         (ReasoningMode::None, _) => Vec::new(),
-        _ if is_toggle_only => Vec::new(),
+        _ if is_toggle_only => vec!["none", "minimal", "low", "medium", "high", "max"],
         (ReasoningMode::Effort, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::Effort, None) => {
@@ -775,13 +793,13 @@ fn model_row_with_template(
     };
     let levels: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
         (ReasoningMode::None, _) => Vec::new(),
-        _ if is_toggle_only => Vec::new(),
+        _ if is_toggle_only => vec!["low", "medium", "high"],
         (ReasoningMode::Effort, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (mode, None) => mode.levels().to_vec(),
     };
     let default_level: Option<String> = if is_toggle_only {
-        None
+        Some("medium".to_string())
     } else {
         match traits.reasoning_mode {
             ReasoningMode::None => None,
@@ -797,12 +815,12 @@ fn model_row_with_template(
         }
     };
     let level_map_val = |level: &str| -> serde_json::Value {
-        if is_toggle_only || traits.reasoning_mode == ReasoningMode::None {
+        if traits.reasoning_mode == ReasoningMode::None {
             return serde_json::Value::Null;
         }
         let is_supported = match effort_ladder {
             Some(ladder) => ladder.iter().any(|l| l.eq_ignore_ascii_case(level)),
-            None => matches!(level, "low" | "medium" | "high"),
+            None => true,
         };
         if is_supported {
             serde_json::json!(level)
@@ -2620,13 +2638,23 @@ async fn route(
             )
             .await
         }
-        ("GET", "/health") | ("GET", "/v1/health") | ("GET", "/") => {
+        ("GET", "/health") | ("GET", "/v1/health") => {
             write_request_response(
                 stream,
                 head,
                 200,
                 "application/json",
                 b"{\"status\":\"ok\"}",
+            )
+            .await
+        }
+        ("GET", "/") => {
+            write_request_response(
+                stream,
+                head,
+                200,
+                "text/plain",
+                b"Ollama is running",
             )
             .await
         }
@@ -2649,6 +2677,8 @@ async fn route(
             let rows = model_rows_for_state(state).await;
             let found = rows.into_iter().find(|row| {
                 row["id"].as_str() == Some(requested_name.as_str())
+                    || row["name"].as_str() == Some(requested_name.as_str())
+                    || row["display_name"].as_str() == Some(requested_name.as_str())
                     || row["root"].as_str() == Some(requested_name.as_str())
             });
             if let Some(row) = found {
@@ -2675,10 +2705,28 @@ async fn route(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(32768);
                 let parameters_str = format!("num_ctx {ctx}\nstop \"<|im_end|>\"\nstop \"<|endoftext|>\"");
+                let is_embed = row["task"].as_str() == Some("embed");
+                let mut capabilities = vec!["completion", "chat"];
+                if is_embed {
+                    capabilities = vec!["embedding"];
+                }
+                if row["capabilities"]["tools"].as_bool().unwrap_or(false) {
+                    capabilities.push("tools");
+                }
+                if row["capabilities"]["thinking"].as_bool().unwrap_or(false)
+                    || row["capabilities"]["reasoning"].as_bool().unwrap_or(false)
+                    || row["reasoning"].as_bool().unwrap_or(false)
+                {
+                    capabilities.push("thinking");
+                }
+                if row["capabilities"]["vision"].as_bool().unwrap_or(false) {
+                    capabilities.push("vision");
+                }
                 let payload = serde_json::json!({
                     "modelfile": format!("FROM {id}"),
                     "parameters": parameters_str,
                     "template": template_str,
+                    "capabilities": capabilities,
                     "details": {
                         "parent_model": "",
                         "format": format,
@@ -4967,5 +5015,42 @@ mod tests {
         assert_eq!(row["reasoning_config"]["control"], "enable_thinking");
         assert_eq!(row["reasoning_config"]["parameters"]["reasoning_effort"], false);
         assert_eq!(row["reasoning_config"]["parameters"]["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(row["reasoning"], true);
+        assert_eq!(row["thinkingLevelMap"]["off"], "none");
+        assert_eq!(row["thinkingLevelMap"]["medium"], "medium");
+        assert_eq!(row["thinkingLevelMap"]["low"], "low");
+        assert_eq!(row["thinkingLevelMap"]["high"], "high");
+    }
+
+    #[test]
+    fn test_template_has_reasoning_markers() {
+        assert!(template_has_reasoning("<think>"));
+        assert!(template_has_reasoning("</think>"));
+        assert!(template_has_reasoning("<thought>"));
+        assert!(template_has_reasoning("</thought>"));
+        assert!(template_has_reasoning("<|thought|>"));
+        assert!(template_has_reasoning("<|endofthought|>"));
+        assert!(template_has_reasoning("[think]"));
+        assert!(template_has_reasoning("[/think]"));
+        assert!(template_has_reasoning("[thought]"));
+        assert!(template_has_reasoning("[/thought]"));
+        assert!(template_has_reasoning("enable_thinking"));
+        assert!(template_has_reasoning("reasoning_content"));
+        assert!(template_has_reasoning("reasoning_effort"));
+        assert!(template_has_reasoning("thinking_effort"));
+        assert!(template_has_reasoning("reasoning_budget"));
+        assert!(template_has_reasoning("thinking_token_budget"));
+        assert!(!template_has_reasoning("hello standard model"));
+    }
+
+    #[test]
+    fn test_route_matches_user_set_server_name() {
+        let mut servers = BTreeMap::new();
+        let mut ls = live_server("s1", "C:\\models\\model.gguf", None, 8100, "instruct", ServerStatus::Running);
+        ls.def.name = "My Favorite Coder".into();
+        servers.insert("s1".into(), ls);
+
+        assert_eq!(find_server_port_for(&servers, "My Favorite Coder", "instruct"), Some(8100));
+        assert_eq!(find_server_port_for(&servers, "my favorite coder", "instruct"), Some(8100));
     }
 }

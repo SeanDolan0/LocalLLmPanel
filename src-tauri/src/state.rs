@@ -586,8 +586,11 @@ impl ServerDef {
         Ok(())
     }
 
-    /// The model name advertised to clients and shown in the UI. llama.cpp
-    /// GGUF paths collapse to the file stem so a filesystem path never leaks.
+    /// The model name advertised to clients and shown in the UI. Prioritizes:
+    /// 1. Explicit served_model_name if configured.
+    /// 2. User-set server name if it represents a clean model identifier rather than raw filesystem path.
+    /// 3. GGUF file stem or directory leaf so filesystem paths never leak.
+    /// 4. Fallback to model_id.
     pub fn effective_model_name(&self) -> String {
         if let Some(served) = self
             .served_model_name
@@ -596,6 +599,22 @@ impl ServerDef {
             .filter(|name| !name.is_empty())
         {
             return served.to_string();
+        }
+        let clean_name = self.name.trim();
+        let is_path_or_id = clean_name.is_empty()
+            || clean_name == self.id.trim()
+            || clean_name == self.model_id.trim()
+            || clean_name.contains('\\')
+            || clean_name.contains('/')
+            || clean_name.to_ascii_lowercase().ends_with(".gguf");
+        if !is_path_or_id {
+            if let Some(path) = self.model_path.as_deref() {
+                if clean_name != path.trim() {
+                    return clean_name.to_string();
+                }
+            } else {
+                return clean_name.to_string();
+            }
         }
         // A native llama.cpp model is often stored as a full Windows or UNC
         // path. Harnesses treat the advertised id as the model name, so expose
@@ -2072,6 +2091,16 @@ mod tests {
         server.model_id = "Qwen/Qwen3-8B".into();
         assert_eq!(server.effective_model_name(), "Qwen/Qwen3-8B");
         assert_eq!(server.backend_model_name(), "Qwen/Qwen3-8B");
+
+        // User-set clean name is honored when served_model_name is not configured.
+        server.name = "Custom Spark 4B".into();
+        assert_eq!(server.effective_model_name(), "Custom Spark 4B");
+
+        // But raw file paths set as name fall back to stem so paths never leak.
+        server.backend = "llamacpp".into();
+        server.name = r"C:\path\to\CustomModel.gguf".into();
+        server.model_id = r"C:\path\to\CustomModel.gguf".into();
+        assert_eq!(server.effective_model_name(), "CustomModel");
     }
 
     #[test]

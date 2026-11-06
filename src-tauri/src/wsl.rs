@@ -618,14 +618,24 @@ impl NativeChild {
     }
 
     pub fn kill(&mut self) -> std::io::Result<()> {
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return Ok(());
+        }
         #[cfg(windows)]
         {
             let pid = self.child.id().to_string();
-            let status = Command::new("taskkill")
-                .args(["/T", "/F", "/PID", &pid])
-                .status()?;
-            if status.success() {
-                return Ok(());
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/T", "/F", "/PID", &pid])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+            if let Ok(status) = cmd.status() {
+                if status.success() {
+                    let _ = self.child.try_wait();
+                    return Ok(());
+                }
             }
         }
         self.child.kill()
@@ -793,14 +803,24 @@ impl WslChild {
     /// launcher can leave the Linux child orphaned, so use taskkill on Windows
     /// before falling back to the platform child handle.
     pub fn kill(&mut self) -> std::io::Result<()> {
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return Ok(());
+        }
         #[cfg(windows)]
         {
             let pid = self.child.id().to_string();
-            let status = Command::new("taskkill")
-                .args(["/T", "/F", "/PID", &pid])
-                .status()?;
-            if status.success() {
-                return Ok(());
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/T", "/F", "/PID", &pid])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+            if let Ok(status) = cmd.status() {
+                if status.success() {
+                    let _ = self.child.try_wait();
+                    return Ok(());
+                }
             }
         }
         self.child.kill()

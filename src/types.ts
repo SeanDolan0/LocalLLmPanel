@@ -169,6 +169,20 @@ export interface ServerDef {
 export function effectiveModelName(def: ServerDef): string {
   const served = def.served_model_name?.trim();
   if (served) return served;
+  const cleanName = def.name?.trim();
+  const isPathOrId =
+    !cleanName ||
+    cleanName === def.id?.trim() ||
+    cleanName === def.model_id?.trim() ||
+    cleanName.includes("\\") ||
+    cleanName.includes("/") ||
+    cleanName.toLowerCase().endsWith(".gguf");
+  if (!isPathOrId) {
+    const rawPath = def.model_path?.trim();
+    if (!rawPath || cleanName !== rawPath) {
+      return cleanName;
+    }
+  }
   // llama.cpp stores the GGUF path in model_id/model_path. Advertise the file
   // stem (without extension or split-shard suffix) instead of the full path.
   if (def.backend === "llamacpp") {
@@ -178,6 +192,12 @@ export function effectiveModelName(def: ServerDef): string {
       .replace(/\.gguf$/i, "")
       .replace(/-\d+-of-\d+$/i, "");
     if (stem) return stem;
+  } else {
+    const leaf = def.model_id.split(/[\\/]/).pop() ?? def.model_id;
+    if (leaf && !leaf.toLowerCase().endsWith(".gguf")) return leaf;
+  }
+  if (cleanName && !cleanName.includes("\\") && !cleanName.includes("/")) {
+    return cleanName;
   }
   return def.model_id;
 }
