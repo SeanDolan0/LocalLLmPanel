@@ -450,8 +450,11 @@ pub fn family_fallback(model_id: &str) -> Option<usize> {
         (&["qwen3"], 131_072),
         (&["qwen2"], 131_072),
         (&["qwen"], 32_768),
+        (&["llama-3.1", "llama-3.2", "llama-3.3", "llama3.1", "llama3.2", "llama3.3"], 131_072),
         (&["llama3", "llama-3"], 8_192),
         (&["llama"], 4_096),
+        (&["spark-x2.6", "spark-x"], 36_126),
+        (&["spark"], 32_768),
         (&["mistral"], 32_768),
         (&["mixtral"], 32_768),
         (&["gemma"], 8_192),
@@ -466,11 +469,14 @@ pub fn family_fallback(model_id: &str) -> Option<usize> {
         (&["yi"], 4_096),
         (&["baichuan"], 4_096),
         (&["internlm"], 32_768),
+        (&["glm-4", "glm4"], 131_072),
         (&["glm"], 32_768),
         (&["codegen"], 2_048),
         (&["codellama"], 16_384),
         (&["starcoder"], 8_192),
         (&["bloom"], 2_048),
+        (&["bge-", "bge"], 512),
+        (&["nomic"], 2_048),
     ];
     for (needles, ctx) in hits {
         if needles.iter().any(|nd| m.contains(nd)) {

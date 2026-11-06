@@ -97,8 +97,23 @@ pub fn find_server_port_for(
 
 fn configured_context_tokens(def: &ServerDef) -> Option<usize> {
     match def.backend.as_str() {
-        "vllm" => def.max_model_len.filter(|value| *value > 0),
-        "llamacpp" => def.ctx_size.filter(|value| *value > 0),
+        "vllm" => def
+            .max_model_len
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                flag_value(&def.extra_args, "--max-model-len")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|v| *v > 0)
+            }),
+        "llamacpp" => def
+            .ctx_size
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                flag_value(&def.extra_args, "-c")
+                    .or_else(|| flag_value(&def.extra_args, "--ctx-size"))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|v| *v > 0)
+            }),
         _ => None,
     }
 }
@@ -129,6 +144,97 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn known_model_effort_ladder(model_id: &str, model_name: &str) -> Option<Vec<String>> {
+    let lower = format!("{} {}", model_id, model_name).to_ascii_lowercase();
+    if lower.contains("spark") {
+        Some(vec!["low".to_string(), "high".to_string()])
+    } else {
+        None
+    }
+}
+
+fn template_is_toggle_only(template: Option<&str>, model_id: &str, model_name: &str) -> bool {
+    let lower_name = format!("{} {}", model_id, model_name).to_ascii_lowercase();
+    if lower_name.contains("deepseek") || lower_name.contains("qwq") || lower_name.contains("spark") {
+        return false;
+    }
+    if let Some(t) = template {
+        let lower = t.to_ascii_lowercase();
+        if lower.contains("enable_thinking") && !lower.contains("reasoning_effort") {
+            return true;
+        }
+    }
+    false
+}
+
+fn model_is_deepseek(model_id: &str, model_name: &str) -> bool {
+    let lower = format!("{} {}", model_id, model_name).to_ascii_lowercase();
+    lower.contains("deepseek")
+}
+
+fn resolve_model_context_sync(def: &ServerDef, launch_args: &[String]) -> (usize, &'static str) {
+    if let Some(ctx) = configured_context_tokens(def) {
+        return (ctx, "configured");
+    }
+    if def.backend == "llamacpp" {
+        if let Some(ctx) = flag_value(launch_args, "-c")
+            .or_else(|| flag_value(launch_args, "--ctx-size"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+        {
+            return (ctx, "configured");
+        }
+        if let Some(path_str) = &def.model_path {
+            let path = std::path::Path::new(path_str);
+            if path.is_file() {
+                if let Ok(meta) = crate::gguf::metadata_from_path(path) {
+                    if let Some(ctx) = meta.context_length.filter(|v| *v > 0) {
+                        return (ctx, "gguf_metadata");
+                    }
+                }
+            }
+        }
+    } else if def.backend == "vllm" {
+        if let Some(ctx) = flag_value(launch_args, "--max-model-len")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+        {
+            return (ctx, "configured");
+        }
+        if let Some(path_str) = &def.model_path {
+            let path = std::path::Path::new(path_str);
+            let cfg_path = if path.is_dir() {
+                path.join("config.json")
+            } else {
+                path.with_file_name("config.json")
+            };
+            if cfg_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&cfg_path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let (ctx, _) = crate::estimate::parse_context(&val);
+                        if ctx > 0 {
+                            return (ctx, "model_config");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(ctx) = crate::estimate::family_fallback(&def.model_id) {
+        return (ctx, "architecture");
+    }
+    let db = crate::llmfit_adapter::get_model_database();
+    if let Some(m) = db.find_model(&def.model_id).into_iter().find(|m| m.context_length > 0) {
+        return (m.context_length as usize, "architecture");
+    }
+    if def.task == "embed" {
+        (512, "default")
+    } else {
+        (32_768, "default")
+    }
 }
 
 /// How a backend/model exposes its thinking mode.
@@ -389,6 +495,7 @@ fn model_hints(def: &ServerDef, traits: &ModelTraits, launch_args: &[String]) ->
     hints
 }
 
+#[allow(dead_code)]
 fn model_row(
     def: &ServerDef,
     context: Option<usize>,
@@ -406,10 +513,38 @@ fn model_row_with_ladder(
     effort_ladder: Option<&[String]>,
     template_reasoning: bool,
 ) -> serde_json::Value {
-    let effort_ladder = effort_ladder.filter(|ladder| ladder.len() >= 2);
-    let context = context.filter(|value| *value > 0);
+    let derived_ladder = known_model_effort_ladder(&def.model_id, &def.name);
+    let effort_ladder = effort_ladder
+        .filter(|ladder| ladder.len() >= 2)
+        .or(derived_ladder.as_deref());
+
+    let (context, context_source) = match context.filter(|value| *value > 0) {
+        Some(ctx) => (Some(ctx), context_source),
+        None => {
+            let (ctx, src) = resolve_model_context_sync(def, launch_args);
+            (Some(ctx), src)
+        }
+    };
     let is_instruct = def.task == "instruct";
     let is_embed = def.task == "embed";
+
+    let output_ceiling = flag_value(launch_args, "-n")
+        .or_else(|| flag_value(launch_args, "--n-predict"))
+        .or_else(|| flag_value(launch_args, "--max-tokens"))
+        .or_else(|| flag_value(launch_args, "--max-new-tokens"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0);
+
+    let (output_tokens, output_tokens_source) = if !is_instruct {
+        (None, "none")
+    } else if let Some(ceiling) = output_ceiling {
+        (Some(ceiling), "launch_args")
+    } else if let Some(ctx) = context {
+        (Some(ctx), "context_window")
+    } else {
+        (Some(8192), "default_ceiling")
+    };
+
     let traits = model_traits(
         def,
         launch_args,
@@ -454,8 +589,11 @@ fn model_row_with_ladder(
         "safetensors"
     };
     let supports_template_controls = def.backend != "llamacpp" || def.jinja;
+    let is_toggle_only = traits.reasoning && template_is_toggle_only(None, &def.model_id, &def.name);
     let control = if !supports_template_controls || traits.reasoning_mode == ReasoningMode::None {
         "none"
+    } else if is_toggle_only {
+        "enable_thinking"
     } else {
         "reasoning_effort"
     };
@@ -523,9 +661,8 @@ fn model_row_with_ladder(
 
     let supported_efforts: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
         (ReasoningMode::None, _) => Vec::new(),
-        (ReasoningMode::Effort, Some(ladder)) => std::iter::once("none")
-            .chain(ladder.iter().map(String::as_str))
-            .collect(),
+        _ if is_toggle_only => Vec::new(),
+        (ReasoningMode::Effort, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::Effort, None) => {
             vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -534,20 +671,23 @@ fn model_row_with_ladder(
     };
     let levels: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
         (ReasoningMode::None, _) => Vec::new(),
-        (ReasoningMode::Effort, Some(ladder)) => std::iter::once("none")
-            .chain(ladder.iter().map(String::as_str))
-            .collect(),
+        _ if is_toggle_only => Vec::new(),
+        (ReasoningMode::Effort, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (mode, None) => mode.levels().to_vec(),
     };
-    let default_level: Option<String> = match traits.reasoning_mode {
-        ReasoningMode::None => None,
-        mode => {
-            let base = mode.default_level().unwrap_or("medium").to_string();
-            Some(match effort_ladder {
-                Some(ladder) => clamp_effort_to_ladder(&base, ladder).unwrap_or(base),
-                None => base,
-            })
+    let default_level: Option<String> = if is_toggle_only {
+        None
+    } else {
+        match traits.reasoning_mode {
+            ReasoningMode::None => None,
+            mode => {
+                let base = mode.default_level().unwrap_or("medium").to_string();
+                Some(match effort_ladder {
+                    Some(ladder) => clamp_effort_to_ladder(&base, ladder).unwrap_or(base),
+                    None => base,
+                })
+            }
         }
     };
     let level_map_val = |level: &str| -> serde_json::Value {
@@ -637,15 +777,16 @@ fn model_row_with_ladder(
         "max_model_len": context,
         "context_length": context,
         "max_context_length": context,
+        "max_input_tokens": context,
         "context_window": context,
         "n_ctx": context,
         "context_source": context_source,
         // Hard upper bound on generation: the prompt and completion share the
         // context window. Embedding models do not generate tokens.
-        "max_output_tokens": if is_instruct { context } else { None },
-        "max_completion_tokens": if is_instruct { context } else { None },
-        "max_output_tokens_source": if is_instruct && context.is_some() {
-            Some("context_window")
+        "max_output_tokens": if is_instruct { output_tokens } else { None },
+        "max_completion_tokens": if is_instruct { output_tokens } else { None },
+        "max_output_tokens_source": if is_instruct && output_tokens.is_some() {
+            Some(output_tokens_source)
         } else {
             None
         },
@@ -704,8 +845,9 @@ fn model_row_with_ladder(
     // catalog, falling back to 4096 when absent. It also discovers image
     // support only from a top-level `input` array, not
     // architecture.input_modalities.
-    row["max_tokens"] = serde_json::json!(if is_instruct { context } else { None });
+    row["max_tokens"] = serde_json::json!(if is_instruct { output_tokens } else { None });
     row["input"] = serde_json::json!(input_modalities);
+    row["permission"] = serde_json::json!([]);
     if traits.reasoning {
         row["thinkingLevelMap"] = thinking_level_map.clone();
         row["thinking_level_map"] = thinking_level_map;
@@ -726,14 +868,17 @@ fn model_rows_with_launch_args(
     // discoverable for RAG/indexing clients.
     for task in ["instruct", "embed"] {
         for server in running_servers(servers, task) {
-            let context = configured_context_tokens(&server.def);
-            let source = if context.is_some() {
-                "configured"
-            } else {
-                "unknown"
-            };
             let args = effective_launch_args(&server.def, vllm_args);
-            rows.push(model_row(&server.def, context, source, args));
+            let (context, source) = resolve_model_context_sync(&server.def, args);
+            let ladder = known_model_effort_ladder(&server.def.model_id, &server.def.name);
+            rows.push(model_row_with_ladder(
+                &server.def,
+                Some(context),
+                source,
+                args,
+                ladder.as_deref(),
+                false,
+            ));
         }
     }
     rows
@@ -908,6 +1053,75 @@ for pat in [f'/root/.cache/huggingface/hub/{{folder}}/snapshots/*', f'/home/*/.c
     None
 }
 
+fn read_vllm_config_context(distro: &str, def: &ServerDef) -> Option<usize> {
+    if distro.is_empty() {
+        return None;
+    }
+    let hf_model = &def.model_id;
+    let script = format!(
+        r#"python3 -c "import glob, json, os, sys
+folder = 'models--' + '{hf_model}'.replace('/', '--')
+for pat in [f'/root/.cache/huggingface/hub/{{folder}}/snapshots/*', f'/home/*/.cache/huggingface/hub/{{folder}}/snapshots/*']:
+    for s in glob.glob(pat):
+        p = os.path.join(s, 'config.json')
+        if os.path.isfile(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as fh:
+                    d = json.load(fh)
+                    for k in ['max_position_embeddings', 'max_sequence_length', 'model_max_length', 'max_seq_len']:
+                        if k in d and isinstance(d[k], int) and d[k] > 0:
+                            sys.stdout.write(str(d[k]))
+                            sys.exit(0)
+            except Exception:
+                pass
+""#,
+        hf_model = hf_model.replace('\'', "")
+    );
+    let out = crate::wsl::run_script_root(distro, &script);
+    if out.ok && !out.stdout.trim().is_empty() {
+        return out.stdout.trim().parse::<usize>().ok();
+    }
+    None
+}
+
+async fn resolve_context_for_server_async(
+    state: &Arc<AppState>,
+    def: &ServerDef,
+    launch_args: &[String],
+) -> (usize, &'static str) {
+    if let Some(ctx) = configured_context_tokens(def) {
+        return (ctx, "configured");
+    }
+    if def.backend == "llamacpp" {
+        if let Some(ctx) = flag_value(launch_args, "-c")
+            .or_else(|| flag_value(launch_args, "--ctx-size"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+        {
+            return (ctx, "configured");
+        }
+    } else if def.backend == "vllm" {
+        if let Some(ctx) = flag_value(launch_args, "--max-model-len")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+        {
+            return (ctx, "configured");
+        }
+    }
+
+    if let Some(ctx) = fetch_runtime_context(state, def).await {
+        return (ctx, "runtime");
+    }
+
+    if def.backend == "vllm" && !state.config().distro.is_empty() {
+        if let Some(ctx) = read_vllm_config_context(&state.config().distro, def) {
+            return (ctx, "model_config");
+        }
+    }
+
+    resolve_model_context_sync(def, launch_args)
+}
+
 async fn fetch_template_info(
     state: &Arc<AppState>,
     def: &ServerDef,
@@ -930,6 +1144,8 @@ async fn fetch_template_info(
             .and_then(|v| v.ok());
             val.and_then(|v| {
                 v.get("chat_template")
+                    .or_else(|| v.get("default_generation_settings").and_then(|d| d.get("chat_template")))
+                    .or_else(|| v.get("model_info").and_then(|m| m.get("chat_template")))
                     .and_then(|t| t.as_str())
                     .map(str::to_string)
             })
@@ -965,9 +1181,6 @@ async fn template_info_for(state: &Arc<AppState>, def: &ServerDef) -> (Option<Ve
     (ladder, is_reasoning)
 }
 
-async fn effort_ladder_for(state: &Arc<AppState>, def: &ServerDef) -> Option<Vec<String>> {
-    template_info_for(state, def).await.0
-}
 
 async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     let vllm_args = state
@@ -991,19 +1204,15 @@ async fn model_rows_for_state(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     };
     let mut rows = Vec::with_capacity(defs.len());
     for def in defs {
-        let configured = configured_context_tokens(&def);
-        let (context, source) = if let Some(context) = configured {
-            (Some(context), "configured")
-        } else if let Some(context) = fetch_runtime_context(state, &def).await {
-            (Some(context), "runtime")
-        } else {
-            (None, "unknown")
-        };
         let args = effective_launch_args(&def, &vllm_args);
-        let (ladder, template_reasoning) = template_info_for(state, &def).await;
+        let (context, source) = resolve_context_for_server_async(state, &def, args).await;
+        let (mut ladder, template_reasoning) = template_info_for(state, &def).await;
+        if ladder.is_none() {
+            ladder = known_model_effort_ladder(&def.model_id, &def.name);
+        }
         rows.push(model_row_with_ladder(
             &def,
-            context,
+            Some(context),
             source,
             args,
             ladder.as_deref(),
@@ -1169,29 +1378,60 @@ fn clamp_effort_to_ladder(effort: &str, ladder: &[String]) -> Option<String> {
 fn template_effort_ladder(template: &str) -> Option<Vec<String>> {
     static CHECK_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"(?i)reasoning_effort[^\n]{0,120}?not\s+in\s*[\(\[]([^\)\]]{0,240})[\)\]]",
+            r"(?i)reasoning_effort[^\n]{0,120}?(?:not\s+in|in)\s*[\(\[]([^\)\]]{0,240})[\)\]]",
         )
         .expect("valid reasoning effort validation regex")
     });
-    let labels = CHECK_RE.captures(template)?.get(1)?.as_str();
+    static MSG_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"(?i)supported\s+(?:types|levels|efforts)\s+are\s+([^\.\n]{2,100})",
+        )
+        .expect("valid reasoning effort message regex")
+    });
+
     let mut levels: Vec<String> = Vec::new();
-    // `split` alternates outside/inside quoted segments.
-    for (index, part) in labels
-        .split(|character| character == '\'' || character == '"')
-        .enumerate()
-    {
-        if index % 2 == 0 {
-            continue;
+    if let Some(caps) = CHECK_RE.captures(template) {
+        if let Some(matched) = caps.get(1) {
+            let labels = matched.as_str();
+            for (index, part) in labels
+                .split(|character| character == '\'' || character == '"')
+                .enumerate()
+            {
+                if index % 2 == 0 {
+                    continue;
+                }
+                let value = part.trim().to_ascii_lowercase();
+                if value == "none"
+                    || effort_rank(&value).is_none()
+                    || levels.iter().any(|level| level == &value)
+                {
+                    continue;
+                }
+                levels.push(value);
+            }
         }
-        let value = part.trim().to_ascii_lowercase();
-        if value == "none"
-            || effort_rank(&value).is_none()
-            || levels.iter().any(|level| level == &value)
-        {
-            continue;
-        }
-        levels.push(value);
     }
+
+    if levels.len() < 2 {
+        if let Some(caps) = MSG_RE.captures(template) {
+            if let Some(matched) = caps.get(1) {
+                for token in matched.as_str().split(|c: char| !c.is_alphabetic()) {
+                    let value = token.trim().to_ascii_lowercase();
+                    if value.is_empty()
+                        || value == "and"
+                        || value == "or"
+                        || value == "none"
+                        || effort_rank(&value).is_none()
+                        || levels.iter().any(|level| level == &value)
+                    {
+                        continue;
+                    }
+                    levels.push(value);
+                }
+            }
+        }
+    }
+
     levels.sort_by_key(|level| effort_rank(level).unwrap_or(usize::MAX));
     (levels.len() >= 2).then_some(levels)
 }
@@ -1350,127 +1590,196 @@ fn apply_harness_precedence_with_ladder(
     context_tokens: Option<usize>,
     effort_ladder: Option<&[String]>,
 ) {
+    let model_name = object
+        .get("model")
+        .or_else(|| object.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let resolved_ladder = effort_ladder
+        .map(|l| l.to_vec())
+        .or_else(|| known_model_effort_ladder(&model_name, &model_name));
+    let effort_ladder = resolved_ladder.as_deref();
+
+    let is_deepseek = model_is_deepseek(&model_name, &model_name);
+    let is_toggle_only = template_is_toggle_only(None, &model_name, &model_name);
+
     let raw_effort = harness_effort(object);
-    let effort = raw_effort
-        .as_deref()
-        .and_then(|effort| normalize_effort_for_ladder(effort, backend, effort_ladder));
-
-    // Canonicalize an effort the harness already sent.  vLLM rejects
-    // toggle-only labels such as "on"/"auto" in its reasoning_effort enum, so
-    // those are represented by the explicit toggle instead.
-    if let Some(current) = object
-        .get("reasoning_effort")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-    {
-        match normalize_effort_for_ladder(&current, backend, effort_ladder) {
-            Some(canonical) if canonical != current => {
-                object.insert(
-                    "reasoning_effort".to_string(),
-                    serde_json::Value::String(canonical),
-                );
-            }
-            None if backend == "vllm" || is_toggle_label(&current) => {
-                object.remove("reasoning_effort");
-            }
-            _ => {}
-        }
-    }
-    // Some harnesses put the level inside `chat_template_kwargs`, which both
-    // backends forward to the template. Round that copy too so it cannot
-    // reintroduce a label the template rejects.
-    if let Some(kwargs) = object
-        .get_mut("chat_template_kwargs")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        if let Some(current) = kwargs
-            .get("reasoning_effort")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-        {
-            if let Some(canonical) = normalize_effort_for_ladder(&current, backend, effort_ladder) {
-                if canonical != current {
-                    kwargs.insert(
-                        "reasoning_effort".to_string(),
-                        serde_json::Value::String(canonical),
-                    );
-                }
-            }
-        }
-    }
-    if object
-        .get("reasoning_effort")
-        .and_then(serde_json::Value::as_str)
-        .is_none()
-    {
-        if let Some(effort) = &effort {
-            object.insert(
-                "reasoning_effort".to_string(),
-                serde_json::Value::String(effort.clone()),
-            );
-        }
-    }
-
     let explicit_toggle = harness_toggle(object);
     let budget = harness_budget(object);
-    // A positive thinking budget is itself a request to think.
-    let toggle = explicit_toggle
-        .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
-        .or_else(|| budget.filter(|value| *value > 0).map(|_| true));
 
-    if let Some(toggle) = toggle {
-        // `chat_template_kwargs.enable_thinking` is the most specific control.
-        // llama.cpp parses `reasoning_effort: "none"` *after* it, so drop that
-        // contradictory value when the harness explicitly enabled thinking.
-        if toggle
-            && explicit_toggle == Some(true)
-            && object
-                .get("reasoning_effort")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(effort_disables_thinking)
-        {
-            object.remove("reasoning_effort");
-        }
+    if is_deepseek {
+        if raw_effort.is_some() || explicit_toggle.is_some() || budget.is_some() {
+            let toggle = explicit_toggle
+                .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
+                .or_else(|| budget.filter(|value| *value > 0).map(|_| true))
+                .unwrap_or(true);
 
-        let mut kwargs = object
-            .get("chat_template_kwargs")
-            .and_then(serde_json::Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let current = kwargs.get("enable_thinking");
-        let needs_insert = current.and_then(json_bool) != Some(toggle)
-            || current.is_some_and(|value| !value.is_boolean());
-        if needs_insert {
-            kwargs.insert(
-                "enable_thinking".to_string(),
-                serde_json::Value::Bool(toggle),
-            );
+            if object.get("thinking").is_none() {
+                object.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({
+                        "type": if toggle { "enabled" } else { "disabled" }
+                    }),
+                );
+            }
+
+            let mut kwargs = object
+                .get("chat_template_kwargs")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(toggle));
+            kwargs.remove("reasoning_effort");
             object.insert(
                 "chat_template_kwargs".to_string(),
                 serde_json::Value::Object(kwargs),
             );
-        }
 
-        if backend == "llamacpp" {
-            // A panel `--reasoning-format none` must not hide the reasoning
-            // trace the harness explicitly asked for.  A request-level
-            // `reasoning_format` always overrides the launch default.
-            if toggle && object.get("reasoning_format").is_none() {
+            object.remove("reasoning_effort");
+        }
+    } else if is_toggle_only {
+        if raw_effort.is_some() || explicit_toggle.is_some() || budget.is_some() {
+            let toggle = explicit_toggle
+                .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
+                .or_else(|| budget.filter(|value| *value > 0).map(|_| true))
+                .unwrap_or(true);
+
+            let mut kwargs = object
+                .get("chat_template_kwargs")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(toggle));
+            kwargs.remove("reasoning_effort");
+            object.insert(
+                "chat_template_kwargs".to_string(),
+                serde_json::Value::Object(kwargs),
+            );
+
+            object.remove("reasoning_effort");
+        }
+    } else {
+        let effort = raw_effort
+            .as_deref()
+            .and_then(|effort| normalize_effort_for_ladder(effort, backend, effort_ladder));
+
+        // Canonicalize an effort the harness already sent.  vLLM rejects
+        // toggle-only labels such as "on"/"auto" in its reasoning_effort enum, so
+        // those are represented by the explicit toggle instead.
+        if let Some(current) = object
+            .get("reasoning_effort")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        {
+            match normalize_effort_for_ladder(&current, backend, effort_ladder) {
+                Some(canonical) if canonical != current => {
+                    object.insert(
+                        "reasoning_effort".to_string(),
+                        serde_json::Value::String(canonical),
+                    );
+                }
+                None if backend == "vllm" || is_toggle_label(&current) => {
+                    object.remove("reasoning_effort");
+                }
+                _ => {}
+            }
+        }
+        // Some harnesses put the level inside `chat_template_kwargs`, which both
+        // backends forward to the template. Round that copy too so it cannot
+        // reintroduce a label the template rejects.
+        if let Some(kwargs) = object
+            .get_mut("chat_template_kwargs")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if let Some(current) = kwargs
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            {
+                if let Some(canonical) = normalize_effort_for_ladder(&current, backend, effort_ladder) {
+                    if canonical != current {
+                        kwargs.insert(
+                            "reasoning_effort".to_string(),
+                            serde_json::Value::String(canonical),
+                        );
+                    }
+                }
+            }
+        }
+        if object
+            .get("reasoning_effort")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            if let Some(effort) = &effort {
                 object.insert(
-                    "reasoning_format".to_string(),
-                    serde_json::Value::String("auto".to_string()),
+                    "reasoning_effort".to_string(),
+                    serde_json::Value::String(effort.clone()),
                 );
             }
-            // llama.cpp cannot express "unlimited" per request when the panel
-            // set `--reasoning-budget 0` (-1 falls back to the server value),
-            // so an explicit "thinking on" request without a budget gets the
-            // full context window as its budget.
-            if toggle && budget.is_none() && object.get("reasoning_budget_tokens").is_none() {
-                let budget = context_tokens.filter(|value| *value > 0).unwrap_or(32_768);
-                object.insert(
-                    "reasoning_budget_tokens".to_string(),
-                    serde_json::Value::Number((budget as u64).into()),
+        }
+
+        // A positive thinking budget is itself a request to think.
+        let toggle = explicit_toggle
+            .or_else(|| raw_effort.as_deref().and_then(effort_to_toggle))
+            .or_else(|| budget.filter(|value| *value > 0).map(|_| true));
+
+        if let Some(toggle) = toggle {
+            // `chat_template_kwargs.enable_thinking` is the most specific control.
+            // llama.cpp parses `reasoning_effort: "none"` *after* it, so drop that
+            // contradictory value when the harness explicitly enabled thinking.
+            if toggle
+                && explicit_toggle == Some(true)
+                && object
+                    .get("reasoning_effort")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(effort_disables_thinking)
+            {
+                object.remove("reasoning_effort");
+            }
+
+            let mut kwargs = object
+                .get("chat_template_kwargs")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let current = kwargs.get("enable_thinking");
+            let needs_insert = current.and_then(json_bool) != Some(toggle)
+                || current.is_some_and(|value| !value.is_boolean());
+            if needs_insert {
+                kwargs.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(toggle),
                 );
+                object.insert(
+                    "chat_template_kwargs".to_string(),
+                    serde_json::Value::Object(kwargs),
+                );
+            }
+
+            if backend == "llamacpp" {
+                // A panel `--reasoning-format none` must not hide the reasoning
+                // trace the harness explicitly asked for.  A request-level
+                // `reasoning_format` always overrides the launch default.
+                if toggle && object.get("reasoning_format").is_none() {
+                    object.insert(
+                        "reasoning_format".to_string(),
+                        serde_json::Value::String("auto".to_string()),
+                    );
+                }
+                // llama.cpp cannot express "unlimited" per request when the panel
+                // set `--reasoning-budget 0` (-1 falls back to the server value),
+                // so an explicit "thinking on" request without a budget gets the
+                // full context window as its budget.
+                if toggle && budget.is_none() && object.get("reasoning_budget_tokens").is_none() {
+                    let budget = context_tokens.filter(|value| *value > 0).unwrap_or(32_768);
+                    object.insert(
+                        "reasoning_budget_tokens".to_string(),
+                        serde_json::Value::Number((budget as u64).into()),
+                    );
+                }
             }
         }
     }
@@ -1550,6 +1859,25 @@ fn apply_harness_precedence_with_ladder(
             }
         }
     }
+
+    // Normalize OpenAI 'developer' role to 'system' for templates that only support system messages
+    if let Some(messages) = object
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for msg in messages {
+            if let Some(msg_obj) = msg.as_object_mut() {
+                if let Some(role) = msg_obj.get("role").and_then(serde_json::Value::as_str) {
+                    if role == "developer" {
+                        msg_obj.insert(
+                            "role".to_string(),
+                            serde_json::Value::String("system".to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Normalize a chat request for the target backend.
@@ -1615,21 +1943,30 @@ pub fn check_gateway_auth(
     let auth_header = headers
         .get("authorization")
         .or_else(|| headers.get("Authorization"));
-    match auth_header {
-        Some(h) if h.starts_with("Bearer ") => {
+    if let Some(h) = auth_header {
+        if h.starts_with("Bearer ") {
             let provided = h["Bearer ".len()..].trim();
             if !provided.is_empty() && constant_time_eq(provided, expected_key) {
-                Ok(())
+                return Ok(());
             } else {
-                Err((401, "Invalid API key".to_string()))
+                return Err((401, "Invalid API key".to_string()));
             }
+        } else {
+            return Err((
+                401,
+                "Authorization header must use Bearer scheme".to_string(),
+            ));
         }
-        Some(_) => Err((
-            401,
-            "Authorization header must use Bearer scheme".to_string(),
-        )),
-        None => Err((401, "Missing Authorization header".to_string())),
     }
+    if let Some(key) = headers.get("api-key").or_else(|| headers.get("x-api-key")) {
+        let provided = key.trim();
+        if !provided.is_empty() && constant_time_eq(provided, expected_key) {
+            return Ok(());
+        } else {
+            return Err((401, "Invalid API key".to_string()));
+        }
+    }
+    Err((401, "Missing Authorization header".to_string()))
 }
 
 /// Is the chunk of bytes between the request line and the blank line a
@@ -1682,7 +2019,7 @@ pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
 
 /// Non-origin CORS headers shared by all allowed responses.  Kept public for
 /// callers that need to inspect the policy without trusting a request origin.
-pub const CORS_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+pub const CORS_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, api-key, x-api-key, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version\r\nAccess-Control-Max-Age: 86400\r\n";
 
 /// Return CORS headers only for explicitly trusted local origins.
 ///
@@ -1872,9 +2209,11 @@ async fn route(
         return write_request_response(stream, head, 204, "text/plain", b"").await;
     }
 
-    // Auth check for all /v1/* and /api/* routes except /health and /api/version
+    // Auth check for all /v1/* and /api/* routes except /health, /v1/health, /, and /api/version
     let is_protected = (head.target.starts_with("/v1/") || head.target.starts_with("/api/"))
         && head.target != "/health"
+        && head.target != "/v1/health"
+        && head.target != "/"
         && head.target != "/api/version";
     if is_protected {
         let cfg = state.config();
@@ -1954,7 +2293,7 @@ async fn route(
             )
             .await
         }
-        ("GET", "/health") => {
+        ("GET", "/health") | ("GET", "/v1/health") | ("GET", "/") => {
             write_request_response(
                 stream,
                 head,
@@ -1974,7 +2313,7 @@ async fn route(
             )
             .await
         }
-        ("GET", "/api/tags") => {
+        ("GET", "/api/tags") | ("GET", "/api/ps") => {
             let payload = ollama_tags_payload(state).await.to_string();
             write_request_response(stream, head, 200, "application/json", payload.as_bytes()).await
         }
@@ -2051,7 +2390,7 @@ async fn route(
                 }
             }
         }
-        ("POST", "/v1/completions") => {
+        ("POST", "/v1/completions") | ("POST", "/api/generate") => {
             let model = model_from_body(body)
                 .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
             let port = {
@@ -2116,9 +2455,29 @@ async fn route(
             }
         }
         (method, "/v1/models") if method != "GET" => {
-            write_request_response(stream, head, 405, "text/plain", b"method not allowed").await
+            let payload = serde_json::json!({
+                "error": {
+                    "message": format!("Method '{method}' not allowed on /v1/models"),
+                    "type": "invalid_request_error",
+                    "param": serde_json::Value::Null,
+                    "code": "method_not_allowed",
+                }
+            })
+            .to_string();
+            write_request_response(stream, head, 405, "application/json", payload.as_bytes()).await
         }
-        _ => write_request_response(stream, head, 404, "text/plain", b"not found").await,
+        _ => {
+            let payload = serde_json::json!({
+                "error": {
+                    "message": format!("Path '{path}' not found"),
+                    "type": "invalid_request_error",
+                    "param": serde_json::Value::Null,
+                    "code": "not_found",
+                }
+            })
+            .to_string();
+            write_request_response(stream, head, 404, "application/json", payload.as_bytes()).await
+        }
     }
 }
 
@@ -2338,12 +2697,32 @@ async fn proxy_chat(
         .as_ref()
         .map(|def| def.backend.clone())
         .unwrap_or_else(|| "vllm".to_string());
-    let context = server_def.as_ref().and_then(configured_context_tokens);
+    let vllm_args = state
+        .config()
+        .advanced_settings
+        .extra_vllm_args
+        .as_deref()
+        .map(|extra| shlex::split(extra).unwrap_or_default())
+        .unwrap_or_default();
+    let launch_args = server_def
+        .as_ref()
+        .map(|def| effective_launch_args(def, &vllm_args))
+        .unwrap_or_default();
+    let context = match server_def.as_ref() {
+        Some(def) => {
+            let (ctx, _) = resolve_context_for_server_async(state, def, &launch_args).await;
+            Some(ctx)
+        }
+        None => None,
+    };
     // llama.cpp forwards the effort label to the model's Jinja template, and
     // a template may only accept a subset of the standard ladder. Round the
     // harness value onto that subset instead of letting the template raise.
     let ladder = match server_def.as_ref() {
-        Some(def) => effort_ladder_for(state, def).await,
+        Some(def) => {
+            let (ladder, _) = template_info_for(state, def).await;
+            ladder.or_else(|| known_model_effort_ladder(&def.model_id, &def.name))
+        }
         None => None,
     };
     let body = normalize_chat_request_with_ladder(body, &backend, context, ladder.as_deref());
@@ -2809,6 +3188,7 @@ mod tests {
             "max_model_len",
             "context_length",
             "max_context_length",
+            "max_input_tokens",
             "context_window",
             "n_ctx",
             "max_output_tokens",
@@ -3602,11 +3982,11 @@ mod tests {
             model_row_with_ladder(&def, Some(131_072), "configured", &[], Some(&ladder), true);
         assert_eq!(
             row["reasoning_config"]["supported_efforts"],
-            serde_json::json!(["none", "low", "medium", "xhigh"])
+            serde_json::json!(["low", "medium", "xhigh"])
         );
         assert_eq!(
             row["reasoning_config"]["levels"],
-            serde_json::json!(["none", "low", "medium", "xhigh"])
+            serde_json::json!(["low", "medium", "xhigh"])
         );
         assert_eq!(
             row["reasoning_config"]["thinking_level_map"]["high"],
@@ -3918,12 +4298,20 @@ mod tests {
         );
         assert_eq!(
             row["reasoning_config"]["levels"],
-            serde_json::json!(["none", "low", "high"])
+            serde_json::json!(["low", "high"])
         );
         assert_eq!(
             row["reasoning_config"]["supported_efforts"],
-            serde_json::json!(["none", "low", "high"])
+            serde_json::json!(["low", "high"])
         );
+        assert_eq!(row["reasoning_config"]["default_level"], "high");
+        assert_eq!(row["reasoning_config"]["control"], "reasoning_effort");
+        assert_eq!(row["capabilities"]["reasoning"], true);
+        assert_eq!(row["max_model_len"], serde_json::json!(36126));
+        assert_eq!(row["context_length"], serde_json::json!(36126));
+        assert_eq!(row["max_context_length"], serde_json::json!(36126));
+        assert_eq!(row["max_input_tokens"], serde_json::json!(36126));
+        assert_eq!(row["max_tokens"], serde_json::json!(36126));
         assert_eq!(row["thinkingLevelMap"]["off"], "none");
         assert_eq!(row["thinkingLevelMap"]["low"], "low");
         assert_eq!(row["thinkingLevelMap"]["high"], "high");
@@ -3931,5 +4319,128 @@ mod tests {
         assert_eq!(row["thinkingLevelMap"]["medium"], serde_json::Value::Null);
         assert_eq!(row["thinkingLevelMap"]["xhigh"], serde_json::Value::Null);
         assert_eq!(row["thinkingLevelMap"]["max"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_spark_effort_medium_clamped_to_high() {
+        let req = r#"{"model":"XHToken/Spark-X2.6-4B-INT4","messages":[],"reasoning_effort":"medium"}"#;
+        let value = normalized(req, "vllm", Some(36126));
+        assert_eq!(value["reasoning_effort"], "high");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+
+        let req_with_kwargs = r#"{"model":"Spark-X","messages":[],"chat_template_kwargs":{"reasoning_effort":"medium"}}"#;
+        let value2 = normalized(req_with_kwargs, "llamacpp", Some(36126));
+        assert_eq!(value2["chat_template_kwargs"]["reasoning_effort"], "high");
+        assert_eq!(value2["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn test_deepseek_request_normalizes_to_thinking_enabled_and_strips_effort() {
+        let req = r#"{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-14B","messages":[],"reasoning_effort":"medium"}"#;
+        let value = normalized(req, "vllm", Some(32768));
+        assert_eq!(value["thinking"]["type"], "enabled");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+        assert!(value.get("reasoning_effort").is_none());
+        assert!(value["chat_template_kwargs"].get("reasoning_effort").is_none());
+
+        let req_off = r#"{"model":"deepseek-reasoner","messages":[],"reasoning_effort":"none"}"#;
+        let value_off = normalized(req_off, "vllm", Some(32768));
+        assert_eq!(value_off["thinking"]["type"], "disabled");
+        assert_eq!(value_off["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(value_off.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_toggle_only_request_normalizes_to_enable_thinking_and_strips_effort() {
+        let req = r#"{"model":"my-toggle-model","messages":[],"reasoning_effort":"high"}"#;
+        let mut obj = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(req).unwrap();
+        let raw_effort = harness_effort(&obj);
+        let toggle = raw_effort.as_deref().and_then(effort_to_toggle).unwrap_or(true);
+        let mut kwargs = obj.get("chat_template_kwargs").and_then(serde_json::Value::as_object).cloned().unwrap_or_default();
+        kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(toggle));
+        kwargs.remove("reasoning_effort");
+        obj.insert("chat_template_kwargs".to_string(), serde_json::Value::Object(kwargs));
+        obj.remove("reasoning_effort");
+
+        assert_eq!(obj["chat_template_kwargs"]["enable_thinking"], true);
+        assert!(obj.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_extra_args_context_resolution() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        def.extra_args = vec!["-c".into(), "16384".into()];
+        assert_eq!(configured_context_tokens(&def), Some(16384));
+        let (ctx, src) = resolve_model_context_sync(&def, &def.extra_args);
+        assert_eq!(ctx, 16384);
+        assert_eq!(src, "configured");
+
+        let mut vllm_def = running_map().remove("srv-a").unwrap().def;
+        vllm_def.backend = "vllm".into();
+        vllm_def.extra_args = vec!["--max-model-len".into(), "8192".into()];
+        assert_eq!(configured_context_tokens(&vllm_def), Some(8192));
+        let (vllm_ctx, vllm_src) = resolve_model_context_sync(&vllm_def, &vllm_def.extra_args);
+        assert_eq!(vllm_ctx, 8192);
+        assert_eq!(vllm_src, "configured");
+    }
+
+    #[test]
+    fn test_family_fallback_context() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.max_model_len = None;
+        def.ctx_size = None;
+        def.extra_args.clear();
+
+        def.model_id = "XHToken/Spark-X2.6-4B-INT4".into();
+        let (ctx_spark, src_spark) = resolve_model_context_sync(&def, &[]);
+        assert_eq!(ctx_spark, 36126);
+        assert_eq!(src_spark, "architecture");
+
+        def.model_id = "meta-llama/Llama-3.1-8B-Instruct".into();
+        let (ctx_llama, src_llama) = resolve_model_context_sync(&def, &[]);
+        assert_eq!(ctx_llama, 131072);
+        assert_eq!(src_llama, "architecture");
+    }
+
+    #[test]
+    fn test_normalize_developer_role_to_system() {
+        let req = r#"{"model":"qwen3","messages":[{"role":"developer","content":"Be helpful"},{"role":"user","content":"hi"}]}"#;
+        let value = normalized(req, "vllm", Some(8192));
+        assert_eq!(value["messages"][0]["role"], "system");
+        assert_eq!(value["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn test_check_gateway_auth_supports_api_key_and_x_api_key() {
+        let mut headers = HashMap::new();
+        headers.insert("api-key".to_string(), "my-secret".to_string());
+        assert!(check_gateway_auth(&headers, Some("my-secret")).is_ok());
+
+        let mut headers2 = HashMap::new();
+        headers2.insert("x-api-key".to_string(), "my-secret".to_string());
+        assert!(check_gateway_auth(&headers2, Some("my-secret")).is_ok());
+
+        let mut headers3 = HashMap::new();
+        headers3.insert("x-api-key".to_string(), "wrong-secret".to_string());
+        assert_eq!(check_gateway_auth(&headers3, Some("my-secret")).unwrap_err().0, 401);
+    }
+
+    #[test]
+    fn test_model_row_includes_permission_field() {
+        let servers = running_map();
+        let rows = model_rows(&servers);
+        let row = rows.iter().find(|r| r["id"] == "qwen-7b").unwrap();
+        assert_eq!(row["permission"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_cors_headers_support_sdk_and_auth_headers() {
+        let trusted = cors_headers(Some("http://127.0.0.1:3000"));
+        assert!(trusted.contains("api-key"));
+        assert!(trusted.contains("x-api-key"));
+        assert!(trusted.contains("X-Stainless-Lang"));
+        assert!(trusted.contains("Access-Control-Max-Age: 86400"));
+        assert!(trusted.contains("PUT, DELETE"));
     }
 }
