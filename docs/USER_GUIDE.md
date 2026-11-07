@@ -66,20 +66,54 @@ Backend support and command-line flags vary by engine version. The app checks in
 
 Enable the gateway under **Settings → Advanced Mode → Network** and configure an API key. The default endpoint is `http://127.0.0.1:11434/v1`.
 
-All `/v1/*` routes require `Authorization: Bearer <key>`. The `/health` route remains open for liveness checks. The gateway supports:
+### Endpoint Compatibility
 
-- `GET /v1/models` and `GET /v1/models/{id}`
-- `POST /v1/chat/completions`
-- `POST /v1/completions`
-- `POST /v1/embeddings`
+| Endpoint | Method | Status | Notes |
+|---|---|---|---|
+| `/v1/responses` | POST | **Supported** | OpenAI Responses API compatibility layer. Maps `input` and `instructions` to active models. Returns Responses-shaped JSON (`id: resp_...`, `object: response`, `status`, `output`, `output_text`, `usage`, `incomplete_details`). Supports streaming SSE events (`response.created`, `response.in_progress`, `response.output_item.added`, `response.output_text.delta`, `response.output_item.done`, `response.completed`/`response.incomplete`, `data: [DONE]`). |
+| `/v1/chat/completions` | POST | **Supported** | Model-aware routing, streaming SSE, tool calling, reasoning/thinking normalizations, `stream_options.include_usage`, and terminal `finish_reason`. |
+| `/v1/completions` | POST | **Supported** | Legacy text/FIM completions (prompt, suffix). Rejects `messages` with 400. |
+| `/v1/embeddings` | POST | **Supported** | Supports string, string array, 1D/2D token arrays, `encoding_format: float/base64`, `dimensions` truncation, batch ordering, and usage. |
+| `/v1/models` | GET | **Supported** | Lists active running instruct and embedding models with context windows and capabilities. |
+| `/v1/models/{model}` | GET | **Supported** | Retrieves metadata for a specific running model. Every listed model is retrievable. Non-GET returns 405. |
+| `/health`, `/v1/health` | GET | **Supported** | Open liveness check endpoint (unauthenticated). |
+| `/v1/responses/{id}` | GET / DELETE | **Unsupported (404/405)** | Response persistence / retrieval / deletion is not supported by local backends. |
+| `/v1/conversations/*` | ALL | **Unsupported (404)** | Hosted conversational state persistence is unsupported; manage history client-side. |
+| `previous_response_id`, `store: true` | - | **Unsupported (400)** | Returns structured 400 error. The gateway does not silently claim support for hosted storage. |
 
-Requests are routed by served model name or model ID to a compatible running backend. Requests that do not need compatibility normalization are forwarded without injecting defaults.
+### Authentication & Keys
 
-Example:
+All `/v1/*` routes require `Authorization: Bearer YOUR_GATEWAY_API_KEY` (or `api-key: YOUR_GATEWAY_API_KEY`).
+
+> **Important:** The gateway API key is configured locally in LocalLLmPanel (**Settings → Gateway API Key**). It is a local protection token guarding your loopback port from unauthorized local processes or malicious browser scripts. It is **not** an OpenAI hosted platform key.
+
+Requests are routed by served model name or model ID to a compatible running backend. Requests that do not need compatibility normalization are forwarded without injecting defaults. Every response includes an `x-request-id` header (generated or forwarded from `X-Client-Request-Id`). All errors follow the OpenAI error schema: `{"error": {"message": "...", "type": "...", "param": null, "code": "..."}}`.
+
+Examples:
 
 ```bash
+# Model listing
 curl http://127.0.0.1:11434/v1/models \
-  -H "Authorization: Bearer $LOCAL_LLM_KEY"
+  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY"
+
+# Responses API
+curl http://127.0.0.1:11434/v1/responses \
+  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model",
+    "input": "Write a greeting in Rust.",
+    "instructions": "Be concise."
+  }'
+
+# Chat Completions
+curl http://127.0.0.1:11434/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model",
+    "messages": [{"role": "user", "content": "hi"}]
+  }'
 ```
 
 ### Client metadata and thinking controls

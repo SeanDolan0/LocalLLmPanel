@@ -378,7 +378,9 @@ mod tests {
             r"C:\Users\sedol\AppData\Roaming\local-llm-panel\gguf\XHToken__Spark-X2.6-4B-GGUF\Spark-X2.6-4B-Q4_K_M.gguf",
         );
         if path.is_file() {
-            let tmpl = chat_template_from_path(path).unwrap().expect("chat template exists");
+            let tmpl = chat_template_from_path(path)
+                .unwrap()
+                .expect("chat template exists");
             eprintln!("Extracted template: {tmpl}");
             assert!(tmpl.contains("reasoning_effort"));
         }

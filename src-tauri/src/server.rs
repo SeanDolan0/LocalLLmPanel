@@ -2780,7 +2780,7 @@ pub async fn chat_stream(
             &def.backend_model_name(),
         )
         .with_request_id(Some(request_id.clone()));
-        let mut termination: Option<crate::completion::StreamTermination> = None;
+        let termination: Option<crate::completion::StreamTermination> = None;
         loop {
             tokio::select! {
                 _ = cancel_notify.notified() => {
@@ -3394,7 +3394,12 @@ mod tests {
         let mut server_def = def("org/model", "instruct", 8124, "fp16", None);
         server_def.id = "s_native".into();
         server_def.backend = "llamacpp".into();
-        state.config.lock().unwrap().servers.push(server_def.clone());
+        state
+            .config
+            .lock()
+            .unwrap()
+            .servers
+            .push(server_def.clone());
 
         let child = wsl::NativeChild::spawn(
             std::path::Path::new(r"C:\Windows\System32\ping.exe"),

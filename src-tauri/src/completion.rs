@@ -251,6 +251,26 @@ impl TokenUsage {
             && self.reasoning_tokens.is_none()
             && self.total_tokens.is_none()
     }
+
+    pub fn to_responses_usage(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        if let Some(i) = self.input_tokens {
+            obj.insert("input_tokens".to_string(), serde_json::json!(i));
+        }
+        if let Some(o) = self.visible_output_tokens {
+            obj.insert("output_tokens".to_string(), serde_json::json!(o));
+        }
+        if let Some(t) = self.total_tokens {
+            obj.insert("total_tokens".to_string(), serde_json::json!(t));
+        }
+        if let Some(r) = self.reasoning_tokens {
+            obj.insert(
+                "output_tokens_details".to_string(),
+                serde_json::json!({ "reasoning_tokens": r }),
+            );
+        }
+        serde_json::Value::Object(obj)
+    }
 }
 
 /// How the byte stream ended, independent of generation status.
@@ -484,6 +504,11 @@ pub fn classify_event(event: &SseEvent) -> ChunkSignal {
         match event_type {
             "message_stop" | "response.completed" => return ChunkSignal::Terminal,
             "response.incomplete" => return ChunkSignal::Terminal,
+            "response.output_text.delta"
+            | "response.output_item.added"
+            | "response.output_item.done"
+            | "response.created"
+            | "response.in_progress" => return ChunkSignal::Delta,
             "message_delta" => {
                 if value
                     .get("delta")
@@ -503,6 +528,11 @@ pub fn classify_event(event: &SseEvent) -> ChunkSignal {
             "message_stop" | "response.completed" | "response.incomplete" => {
                 return ChunkSignal::Terminal
             }
+            "response.output_text.delta"
+            | "response.output_item.added"
+            | "response.output_item.done"
+            | "response.created"
+            | "response.in_progress" => return ChunkSignal::Delta,
             "message_delta" => {
                 if value
                     .get("delta")
@@ -612,6 +642,37 @@ pub fn usage_from_anthropic(value: &serde_json::Value) -> Option<TokenUsage> {
         reasoning_tokens: None,
         cached_input_tokens: get("cache_read_input_tokens"),
         total_tokens: None,
+        source: UsageSource::Authoritative,
+    })
+}
+
+/// Extract normalized usage from a Responses API `usage` object.
+pub fn usage_from_responses(value: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = if value.get("usage").is_some() {
+        value.get("usage")?
+    } else {
+        value
+    };
+    if usage.is_null() || !usage.is_object() {
+        return None;
+    }
+    let get = |key: &str| usage.get(key).and_then(|v| v.as_u64());
+    let details = usage.get("output_tokens_details");
+    let reasoning = details
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64());
+    let input = get("input_tokens");
+    let output = get("output_tokens");
+    let total = get("total_tokens");
+    if input.is_none() && output.is_none() && total.is_none() {
+        return None;
+    }
+    Some(TokenUsage {
+        input_tokens: input,
+        visible_output_tokens: output,
+        reasoning_tokens: reasoning,
+        cached_input_tokens: None,
+        total_tokens: total,
         source: UsageSource::Authoritative,
     })
 }
@@ -840,6 +901,11 @@ impl StreamAggregator {
         // Anthropic message_stop / Responses completed|incomplete events.
         if let Some(type_field) = value.get("type").and_then(|v| v.as_str()) {
             match type_field {
+                "response.output_text.delta" => {
+                    if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
+                        self.content.push_str(delta);
+                    }
+                }
                 "message_stop" => {
                     if self.normalized_finish.is_none() {
                         // message_stop without a reason is a terminal event
@@ -852,6 +918,13 @@ impl StreamAggregator {
                     self.explicit_terminal = true;
                     if self.normalized_finish.is_none() {
                         self.normalized_finish = Some(NormalizedFinishReason::Stop);
+                    }
+                    if let Some(resp) = value.get("response") {
+                        if let Some(usage) = resp.get("usage") {
+                            if let Some(u) = usage_from_responses(usage) {
+                                merge_usage(&mut self.usage, u);
+                            }
+                        }
                     }
                 }
                 "response.incomplete" => {
@@ -869,6 +942,13 @@ impl StreamAggregator {
                                 Some("incomplete"),
                                 reason.as_deref(),
                             ));
+                    }
+                    if let Some(resp) = value.get("response") {
+                        if let Some(usage) = resp.get("usage") {
+                            if let Some(u) = usage_from_responses(usage) {
+                                merge_usage(&mut self.usage, u);
+                            }
+                        }
                     }
                 }
                 "response.failed" => {
@@ -1621,5 +1701,37 @@ mod tests {
         let out = agg.finish(StreamTermination::ExplicitTerminal);
         assert_eq!(out.finish_reason, NormalizedFinishReason::Length);
         assert_eq!(out.status, CompletionStatus::Incomplete);
+    }
+
+    #[test]
+    fn responses_api_streaming_text_deltas_and_usage() {
+        let mut agg = StreamAggregator::new("openai-responses", "m");
+        agg.apply(&event(
+            "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}",
+        ));
+        agg.apply(&event(
+            "{\"type\":\"response.in_progress\",\"response_id\":\"resp_1\"}",
+        ));
+        agg.apply(&event(
+            "{\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}",
+        ));
+        agg.apply(&event(
+            "{\"type\":\"response.output_text.delta\",\"delta\":\"world!\"}",
+        ));
+        agg.apply(&event("{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7,\"output_tokens_details\":{\"reasoning_tokens\":1}}}}"));
+        let out = agg.finish(StreamTermination::ExplicitTerminal);
+        assert_eq!(out.content, "Hello world!");
+        assert_eq!(out.status, CompletionStatus::Completed);
+        assert_eq!(out.finish_reason, NormalizedFinishReason::Stop);
+        assert_eq!(out.usage.input_tokens, Some(5));
+        assert_eq!(out.usage.visible_output_tokens, Some(2));
+        assert_eq!(out.usage.reasoning_tokens, Some(1));
+        assert_eq!(out.usage.total_tokens, Some(7));
+
+        let res_usage = out.usage.to_responses_usage();
+        assert_eq!(res_usage["input_tokens"], 5);
+        assert_eq!(res_usage["output_tokens"], 2);
+        assert_eq!(res_usage["total_tokens"], 7);
+        assert_eq!(res_usage["output_tokens_details"]["reasoning_tokens"], 1);
     }
 }

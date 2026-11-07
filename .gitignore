@@ -29,3 +29,6 @@ __pycache__/
 *.pyc
 # Crossbar workspace
 crossbar/
+# AI agent metadata
+.agents/
+.gemini/

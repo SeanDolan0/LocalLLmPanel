@@ -2016,7 +2016,7 @@ function ClientSnippets({
   const base = `http://127.0.0.1:${gatewayPort}/v1`;
   const chat = instructModel ?? "your-instruct-model";
   const embed = embedModel ?? "your-embed-model";
-  const keyToUse = apiKey || "REPLACE_WITH_GATEWAY_API_KEY";
+  const keyToUse = apiKey || "YOUR_GATEWAY_API_KEY";
 
   const snippets: { key: string; label: string; hint: string; text: string }[] = [
     {
@@ -2030,6 +2030,12 @@ function ClientSnippets({
       label: "Cursor / Cline",
       hint: "Base URL + model override",
       text: `Base URL: ${base}\nChat model: ${chat}\nAutocomplete model: ${chat}\nEmbeddings model: ${embed}\nAPI key: ${keyToUse}\n`,
+    },
+    {
+      key: "curl-responses",
+      label: "curl responses",
+      hint: "Responses API (/v1/responses) smoke test",
+      text: `GATEWAY_API_KEY='${keyToUse}'; curl ${base}/responses -H "Authorization: Bearer $GATEWAY_API_KEY" -H "Content-Type: application/json" -d '{"model":"${chat}","input":"hi","instructions":"You are a helpful assistant"}'\n`,
     },
     {
       key: "curl-chat",
@@ -2059,6 +2065,9 @@ function ClientSnippets({
     <div className="mt-3 rounded-lg border border-edge bg-surface/40 p-3">
       <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
         One-click client configs
+      </div>
+      <div className="mt-1 text-[11px] text-slate-400">
+        The gateway API key is local to LocalLLmPanel and protects your loopback endpoints from unauthorized local processes or browser pages. It is not an OpenAI hosted platform key.
       </div>
       {instructModel === null && embedModel === null && (
         <div className="mt-1.5 text-[11px] text-amber-300">

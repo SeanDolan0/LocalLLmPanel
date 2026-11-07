@@ -713,7 +713,8 @@ mod tests {
         let mut stored_buf = Vec::new();
         {
             let mut writer = ZipWriter::new(Cursor::new(&mut stored_buf));
-            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
             writer.start_file("installer.exe", options).unwrap();
             writer.write_all(b"fake installer binary payload").unwrap();
             writer.finish().unwrap();
@@ -728,7 +729,8 @@ mod tests {
         let mut deflated_buf = Vec::new();
         {
             let mut writer = ZipWriter::new(Cursor::new(&mut deflated_buf));
-            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             writer.start_file("installer.exe", options).unwrap();
             writer.write_all(b"fake installer binary payload").unwrap();
             writer.finish().unwrap();

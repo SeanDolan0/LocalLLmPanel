@@ -2164,10 +2164,7 @@ pub struct ServerInput {
 /// Sanitizes a server display name so it contains only the model name and not the entire file path.
 pub fn clean_server_name(raw: &str) -> String {
     let trimmed = raw.trim();
-    let without_path = trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(trimmed);
+    let without_path = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
     let stripped = without_path
         .strip_suffix(".gguf")
         .or_else(|| without_path.strip_suffix(".GGUF"))
@@ -5606,9 +5603,21 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
     #[test]
     fn test_clean_server_name() {
         assert_eq!(clean_server_name("C:\\models\\qwen-0.5b.gguf"), "qwen-0.5b");
-        assert_eq!(clean_server_name("/home/user/models/qwen-0.5b.gguf"), "qwen-0.5b");
-        assert_eq!(clean_server_name("meta-llama/Llama-3-8B.safetensors"), "Llama-3-8B");
-        assert_eq!(clean_server_name("Qwen/Qwen2.5-0.5B-Instruct"), "Qwen2.5-0.5B-Instruct");
-        assert_eq!(clean_server_name("custom-server-name"), "custom-server-name");
+        assert_eq!(
+            clean_server_name("/home/user/models/qwen-0.5b.gguf"),
+            "qwen-0.5b"
+        );
+        assert_eq!(
+            clean_server_name("meta-llama/Llama-3-8B.safetensors"),
+            "Llama-3-8B"
+        );
+        assert_eq!(
+            clean_server_name("Qwen/Qwen2.5-0.5B-Instruct"),
+            "Qwen2.5-0.5B-Instruct"
+        );
+        assert_eq!(
+            clean_server_name("custom-server-name"),
+            "custom-server-name"
+        );
     }
 }

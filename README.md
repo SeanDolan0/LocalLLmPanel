@@ -113,16 +113,47 @@ npm run build:setup
 
 The panel includes a high-performance reverse proxy that presents a standard OpenAI-compatible API surface for external applications (Continue, Cursor, Open WebUI, LangChain, LlamaIndex, etc.).
 
-Enable the gateway under **Settings → Advanced Mode → Network**. Default endpoint:
-```text
-http://127.0.0.1:11434/v1
+### Endpoint Compatibility
+
+| Endpoint | Method | Status | Notes |
+|---|---|---|---|
+| `/v1/responses` | POST | **Supported** | OpenAI Responses API compatibility layer. Maps `input` (text or message array) and `instructions` to active models. Returns Responses-shaped JSON (`id: resp_...`, `object: response`, `status`, `output`, `output_text`, `usage`, `incomplete_details`). Supports streaming SSE events (`response.created`, `response.in_progress`, `response.output_item.added`, `response.output_text.delta`, `response.output_item.done`, `response.completed`/`response.incomplete`, `data: [DONE]`). |
+| `/v1/chat/completions` | POST | **Supported** | Full Chat Completions API with model-aware routing, streaming SSE, tool calling, reasoning/thinking normalizations, `stream_options.include_usage`, and authoritative terminal `finish_reason`. |
+| `/v1/completions` | POST | **Supported** | Legacy text/FIM completions (prompt, suffix). Explicitly validates and rejects `messages` with 400. |
+| `/v1/embeddings` | POST | **Supported** | Generates vector embeddings. Accepts `input` as string, string array, 1D token array, or 2D batch token array. Supports `encoding_format: "float"` and `"base64"` (little-endian IEEE 754), `dimensions` truncation, and usage. |
+| `/v1/models` | GET | **Supported** | Lists all running instruct and embedding models with context windows, permissions, and modality capabilities. |
+| `/v1/models/{model}` | GET | **Supported** | Retrieves metadata for a specific running model. Every model returned by `/v1/models` is retrievable. Non-GET methods return 405. |
+| `/health`, `/v1/health` | GET | **Supported** | Open liveness check endpoint (no auth required). |
+| `/v1/responses/{id}` | GET / DELETE | **Unsupported (404/405)** | Response retrieval, cancellation, and deletion lifecycles are not supported on local engines. |
+| `/v1/conversations/*` | ALL | **Unsupported (404)** | Hosted conversational state persistence is unsupported; manage history client-side. |
+| `previous_response_id`, `store: true` | - | **Unsupported (400)** | Returns structured 400 error. The gateway does not silently claim support for hosted state storage. |
+
+### Configuration & Authentication
+
+- **Base URL:** `http://127.0.0.1:11434/v1` (or custom port configured under **Settings → Advanced Mode → Network**).
+- **Authentication:** All `/v1/*` routes require `Authorization: Bearer YOUR_GATEWAY_API_KEY` (or `api-key: YOUR_GATEWAY_API_KEY`).
+  > **Note:** The gateway API key is configured locally in LocalLLmPanel (**Settings → Gateway API Key**). It is a local access token designed to protect loopback endpoints from unauthorized local processes and malicious browser scripts. It is **not** an OpenAI hosted platform key.
+- **Request IDs:** Every response includes an `x-request-id` header (generated or forwarded from `X-Client-Request-Id`).
+- **Standardized Errors:** All errors return JSON matching the OpenAI error schema: `{"error": {"message": "...", "type": "...", "param": null, "code": "..."}}`.
+
+### Example: Responses API (cURL)
+
+```bash
+curl http://127.0.0.1:11434/v1/responses \
+  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "input": "Write a Rust function to calculate Fibonacci numbers.",
+    "instructions": "You are an expert systems programmer."
+  }'
 ```
 
 ### Example: Streaming Chat Completion (cURL)
 
 ```bash
 curl http://127.0.0.1:11434/v1/chat/completions \
-  -H "Authorization: Bearer $LOCAL_LLM_KEY" \
+  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen2.5-7B-Instruct",
@@ -139,9 +170,10 @@ curl http://127.0.0.1:11434/v1/chat/completions \
 ```python
 from openai import OpenAI
 
+# Connect to the local LocalLLmPanel gateway
 client = OpenAI(
     base_url="http://127.0.0.1:11434/v1",
-    api_key="your-configured-key"
+    api_key="YOUR_GATEWAY_API_KEY"
 )
 
 response = client.chat.completions.create(
@@ -151,7 +183,7 @@ response = client.chat.completions.create(
 )
 
 for chunk in response:
-    if chunk.choices[0].delta.content:
+    if chunk.choices and chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 

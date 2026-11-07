@@ -14,6 +14,7 @@
 use crate::server::apply_vllm_auth;
 use crate::state::{AppState, ServerDef, ServerStatus};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use tauri::Manager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,6 +32,158 @@ pub struct RequestHead {
     pub headers: HashMap<String, String>,
     pub content_length: usize,
     pub chunked: bool,
+}
+
+pub fn check_gateway_auth(
+    headers: &HashMap<String, String>,
+    global_key: Option<&str>,
+) -> Result<(), (u16, String)> {
+    let Some(expected_key) = global_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return Err((
+            503,
+            "Gateway API key is not configured; set one in Settings before using /v1 routes"
+                .to_string(),
+        ));
+    };
+    if let Some(h) = headers
+        .get("authorization")
+        .or_else(|| headers.get("Authorization"))
+    {
+        if h.starts_with("Bearer ") {
+            let provided = h["Bearer ".len()..].trim();
+            if !provided.is_empty() && constant_time_eq(provided, expected_key) {
+                return Ok(());
+            } else {
+                return Err((401, "Invalid API key".to_string()));
+            }
+        } else {
+            return Err((
+                401,
+                "Authorization header must use Bearer scheme".to_string(),
+            ));
+        }
+    }
+    if let Some(key) = headers.get("api-key").or_else(|| headers.get("x-api-key")) {
+        if constant_time_eq(key.trim(), expected_key) {
+            return Ok(());
+        } else {
+            return Err((401, "Invalid API key".to_string()));
+        }
+    }
+    Err((401, "Missing Authorization header".to_string()))
+}
+
+pub fn check_gateway_auth_api(
+    headers: &HashMap<String, String>,
+    global_key: Option<&str>,
+) -> Result<(), ApiError> {
+    match check_gateway_auth(headers, global_key) {
+        Ok(()) => Ok(()),
+        Err((503, msg)) => Err(ApiError::service_unavailable(msg)),
+        Err((401, msg)) => Err(ApiError::unauthorized(msg)),
+        Err((status, msg)) => Err(ApiError::new(status, msg, "auth_error")),
+    }
+}
+
+pub fn parse_head_result(bytes: &[u8]) -> Result<RequestHead, ApiError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        ApiError::bad_request(
+            "invalid utf-8 in request headers",
+            None,
+            Some("malformed_headers".into()),
+        )
+    })?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().ok_or_else(|| {
+        ApiError::bad_request("empty request", None, Some("malformed_request_line".into()))
+    })?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "missing method in request line",
+                None,
+                Some("malformed_request_line".into()),
+            )
+        })?
+        .to_string();
+    let target = parts
+        .next()
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "missing target in request line",
+                None,
+                Some("malformed_request_line".into()),
+            )
+        })?
+        .to_string();
+    if method.is_empty() || target.is_empty() {
+        return Err(ApiError::bad_request(
+            "empty method or target",
+            None,
+            Some("malformed_request_line".into()),
+        ));
+    }
+    let mut headers = HashMap::new();
+    let mut content_length = None;
+    let mut chunked = false;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let mut it = line.splitn(2, ':');
+        let name = match it.next() {
+            Some(n) => n.trim().to_ascii_lowercase(),
+            None => continue,
+        };
+        let value = it.next().unwrap_or("").trim().to_string();
+        if name == "content-length" {
+            let parsed: usize = value.parse().map_err(|_| {
+                ApiError::bad_request(
+                    "invalid Content-Length header",
+                    Some("content-length".into()),
+                    Some("invalid_header".into()),
+                )
+            })?;
+            if content_length.replace(parsed).is_some() {
+                return Err(ApiError::bad_request(
+                    "duplicate Content-Length header",
+                    Some("content-length".into()),
+                    Some("duplicate_header".into()),
+                ));
+            }
+        } else if name == "transfer-encoding" {
+            let encodings: Vec<_> = value.split(',').map(str::trim).collect();
+            if encodings.len() != 1 || !encodings[0].eq_ignore_ascii_case("chunked") {
+                return Err(ApiError::bad_request(
+                    "unsupported Transfer-Encoding (only chunked supported)",
+                    Some("transfer-encoding".into()),
+                    Some("unsupported_encoding".into()),
+                ));
+            }
+            chunked = true;
+        }
+        headers.insert(name, value);
+    }
+    if chunked && content_length.is_some() {
+        return Err(ApiError::bad_request(
+            "conflicting Transfer-Encoding and Content-Length headers",
+            None,
+            Some("conflicting_framing".into()),
+        ));
+    }
+    Ok(RequestHead {
+        method,
+        target,
+        headers,
+        content_length: content_length.unwrap_or(0),
+        chunked,
+    })
+}
+
+pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
+    parse_head_result(bytes).ok()
 }
 
 /// All live servers of `task` status that are currently `Running`.
@@ -81,7 +234,12 @@ pub fn find_server_port_for(
         if ls.def.effective_model_name().eq_ignore_ascii_case(m)
             || ls.def.model_id.eq_ignore_ascii_case(m)
             || ls.def.name.eq_ignore_ascii_case(m)
-            || ls.def.served_model_name.as_deref().map(|s| s.eq_ignore_ascii_case(m)).unwrap_or(false)
+            || ls
+                .def
+                .served_model_name
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case(m))
+                .unwrap_or(false)
         {
             return Some(ls.def.port);
         }
@@ -614,9 +772,7 @@ fn model_row_with_ladder(
     effort_ladder: Option<&[String]>,
     template_reasoning: bool,
 ) -> serde_json::Value {
-    let ladder = effort_ladder
-        .filter(|l| l.len() >= 2)
-        .map(|l| l.to_vec());
+    let ladder = effort_ladder.filter(|l| l.len() >= 2).map(|l| l.to_vec());
     let default_effort = ladder.as_deref().and_then(|l| {
         if l.iter().any(|level| level.eq_ignore_ascii_case("medium")) {
             Some("medium".to_string())
@@ -723,8 +879,9 @@ fn model_row_with_template(
     // reasoning parser; llama.cpp forwards it to the Jinja template and
     // parses reasoning tags. The gateway canonicalizes reasoning_effort
     // across all reasoning models and formats.
-    let supports_effort_parameter =
-        traits.reasoning_mode != ReasoningMode::None && supports_template_controls && !is_toggle_only;
+    let supports_effort_parameter = traits.reasoning_mode != ReasoningMode::None
+        && supports_template_controls
+        && !is_toggle_only;
     let supports_thinking_toggle =
         traits.reasoning_mode == ReasoningMode::Effort && supports_template_controls;
     let budget_parameter = if traits.reasoning_mode == ReasoningMode::None {
@@ -1339,7 +1496,8 @@ async fn resolve_context_for_server_async(
 fn read_model_chat_template(def: &ServerDef, gguf_dir: &str, distro: &str) -> Option<String> {
     if def.backend == "llamacpp" {
         let raw_model = def.model_path.as_deref().unwrap_or(&def.model_id);
-        if let Some(resolved) = crate::server::resolve_gguf_model_path(raw_model, gguf_dir, distro) {
+        if let Some(resolved) = crate::server::resolve_gguf_model_path(raw_model, gguf_dir, distro)
+        {
             if let Ok(Some(template)) = crate::gguf::chat_template_from_path(&resolved) {
                 if !template.trim().is_empty() {
                     return Some(template);
@@ -2263,102 +2421,705 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
-/// Validate the Authorization header against the configured gateway API key.
-///
-/// A gateway without a key is a misconfiguration, not an open server.  Return
-/// a configuration error instead of silently exposing every routed model to
-/// any local process (or browser page) that can reach localhost.
-pub fn check_gateway_auth(
-    headers: &HashMap<String, String>,
-    global_key: Option<&str>,
-) -> Result<(), (u16, String)> {
-    let Some(expected_key) = global_key.map(str::trim).filter(|key| !key.is_empty()) else {
-        return Err((
-            503,
-            "Gateway API key is not configured; set one in Settings before using /v1 routes"
-                .to_string(),
-        ));
-    };
-    let auth_header = headers
-        .get("authorization")
-        .or_else(|| headers.get("Authorization"));
-    if let Some(h) = auth_header {
-        if h.starts_with("Bearer ") {
-            let provided = h["Bearer ".len()..].trim();
-            if !provided.is_empty() && constant_time_eq(provided, expected_key) {
-                return Ok(());
-            } else {
-                return Err((401, "Invalid API key".to_string()));
-            }
+static REQ_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+pub fn generate_request_id() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let count = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("req_{now:x}{count:x}")
+}
+
+pub fn is_valid_request_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 512 && id.is_ascii() && !id.bytes().any(|b| b.is_ascii_control())
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    pub status: u16,
+    pub message: String,
+    pub error_type: String,
+    pub param: Option<String>,
+    pub code: Option<String>,
+    pub retry_after: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl ApiError {
+    pub fn new(status: u16, message: impl Into<String>, error_type: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            error_type: error_type.into(),
+            param: None,
+            code: None,
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn bad_request(
+        message: impl Into<String>,
+        param: Option<String>,
+        code: Option<String>,
+    ) -> Self {
+        Self {
+            status: 400,
+            message: message.into(),
+            error_type: "invalid_request_error".into(),
+            param,
+            code,
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: 401,
+            message: message.into(),
+            error_type: "authentication_error".into(),
+            param: None,
+            code: None,
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: 403,
+            message: message.into(),
+            error_type: "permission_error".into(),
+            param: None,
+            code: None,
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn not_found(
+        message: impl Into<String>,
+        param: Option<String>,
+        code: Option<String>,
+    ) -> Self {
+        Self {
+            status: 404,
+            message: message.into(),
+            error_type: "invalid_request_error".into(),
+            param,
+            code,
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: 413,
+            message: message.into(),
+            error_type: "invalid_request_error".into(),
+            param: None,
+            code: Some("request_too_large".into()),
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn rate_limited(message: impl Into<String>, retry_after: Option<String>) -> Self {
+        Self {
+            status: 429,
+            message: message.into(),
+            error_type: "rate_limit_error".into(),
+            param: None,
+            code: Some("rate_limit_exceeded".into()),
+            retry_after,
+            request_id: None,
+        }
+    }
+
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: 502,
+            message: message.into(),
+            error_type: "api_error".into(),
+            param: None,
+            code: Some("bad_gateway".into()),
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self {
+            status: 405,
+            message: message.into(),
+            error_type: "invalid_request_error".into(),
+            param: None,
+            code: Some("method_not_allowed".into()),
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn with_request_id(mut self, req_id: impl Into<String>) -> Self {
+        self.request_id = Some(req_id.into());
+        self
+    }
+
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: 503,
+            message: message.into(),
+            error_type: "api_error".into(),
+            param: None,
+            code: Some("service_unavailable".into()),
+            retry_after: None,
+            request_id: None,
+        }
+    }
+
+    pub fn to_json_value(&self) -> serde_json::Value {
+        let mut err = serde_json::Map::new();
+        err.insert(
+            "message".to_string(),
+            serde_json::Value::String(self.message.clone()),
+        );
+        err.insert(
+            "type".to_string(),
+            serde_json::Value::String(self.error_type.clone()),
+        );
+        err.insert(
+            "param".to_string(),
+            match &self.param {
+                Some(p) => serde_json::Value::String(p.clone()),
+                None => serde_json::Value::Null,
+            },
+        );
+        err.insert(
+            "code".to_string(),
+            match &self.code {
+                Some(c) => serde_json::Value::String(c.clone()),
+                None => serde_json::Value::Null,
+            },
+        );
+        serde_json::json!({ "error": serde_json::Value::Object(err) })
+    }
+}
+
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+
+        result.push(ALPHABET[(b0 >> 2) as usize] as char);
+        result.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
         } else {
-            return Err((
-                401,
-                "Authorization header must use Bearer scheme".to_string(),
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(ALPHABET[(b2 & 0x3f) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
+pub fn floats_to_base64(floats: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(floats.len() * 4);
+    for f in floats {
+        bytes.extend_from_slice(&f.to_le_bytes());
+    }
+    base64_encode(&bytes)
+}
+
+pub fn validate_json_content_type(headers: &HashMap<String, String>) -> Result<(), ApiError> {
+    let ct = headers.get("content-type").map(|s| s.trim()).unwrap_or("");
+    if ct.to_ascii_lowercase().starts_with("application/json") {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "Content-Type must be application/json",
+            Some("Content-Type".into()),
+            Some("invalid_content_type".into()),
+        ))
+    }
+}
+
+pub fn parse_json_body(body: &[u8]) -> Result<serde_json::Value, ApiError> {
+    if body.is_empty() {
+        return Err(ApiError::bad_request(
+            "Request body must not be empty",
+            None,
+            Some("missing_body".into()),
+        ));
+    }
+    serde_json::from_slice(body).map_err(|e| {
+        ApiError::bad_request(
+            format!("Invalid JSON body: {e}"),
+            None,
+            Some("invalid_json".into()),
+        )
+    })
+}
+
+pub fn model_from_json_body(val: &serde_json::Value) -> Result<String, ApiError> {
+    val.get("model")
+        .or_else(|| val.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "Missing required parameter: 'model'",
+                Some("model".into()),
+                Some("missing_required_parameter".into()),
+            )
+        })
+}
+
+pub fn validate_embedding_input(input_val: &serde_json::Value) -> Result<(), ApiError> {
+    match input_val {
+        serde_json::Value::String(s) => {
+            if s.is_empty() {
+                return Err(ApiError::bad_request(
+                    "Input string must not be empty",
+                    Some("input".into()),
+                    Some("invalid_input".into()),
+                ));
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Err(ApiError::bad_request(
+                    "Input array must not be empty",
+                    Some("input".into()),
+                    Some("invalid_input".into()),
+                ));
+            }
+            let first = &arr[0];
+            if first.is_string() {
+                for item in arr {
+                    if !item.is_string() {
+                        return Err(ApiError::bad_request(
+                            "All elements in string input array must be strings",
+                            Some("input".into()),
+                            Some("invalid_input".into()),
+                        ));
+                    }
+                }
+                Ok(())
+            } else if first.is_number() {
+                for item in arr {
+                    if !item.is_number() {
+                        return Err(ApiError::bad_request(
+                            "All elements in token array must be integers",
+                            Some("input".into()),
+                            Some("invalid_input".into()),
+                        ));
+                    }
+                }
+                Ok(())
+            } else if first.is_array() {
+                for sub in arr {
+                    if let Some(sub_arr) = sub.as_array() {
+                        if sub_arr.is_empty() {
+                            return Err(ApiError::bad_request(
+                                "Token sub-arrays must not be empty",
+                                Some("input".into()),
+                                Some("invalid_input".into()),
+                            ));
+                        }
+                        for item in sub_arr {
+                            if !item.is_number() {
+                                return Err(ApiError::bad_request(
+                                    "All elements in token array must be integers",
+                                    Some("input".into()),
+                                    Some("invalid_input".into()),
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(ApiError::bad_request(
+                            "All elements in batch token input must be arrays",
+                            Some("input".into()),
+                            Some("invalid_input".into()),
+                        ));
+                    }
+                }
+                Ok(())
+            } else {
+                Err(ApiError::bad_request(
+                    "Input array elements must be strings, integers, or arrays of integers",
+                    Some("input".into()),
+                    Some("invalid_input".into()),
+                ))
+            }
+        }
+        _ => Err(ApiError::bad_request(
+            "Input must be a string, array of strings, or array of integers",
+            Some("input".into()),
+            Some("invalid_input".into()),
+        )),
+    }
+}
+
+pub fn normalize_embedding_response(
+    body_bytes: &[u8],
+    encoding_format: Option<&str>,
+    dimensions: Option<usize>,
+) -> Result<Vec<u8>, ApiError> {
+    let mut val: serde_json::Value = serde_json::from_slice(body_bytes).map_err(|e| {
+        ApiError::bad_gateway(format!("Invalid upstream embeddings response JSON: {e}"))
+    })?;
+
+    if let Some(data) = val.get_mut("data").and_then(|d| d.as_array_mut()) {
+        for (idx, item) in data.iter_mut().enumerate() {
+            if let Some(obj) = item.as_object_mut() {
+                // Ensure correct index order
+                obj.insert("index".to_string(), serde_json::json!(idx));
+                obj.insert("object".to_string(), serde_json::json!("embedding"));
+
+                if let Some(emb_val) = obj.get("embedding") {
+                    if let Some(arr) = emb_val.as_array() {
+                        let mut floats = Vec::with_capacity(arr.len());
+                        for v in arr {
+                            if let Some(f) = v.as_f64() {
+                                floats.push(f as f32);
+                            }
+                        }
+                        if let Some(dim) = dimensions {
+                            if dim < floats.len() {
+                                floats.truncate(dim);
+                            }
+                        }
+                        if encoding_format == Some("base64") {
+                            let b64 = floats_to_base64(&floats);
+                            obj.insert("embedding".to_string(), serde_json::Value::String(b64));
+                        } else if dimensions.is_some() {
+                            let new_arr: Vec<serde_json::Value> =
+                                floats.iter().map(|f| serde_json::json!(*f)).collect();
+                            obj.insert("embedding".to_string(), serde_json::Value::Array(new_arr));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if val.get("usage").is_none() {
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert(
+                "usage".to_string(),
+                serde_json::json!({
+                    "prompt_tokens": 0,
+                    "total_tokens": 0
+                }),
+            );
+        }
+    }
+
+    serde_json::to_vec(&val).map_err(|e| {
+        ApiError::bad_gateway(format!(
+            "Failed to serialize normalized embeddings response: {e}"
+        ))
+    })
+}
+
+pub fn responses_request_to_chat_completions(
+    req_val: &serde_json::Value,
+) -> Result<(String, serde_json::Value, bool), ApiError> {
+    let model = model_from_json_body(req_val)?;
+
+    if let Some(prev) = req_val.get("previous_response_id") {
+        if !prev.is_null() {
+            return Err(ApiError::bad_request(
+                "previous_response_id is not supported: conversation persistence is disabled on this local gateway",
+                Some("previous_response_id".into()),
+                Some("unsupported_parameter".into()),
             ));
         }
     }
-    if let Some(key) = headers.get("api-key").or_else(|| headers.get("x-api-key")) {
-        let provided = key.trim();
-        if !provided.is_empty() && constant_time_eq(provided, expected_key) {
-            return Ok(());
-        } else {
-            return Err((401, "Invalid API key".to_string()));
+
+    if let Some(store) = req_val.get("store").and_then(|s| s.as_bool()) {
+        if store {
+            return Err(ApiError::bad_request(
+                "store=true is not supported: response storage is disabled on this local gateway",
+                Some("store".into()),
+                Some("unsupported_parameter".into()),
+            ));
         }
     }
-    Err((401, "Missing Authorization header".to_string()))
+
+    let input_val = req_val.get("input").ok_or_else(|| {
+        ApiError::bad_request(
+            "Missing required parameter: 'input'",
+            Some("input".into()),
+            Some("missing_required_parameter".into()),
+        )
+    })?;
+
+    let mut messages = Vec::new();
+
+    if let Some(inst) = req_val.get("instructions").and_then(|i| i.as_str()) {
+        if !inst.trim().is_empty() {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": inst.trim()
+            }));
+        }
+    }
+
+    match input_val {
+        serde_json::Value::String(s) => {
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": s
+            }));
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                match item {
+                    serde_json::Value::String(s) => {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": s
+                        }));
+                    }
+                    serde_json::Value::Object(obj) => {
+                        let item_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if item_type == "function_call_output" {
+                            let call_id = obj.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                            let output = obj.get("output").and_then(|o| o.as_str()).unwrap_or("");
+                            messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": output
+                            }));
+                        } else {
+                            let role = obj.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                            let role = if role == "developer" { "system" } else { role };
+                            let content = obj
+                                .get("content")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::String(String::new()));
+                            messages.push(serde_json::json!({
+                                "role": role,
+                                "content": content
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "Invalid input: must be a string or array of messages/items",
+                Some("input".into()),
+                Some("invalid_input".into()),
+            ));
+        }
+    }
+
+    let stream = req_val
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    let mut chat_req = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    });
+
+    if let Some(obj) = chat_req.as_object_mut() {
+        if let Some(max_tokens) = req_val
+            .get("max_output_tokens")
+            .or_else(|| req_val.get("max_tokens"))
+        {
+            obj.insert("max_tokens".to_string(), max_tokens.clone());
+        }
+        if let Some(temp) = req_val.get("temperature") {
+            obj.insert("temperature".to_string(), temp.clone());
+        }
+        if let Some(top_p) = req_val.get("top_p") {
+            obj.insert("top_p".to_string(), top_p.clone());
+        }
+        if let Some(tools) = req_val.get("tools") {
+            obj.insert("tools".to_string(), tools.clone());
+        }
+        if let Some(tc) = req_val.get("tool_choice") {
+            obj.insert("tool_choice".to_string(), tc.clone());
+        }
+        if stream {
+            obj.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
+        }
+    }
+
+    Ok((model, chat_req, stream))
 }
 
-/// Is the chunk of bytes between the request line and the blank line a
-/// valid `Content-Length: N` header we must read before routing?
-pub fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let mut lines = text.split("\r\n");
-    let request_line = lines.next()?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let target = parts.next()?.to_string();
-    if method.is_empty() || target.is_empty() {
-        return None;
-    }
-    let mut headers = HashMap::new();
-    let mut content_length = None;
-    let mut chunked = false;
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        let mut it = line.splitn(2, ':');
-        let name = it.next()?.trim().to_ascii_lowercase();
-        let value = it.next().unwrap_or("").trim().to_string();
-        if name == "content-length" {
-            let parsed = value.parse().ok()?;
-            if content_length.replace(parsed).is_some() {
-                return None;
+pub fn chat_completion_to_responses(
+    chat_resp: &serde_json::Value,
+    req_model: &str,
+    created_at: u64,
+) -> serde_json::Value {
+    let id = chat_resp
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|id| {
+            if id.starts_with("chatcmpl-") {
+                format!("resp_{}", &id["chatcmpl-".len()..])
+            } else if id.starts_with("resp_") {
+                id.to_string()
+            } else {
+                format!("resp_{id}")
             }
-        } else if name == "transfer-encoding" {
-            let encodings: Vec<_> = value.split(',').map(str::trim).collect();
-            if encodings.len() != 1 || !encodings[0].eq_ignore_ascii_case("chunked") {
-                return None;
+        })
+        .unwrap_or_else(|| format!("resp_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed)));
+
+    let model = chat_resp
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(req_model);
+
+    let choice = chat_resp
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first());
+
+    let finish_reason = choice
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .unwrap_or("stop");
+
+    let (status, incomplete_details) = match finish_reason {
+        "length" => (
+            "incomplete",
+            serde_json::json!({ "reason": "max_output_tokens" }),
+        ),
+        "content_filter" => (
+            "incomplete",
+            serde_json::json!({ "reason": "content_filter" }),
+        ),
+        _ => ("completed", serde_json::Value::Null),
+    };
+
+    let mut output_items = Vec::new();
+    let mut output_text = String::new();
+
+    if let Some(c) = choice {
+        if let Some(msg) = c.get("message") {
+            if let Some(refusal) = msg
+                .get("refusal")
+                .and_then(|r| r.as_str())
+                .filter(|r| !r.is_empty())
+            {
+                let item = serde_json::json!({
+                    "id": format!("item_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed)),
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "refusal",
+                            "refusal": refusal
+                        }
+                    ]
+                });
+                output_items.push(item);
             }
-            chunked = true;
+            if let Some(content) = msg.get("content").and_then(|ct| ct.as_str()) {
+                output_text = content.to_string();
+                let item = serde_json::json!({
+                    "id": format!("item_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed)),
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": content
+                        }
+                    ]
+                });
+                output_items.push(item);
+            }
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+                for tc in tool_calls {
+                    let call_id = tc
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .unwrap_or("call_unknown");
+                    let fn_obj = tc.get("function");
+                    let name = fn_obj
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    let args = fn_obj
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}");
+                    let item = serde_json::json!({
+                        "id": call_id,
+                        "type": "function_call",
+                        "status": "completed",
+                        "name": name,
+                        "call_id": call_id,
+                        "arguments": args
+                    });
+                    output_items.push(item);
+                }
+            }
         }
-        headers.insert(name, value);
     }
-    if chunked && content_length.is_some() {
-        return None;
-    }
-    Some(RequestHead {
-        method,
-        target,
-        headers,
-        content_length: content_length.unwrap_or(0),
-        chunked,
+
+    let usage = chat_resp
+        .get("usage")
+        .map(|u| {
+            serde_json::json!({
+                "input_tokens": u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                "output_tokens": u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                "total_tokens": u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            })
+        });
+
+    serde_json::json!({
+        "id": id,
+        "object": "response",
+        "created_at": created_at,
+        "status": status,
+        "model": model,
+        "output": output_items,
+        "output_text": output_text,
+        "usage": usage,
+        "incomplete_details": incomplete_details
     })
 }
 
 /// Non-origin CORS headers shared by all allowed responses.  Kept public for
 /// callers that need to inspect the policy without trusting a request origin.
-pub const CORS_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, api-key, x-api-key, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version\r\nAccess-Control-Max-Age: 86400\r\n";
+pub const CORS_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, api-key, x-api-key, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version, X-Client-Request-Id, x-client-request-id, X-Request-ID, x-request-id\r\nAccess-Control-Expose-Headers: x-request-id, x-client-request-id, retry-after, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens\r\nAccess-Control-Max-Age: 86400\r\n";
 
 /// Return CORS headers only for explicitly trusted local origins.
 ///
@@ -2384,15 +3145,20 @@ fn is_allowed_origin(origin: &str) -> bool {
     {
         return true;
     }
-    ["http://127.0.0.1:", "http://localhost:", "https://127.0.0.1:", "https://localhost:"]
-        .iter()
-        .any(|prefix| {
-            origin.strip_prefix(prefix).is_some_and(|port| {
-                !port.is_empty()
-                    && port.bytes().all(|byte| byte.is_ascii_digit())
-                    && port.parse::<u16>().is_ok_and(|number| number > 0)
-            })
+    [
+        "http://127.0.0.1:",
+        "http://localhost:",
+        "https://127.0.0.1:",
+        "https://localhost:",
+    ]
+    .iter()
+    .any(|prefix| {
+        origin.strip_prefix(prefix).is_some_and(|port| {
+            !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|number| number > 0)
         })
+    })
 }
 
 pub fn is_head_terminated(buf: &[u8]) -> Option<usize> {
@@ -2412,6 +3178,7 @@ fn running_model_names(
         .collect()
 }
 
+#[allow(dead_code)]
 fn not_found_payload_with_hint(model: &str, kind: &str, running: &[String]) -> String {
     serde_json::json!({
         "error": {
@@ -2430,45 +3197,90 @@ fn not_found_payload_with_hint(model: &str, kind: &str, running: &[String]) -> S
 // Connection serving
 // ---------------------------------------------------------------------------
 
-async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Result<(), String> {
+async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Result<(), ApiError> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 8192];
     loop {
         let n = tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
             .await
-            .map_err(|_| "request header read timed out".to_string())?
-            .map_err(|e| format!("read request: {e}"))?;
+            .map_err(|_| {
+                ApiError::bad_request(
+                    "request header read timed out",
+                    None,
+                    Some("read_timeout".into()),
+                )
+            })?
+            .map_err(|e| {
+                ApiError::bad_request(
+                    format!("read request: {e}"),
+                    None,
+                    Some("read_error".into()),
+                )
+            })?;
         if n == 0 {
-            return Err("connection closed before request completed".into());
+            return Ok(());
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(sep) = is_head_terminated(&buf) {
-            let head =
-                parse_head(&buf[..sep]).ok_or_else(|| "malformed request head".to_string())?;
+            let head = parse_head_result(&buf[..sep])?;
             if head.content_length > MAX_BODY_BYTES {
-                return Err("request body too large".into());
+                return Err(ApiError::payload_too_large(
+                    "Request body exceeds 32MB limit",
+                ));
             }
+
+            // Expect: 100-continue handling
+            if head
+                .headers
+                .get("expect")
+                .map(|v| v.eq_ignore_ascii_case("100-continue"))
+                .unwrap_or(false)
+            {
+                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+                let _ = stream.flush().await;
+            }
+
             let total = sep + 4;
-            if head.chunked {
-                let body = read_chunked_body(stream, &mut buf, total).await?;
-                return route(stream, state, &head, &body).await;
-            }
-            while buf.len() < total + head.content_length {
-                let m =
-                    tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
-                        .await
-                        .map_err(|_| "request body read timed out".to_string())?
-                        .map_err(|e| format!("read body: {e}"))?;
-                if m == 0 {
-                    return Err("connection closed during body".into());
+            let body = if head.chunked {
+                read_chunked_body(stream, &mut buf, total).await?
+            } else {
+                while buf.len() < total + head.content_length {
+                    let m = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        stream.read(&mut tmp),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ApiError::bad_request(
+                            "request body read timed out",
+                            None,
+                            Some("read_timeout".into()),
+                        )
+                    })?
+                    .map_err(|e| {
+                        ApiError::bad_request(
+                            format!("read body: {e}"),
+                            None,
+                            Some("read_error".into()),
+                        )
+                    })?;
+                    if m == 0 {
+                        return Err(ApiError::bad_request(
+                            "connection closed during body",
+                            None,
+                            Some("connection_closed".into()),
+                        ));
+                    }
+                    buf.extend_from_slice(&tmp[..m]);
                 }
-                buf.extend_from_slice(&tmp[..m]);
-            }
-            let body = buf[total..total + head.content_length].to_vec();
+                buf[total..total + head.content_length].to_vec()
+            };
             return route(stream, state, &head, &body).await;
         }
         if buf.len() > MAX_HEAD_BYTES {
-            return Err("request head too large".into());
+            return Err(ApiError::payload_too_large(
+                "Request header exceeds 32KB limit",
+            ));
         }
     }
 
@@ -2476,7 +3288,7 @@ async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Resu
         stream: &mut TcpStream,
         buf: &mut Vec<u8>,
         mut cursor: usize,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, ApiError> {
         let mut body = Vec::new();
         let mut tmp = [0u8; 8192];
         loop {
@@ -2488,10 +3300,26 @@ async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Resu
                 let n =
                     tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
                         .await
-                        .map_err(|_| "chunked body read timed out".to_string())?
-                        .map_err(|e| format!("read chunk size: {e}"))?;
+                        .map_err(|_| {
+                            ApiError::bad_request(
+                                "chunked body read timed out",
+                                None,
+                                Some("read_timeout".into()),
+                            )
+                        })?
+                        .map_err(|e| {
+                            ApiError::bad_request(
+                                format!("read chunk size: {e}"),
+                                None,
+                                Some("read_error".into()),
+                            )
+                        })?;
                 if n == 0 {
-                    return Err("connection closed during chunked body".into());
+                    return Err(ApiError::bad_request(
+                        "connection closed during chunked body",
+                        None,
+                        Some("connection_closed".into()),
+                    ));
                 }
                 buf.extend_from_slice(&tmp[..n]);
             }
@@ -2500,36 +3328,106 @@ async fn serve_connection(stream: &mut TcpStream, state: &Arc<AppState>) -> Resu
                 .position(|w| w == b"\r\n")
                 .expect("chunk delimiter exists");
             let line_end = cursor + relative;
-            let size_text = std::str::from_utf8(&buf[cursor..line_end])
-                .map_err(|_| "invalid chunk size".to_string())?;
+            let size_text = std::str::from_utf8(&buf[cursor..line_end]).map_err(|_| {
+                ApiError::bad_request(
+                    "invalid chunk size",
+                    None,
+                    Some("invalid_chunk_size".into()),
+                )
+            })?;
             let size_text = size_text.split(';').next().unwrap_or("").trim();
-            let size = usize::from_str_radix(size_text, 16)
-                .map_err(|_| "invalid chunk size".to_string())?;
+            let size = usize::from_str_radix(size_text, 16).map_err(|_| {
+                ApiError::bad_request(
+                    "invalid chunk size",
+                    None,
+                    Some("invalid_chunk_size".into()),
+                )
+            })?;
             cursor = line_end + 2;
             if size == 0 {
-                return Ok(body);
+                // Read optional trailer lines until \r\n\r\n or leading \r\n
+                loop {
+                    if cursor + 2 <= buf.len() && &buf[cursor..cursor + 2] == b"\r\n" {
+                        return Ok(body);
+                    }
+                    if let Some(_pos) = buf[cursor..].windows(4).position(|w| w == b"\r\n\r\n") {
+                        return Ok(body);
+                    }
+                    let n = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        stream.read(&mut tmp),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ApiError::bad_request(
+                            "chunk trailers read timed out",
+                            None,
+                            Some("read_timeout".into()),
+                        )
+                    })?
+                    .map_err(|e| {
+                        ApiError::bad_request(
+                            format!("read chunk trailers: {e}"),
+                            None,
+                            Some("read_error".into()),
+                        )
+                    })?;
+                    if n == 0 {
+                        return Ok(body);
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                }
             }
             if body.len().saturating_add(size) > MAX_BODY_BYTES {
-                return Err("request body too large".into());
+                return Err(ApiError::payload_too_large("request body too large"));
             }
             while buf.len() < cursor + size + 2 {
                 let n =
                     tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp))
                         .await
-                        .map_err(|_| "chunked body read timed out".to_string())?
-                        .map_err(|e| format!("read chunk: {e}"))?;
+                        .map_err(|_| {
+                            ApiError::bad_request(
+                                "chunked body read timed out",
+                                None,
+                                Some("read_timeout".into()),
+                            )
+                        })?
+                        .map_err(|e| {
+                            ApiError::bad_request(
+                                format!("read chunk: {e}"),
+                                None,
+                                Some("read_error".into()),
+                            )
+                        })?;
                 if n == 0 {
-                    return Err("connection closed during chunked body".into());
+                    return Err(ApiError::bad_request(
+                        "connection closed during chunked body",
+                        None,
+                        Some("connection_closed".into()),
+                    ));
                 }
                 buf.extend_from_slice(&tmp[..n]);
             }
             body.extend_from_slice(&buf[cursor..cursor + size]);
             if &buf[cursor + size..cursor + size + 2] != b"\r\n" {
-                return Err("invalid chunk terminator".into());
+                return Err(ApiError::bad_request(
+                    "invalid chunk terminator",
+                    None,
+                    Some("invalid_chunk".into()),
+                ));
             }
             cursor += size + 2;
         }
     }
+}
+
+pub fn extract_or_generate_request_id(head: &RequestHead) -> String {
+    head.headers
+        .get("x-request-id")
+        .or_else(|| head.headers.get("x-client-request-id"))
+        .filter(|id| is_valid_request_id(id))
+        .cloned()
+        .unwrap_or_else(generate_request_id)
 }
 
 async fn route(
@@ -2537,22 +3435,47 @@ async fn route(
     state: &Arc<AppState>,
     head: &RequestHead,
     body: &[u8],
-) -> Result<(), String> {
+) -> Result<(), ApiError> {
+    if let Some(client_req_id) = head.headers.get("x-client-request-id") {
+        if !is_valid_request_id(client_req_id) {
+            return Err(ApiError::bad_request(
+                "Invalid X-Client-Request-Id: must be ASCII and at most 512 characters",
+                Some("X-Client-Request-Id".into()),
+                Some("invalid_request_id".into()),
+            ));
+        }
+    }
+    if let Some(req_id_hdr) = head.headers.get("x-request-id") {
+        if !is_valid_request_id(req_id_hdr) {
+            return Err(ApiError::bad_request(
+                "Invalid x-request-id: must be ASCII and at most 512 characters",
+                Some("x-request-id".into()),
+                Some("invalid_request_id".into()),
+            ));
+        }
+    }
+    let request_id = extract_or_generate_request_id(head);
+
     if head.method.as_str() == "OPTIONS" {
         if let Some(origin) = head.headers.get("origin") {
             if !is_allowed_origin(origin) {
-                return write_request_response(
-                    stream,
-                    head,
-                    403,
-                    "text/plain",
-                    b"origin not allowed",
-                )
-                .await;
+                return Err(ApiError::forbidden("origin not allowed"));
             }
         }
-        return write_request_response(stream, head, 204, "text/plain", b"").await;
+        let extra = [("x-request-id", request_id.as_str())];
+        let _ = write_response_with_origin_and_headers(
+            stream,
+            204,
+            "text/plain",
+            b"",
+            head.headers.get("origin").map(String::as_str),
+            &extra,
+        )
+        .await;
+        return Ok(());
     }
+
+    eprintln!("[gateway] [{request_id}] {} {}", head.method, head.target);
 
     // Auth check for all /v1/* and /api/* routes except /health, /v1/health, /, and /api/version
     let is_protected = (head.target.starts_with("/v1/") || head.target.starts_with("/api/"))
@@ -2563,17 +3486,9 @@ async fn route(
     if is_protected {
         let cfg = state.config();
         let global_key = cfg.advanced_settings.api_key.as_deref();
-        if let Err((status, msg)) = check_gateway_auth(&head.headers, global_key) {
-            return write_request_response(
-                stream,
-                head,
-                status,
-                "application/json",
-                serde_json::json!({ "error": { "message": msg, "type": "authentication_error" } })
-                    .to_string()
-                    .as_bytes(),
-            )
-            .await;
+        if let Err(mut auth_err) = check_gateway_auth_api(&head.headers, global_key) {
+            auth_err.request_id = Some(request_id);
+            return Err(auth_err);
         }
     }
 
@@ -2585,49 +3500,30 @@ async fn route(
                 "data": model_rows_for_state(state).await,
             })
             .to_string();
-            write_request_response(stream, head, 200, "application/json", text.as_bytes()).await
+            write_request_response(stream, head, 200, "application/json", text.as_bytes())
+                .await
+                .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         (candidate_path, _)
             if head.method == "GET" && candidate_path.starts_with("/v1/models/") =>
         {
             let Some(model_id) = model_id_from_path(candidate_path) else {
-                return write_request_response(
-                    stream,
-                    head,
-                    400,
-                    "application/json",
-                    serde_json::json!({
-                        "error": {
-                            "message": "Model id is required",
-                            "type": "invalid_request_error",
-                        }
-                    })
-                    .to_string()
-                    .as_bytes(),
-                )
-                .await;
+                return Err(ApiError::bad_request(
+                    "Model id is required",
+                    Some("model".into()),
+                    Some("missing_model".into()),
+                ));
             };
             let rows = model_rows_for_state(state).await;
             let Some(row) = rows.into_iter().find(|row| {
                 row["id"].as_str() == Some(model_id.as_str())
                     || row["root"].as_str() == Some(model_id.as_str())
             }) else {
-                let payload = serde_json::json!({
-                    "error": {
-                        "code": "model_not_found",
-                        "message": format!("Model '{model_id}' was not found"),
-                        "type": "invalid_request_error",
-                    }
-                })
-                .to_string();
-                return write_request_response(
-                    stream,
-                    head,
-                    404,
-                    "application/json",
-                    payload.as_bytes(),
-                )
-                .await;
+                return Err(ApiError::not_found(
+                    format!("Model '{model_id}' was not found"),
+                    Some("model".into()),
+                    Some("model_not_found".into()),
+                ));
             };
             write_request_response(
                 stream,
@@ -2637,6 +3533,7 @@ async fn route(
                 row.to_string().as_bytes(),
             )
             .await
+            .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         ("GET", "/health") | ("GET", "/v1/health") => {
             write_request_response(
@@ -2647,16 +3544,12 @@ async fn route(
                 b"{\"status\":\"ok\"}",
             )
             .await
+            .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         ("GET", "/") => {
-            write_request_response(
-                stream,
-                head,
-                200,
-                "text/plain",
-                b"Ollama is running",
-            )
-            .await
+            write_request_response(stream, head, 200, "text/plain", b"Ollama is running")
+                .await
+                .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         ("GET", "/api/version") => {
             write_request_response(
@@ -2667,10 +3560,13 @@ async fn route(
                 format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION")).as_bytes(),
             )
             .await
+            .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         ("GET", "/api/tags") | ("GET", "/api/ps") => {
             let payload = ollama_tags_payload(state).await.to_string();
-            write_request_response(stream, head, 200, "application/json", payload.as_bytes()).await
+            write_request_response(stream, head, 200, "application/json", payload.as_bytes())
+                .await
+                .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         ("POST", "/api/show") => {
             let requested_name = model_from_body(body).unwrap_or_default();
@@ -2693,7 +3589,10 @@ async fn route(
                 let family_name = if !family_info.family_name.is_empty() {
                     family_info.family_name
                 } else {
-                    id.split(['-', '/', '_']).next().unwrap_or("model").to_string()
+                    id.split(['-', '/', '_'])
+                        .next()
+                        .unwrap_or("model")
+                        .to_string()
                 };
                 let template_str = row
                     .get("chat_template")
@@ -2704,7 +3603,8 @@ async fn route(
                     .or_else(|| row.get("max_model_len"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(32768);
-                let parameters_str = format!("num_ctx {ctx}\nstop \"<|im_end|>\"\nstop \"<|endoftext|>\"");
+                let parameters_str =
+                    format!("num_ctx {ctx}\nstop \"<|im_end|>\"\nstop \"<|endoftext|>\"");
                 let is_embed = row["task"].as_str() == Some("embed");
                 let mut capabilities = vec!["completion", "chat"];
                 if is_embed {
@@ -2742,19 +3642,19 @@ async fn route(
                 .to_string();
                 write_request_response(stream, head, 200, "application/json", payload.as_bytes())
                     .await
+                    .map_err(|e| ApiError::new(500, e, "internal_error"))
             } else {
-                let payload = serde_json::json!({
-                    "error": format!("model '{requested_name}' not found")
-                })
-                .to_string();
-                write_request_response(stream, head, 404, "application/json", payload.as_bytes())
-                    .await
+                Err(ApiError::not_found(
+                    format!("model '{requested_name}' not found"),
+                    Some("model".into()),
+                    Some("model_not_found".into()),
+                ))
             }
         }
         ("POST", "/v1/chat/completions") | ("POST", "/api/chat") => {
-            let model = model_from_body(body).ok_or_else(|| {
-                "request body must be JSON with a model or name field".to_string()
-            })?;
+            validate_json_content_type(&head.headers)?;
+            let val = parse_json_body(body)?;
+            let model = model_from_json_body(&val)?;
             let port = {
                 let servers = state.servers.lock().unwrap();
                 find_server_port_for(&servers, &model, "instruct")
@@ -2767,25 +3667,34 @@ async fn route(
                         port,
                         body,
                         head.headers.get("origin").map(String::as_str),
+                        &request_id,
                     )
                     .await
                 }
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    write_request_response(
-                        stream,
-                        head,
-                        404,
-                        "application/json",
-                        not_found_payload_with_hint(&model, "instruction", &running).as_bytes(),
-                    )
-                    .await
+                    Err(ApiError::not_found(
+                        format!(
+                            "no running instruction server for model '{model}'. Running: [{}]",
+                            running.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("model_not_found".into()),
+                    ))
                 }
             }
         }
         ("POST", "/v1/completions") | ("POST", "/api/generate") => {
-            let model = model_from_body(body)
-                .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
+            validate_json_content_type(&head.headers)?;
+            let val = parse_json_body(body)?;
+            if path == "/v1/completions" && val.get("messages").is_some() {
+                return Err(ApiError::bad_request(
+                    "The 'messages' parameter is not supported on /v1/completions. Please use /v1/chat/completions instead.",
+                    Some("messages".into()),
+                    Some("unsupported_parameter".into()),
+                ));
+            }
+            let model = model_from_json_body(&val)?;
             let port = {
                 let servers = state.servers.lock().unwrap();
                 find_server_port_for(&servers, &model, "instruct")
@@ -2799,113 +3708,189 @@ async fn route(
                         "/v1/completions",
                         body,
                         head.headers.get("origin").map(String::as_str),
+                        &request_id,
                     )
                     .await
                 }
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    write_request_response(
-                        stream,
-                        head,
-                        404,
-                        "application/json",
-                        not_found_payload_with_hint(&model, "instruction", &running).as_bytes(),
-                    )
-                    .await
+                    Err(ApiError::not_found(
+                        format!(
+                            "no running instruction server for model '{model}'. Running: [{}]",
+                            running.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("model_not_found".into()),
+                    ))
                 }
             }
         }
         ("POST", "/v1/embeddings") | ("POST", "/api/embeddings") | ("POST", "/api/embed") => {
-            let model = model_from_body(body)
-                .ok_or_else(|| "request body must be JSON with a model field".to_string())?;
+            validate_json_content_type(&head.headers)?;
+            let val = parse_json_body(body)?;
+            let model = model_from_json_body(&val)?;
+            let input_val = val.get("input").ok_or_else(|| {
+                ApiError::bad_request(
+                    "Missing required parameter: 'input'",
+                    Some("input".into()),
+                    Some("missing_required_parameter".into()),
+                )
+            })?;
+            validate_embedding_input(input_val)?;
+
+            let encoding_format = val.get("encoding_format").and_then(|e| e.as_str());
+            if let Some(ef) = encoding_format {
+                if ef != "float" && ef != "base64" {
+                    return Err(ApiError::bad_request(
+                        "Invalid encoding_format: must be 'float' or 'base64'",
+                        Some("encoding_format".into()),
+                        Some("invalid_parameter".into()),
+                    ));
+                }
+            }
+
+            let dimensions = val.get("dimensions").and_then(|d| d.as_u64()).map(|d| d as usize);
+            if let Some(dim) = dimensions {
+                if dim == 0 {
+                    return Err(ApiError::bad_request(
+                        "dimensions must be greater than 0",
+                        Some("dimensions".into()),
+                        Some("invalid_parameter".into()),
+                    ));
+                }
+            }
+
             let port = {
                 let servers = state.servers.lock().unwrap();
                 find_server_port_for(&servers, &model, "embed")
             };
             match port {
                 Some(port) => {
-                    proxy_post(
+                    proxy_embeddings(
                         stream,
                         state,
                         port,
-                        "/v1/embeddings",
                         body,
                         head.headers.get("origin").map(String::as_str),
+                        &request_id,
+                        encoding_format,
+                        dimensions,
                     )
                     .await
                 }
                 None => {
                     let running = running_model_names(&state.servers.lock().unwrap(), "embed");
-                    write_request_response(
-                        stream,
-                        head,
-                        404,
-                        "application/json",
-                        not_found_payload_with_hint(&model, "embedding", &running).as_bytes(),
-                    )
-                    .await
+                    Err(ApiError::not_found(
+                        format!(
+                            "no running embedding server for model '{model}'. Running: [{}]",
+                            running.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("model_not_found".into()),
+                    ))
                 }
             }
         }
-        (method, "/v1/models") if method != "GET" => {
-            let payload = serde_json::json!({
-                "error": {
-                    "message": format!("Method '{method}' not allowed on /v1/models"),
-                    "type": "invalid_request_error",
-                    "param": serde_json::Value::Null,
-                    "code": "method_not_allowed",
+        ("POST", "/v1/responses") => {
+            validate_json_content_type(&head.headers)?;
+            let req_val = parse_json_body(body)?;
+            let (model, chat_req_val, stream_mode) =
+                responses_request_to_chat_completions(&req_val)?;
+            let port = {
+                let servers = state.servers.lock().unwrap();
+                find_server_port_for(&servers, &model, "instruct")
+            };
+            match port {
+                Some(port) => {
+                    let chat_req_bytes = serde_json::to_vec(&chat_req_val).unwrap_or_default();
+                    let origin = head.headers.get("origin").map(String::as_str);
+                    if stream_mode {
+                        proxy_responses_stream(
+                            stream,
+                            state,
+                            port,
+                            &chat_req_bytes,
+                            origin,
+                            &request_id,
+                            &model,
+                        )
+                        .await
+                    } else {
+                        proxy_responses(
+                            stream,
+                            state,
+                            port,
+                            &chat_req_bytes,
+                            origin,
+                            &request_id,
+                            &model,
+                        )
+                        .await
+                    }
                 }
-            })
-            .to_string();
-            write_request_response(stream, head, 405, "application/json", payload.as_bytes()).await
-        }
-        _ => {
-            let payload = serde_json::json!({
-                "error": {
-                    "message": format!("Path '{path}' not found"),
-                    "type": "invalid_request_error",
-                    "param": serde_json::Value::Null,
-                    "code": "not_found",
+                None => {
+                    let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
+                    Err(ApiError::not_found(
+                        format!(
+                            "no running instruction server for model '{model}'. Running: [{}]",
+                            running.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("model_not_found".into()),
+                    ))
                 }
-            })
-            .to_string();
-            write_request_response(stream, head, 404, "application/json", payload.as_bytes()).await
+            }
         }
+        ("GET", p) if p == "/v1/responses" || p.starts_with("/v1/responses/") => {
+            Err(ApiError::not_found(
+                "Response retrieval is not supported: response storage is disabled on this local gateway",
+                None,
+                Some("not_supported".into()),
+            ))
+        }
+        ("DELETE", p) if p == "/v1/responses" || p.starts_with("/v1/responses/") => {
+            Err(ApiError::not_found(
+                "Response deletion is not supported: response storage is disabled on this local gateway",
+                None,
+                Some("not_supported".into()),
+            ))
+        }
+        ("POST", p) if p.starts_with("/v1/responses/") && p.ends_with("/cancel") => {
+            Err(ApiError::bad_request(
+                "Response cancellation is not supported on this local gateway",
+                None,
+                Some("not_supported".into()),
+            ))
+        }
+        (_, p) if p.starts_with("/v1/conversations") => {
+            Err(ApiError::not_found(
+                "Conversations API is not supported: conversation persistence is disabled on this local gateway",
+                None,
+                Some("not_supported".into()),
+            ))
+        }
+        (method, p) if (p == "/v1/models" || p.starts_with("/v1/models/")) && method != "GET" => {
+            Err(ApiError::new(
+                405,
+                format!("Method '{method}' not allowed on {p}"),
+                "invalid_request_error",
+            ))
+        }
+        _ => Err(ApiError::not_found(
+            format!("Path '{path}' not found"),
+            None,
+            Some("not_found".into()),
+        )),
     }
 }
 
-async fn write_request_response(
-    stream: &mut TcpStream,
-    head: &RequestHead,
-    status: u16,
-    content_type: &str,
-    body: &[u8],
-) -> Result<(), String> {
-    write_response_with_origin(
-        stream,
-        status,
-        content_type,
-        body,
-        head.headers.get("origin").map(String::as_str),
-    )
-    .await
-}
-
-async fn write_response(
-    stream: &mut TcpStream,
-    status: u16,
-    content_type: &str,
-    body: &[u8],
-) -> Result<(), String> {
-    write_response_with_origin(stream, status, content_type, body, None).await
-}
-
-async fn write_response_with_origin(
+async fn write_response_with_origin_and_headers(
     stream: &mut TcpStream,
     status: u16,
     content_type: &str,
     body: &[u8],
     origin: Option<&str>,
+    extra_headers: &[(&str, &str)],
 ) -> Result<(), String> {
     let reason = match status {
         200 => "OK",
@@ -2915,13 +3900,23 @@ async fn write_response_with_origin(
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "OK",
     };
     let cors = cors_headers(origin);
+    let mut extra = String::new();
+    for (k, v) in extra_headers {
+        extra.push_str(k);
+        extra.push_str(": ");
+        extra.push_str(v);
+        extra.push_str("\r\n");
+    }
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{cors}Connection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{cors}{extra}Connection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -2930,6 +3925,54 @@ async fn write_response_with_origin(
         .map_err(|e| e.to_string())?;
     stream.write_all(body).await.map_err(|e| e.to_string())?;
     stream.flush().await.map_err(|e| e.to_string())
+}
+
+async fn write_request_response(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let req_id = extract_or_generate_request_id(head);
+    let extra = [("x-request-id", req_id.as_str())];
+    write_response_with_origin_and_headers(
+        stream,
+        status,
+        content_type,
+        body,
+        head.headers.get("origin").map(String::as_str),
+        &extra,
+    )
+    .await
+}
+
+async fn write_api_error_response(
+    stream: &mut TcpStream,
+    err: &ApiError,
+    origin: Option<&str>,
+) -> Result<(), String> {
+    let json_bytes = serde_json::to_vec(&err.to_json_value()).unwrap_or_default();
+    let mut extra = Vec::new();
+    let req_id_str;
+    if let Some(ref rid) = err.request_id {
+        extra.push(("x-request-id", rid.as_str()));
+    } else {
+        req_id_str = generate_request_id();
+        extra.push(("x-request-id", req_id_str.as_str()));
+    }
+    if let Some(ref ra) = err.retry_after {
+        extra.push(("Retry-After", ra.as_str()));
+    }
+    write_response_with_origin_and_headers(
+        stream,
+        err.status,
+        "application/json",
+        &json_bytes,
+        origin,
+        &extra,
+    )
+    .await
 }
 
 fn hash_to_hex(input: &str) -> String {
@@ -2961,7 +4004,10 @@ async fn ollama_tags_payload(state: &Arc<AppState>) -> serde_json::Value {
             let family_name = if !family_info.family_name.is_empty() {
                 family_info.family_name
             } else {
-                id.split(['-', '/', '_']).next().unwrap_or("model").to_string()
+                id.split(['-', '/', '_'])
+                    .next()
+                    .unwrap_or("model")
+                    .to_string()
             };
             serde_json::json!({
                 "name": format!("{id}:latest"),
@@ -3078,13 +4124,27 @@ pub fn normalize_sse_line(line: &str) -> String {
     }
 }
 
+fn extract_safe_upstream_headers(resp: &reqwest::Response) -> Vec<(String, String)> {
+    let mut safe = Vec::new();
+    for (k, v) in resp.headers() {
+        let key = k.as_str().to_ascii_lowercase();
+        if key == "retry-after" || key.starts_with("x-ratelimit-") || key == "x-request-id" {
+            if let Ok(val) = v.to_str() {
+                safe.push((key, val.to_string()));
+            }
+        }
+    }
+    safe
+}
+
 async fn proxy_chat(
     stream: &mut TcpStream,
     state: &Arc<AppState>,
     port: u16,
     body: &[u8],
     origin: Option<&str>,
-) -> Result<(), String> {
+    request_id: &str,
+) -> Result<(), ApiError> {
     let server_def = {
         let servers = state.servers.lock().unwrap();
         servers
@@ -3122,7 +4182,16 @@ async fn proxy_chat(
         None => None,
     };
     let body = normalize_chat_request_with_info(body, &backend, context, template_info.as_ref());
-    proxy_post(stream, state, port, "/v1/chat/completions", &body, origin).await
+    proxy_post(
+        stream,
+        state,
+        port,
+        "/v1/chat/completions",
+        &body,
+        origin,
+        request_id,
+    )
+    .await
 }
 
 /// Forward a chat/completions request to the target vLLM port, preserving
@@ -3134,7 +4203,8 @@ async fn proxy_post(
     upstream_path: &str,
     body: &[u8],
     origin: Option<&str>,
-) -> Result<(), String> {
+    request_id: &str,
+) -> Result<(), ApiError> {
     let url = format!("http://127.0.0.1:{port}{upstream_path}");
     let streaming = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
@@ -3164,20 +4234,47 @@ async fn proxy_post(
     let resp = apply_vllm_auth(req, api_key.as_deref())
         .send()
         .await
-        .map_err(|e| format!("upstream POST {url}: {e}"))?;
+        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
 
     let status = resp.status().as_u16();
+    let safe_headers = extract_safe_upstream_headers(&resp);
+
+    if status == 429 {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut err = ApiError::rate_limited("upstream rate limit exceeded", retry_after);
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+    if status >= 500 {
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        let msg = String::from_utf8_lossy(&body_bytes);
+        let mut err = ApiError::bad_gateway(format!("upstream error ({status}): {msg}"));
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+
     let reason = resp.status().canonical_reason().unwrap_or("OK");
 
     if streaming {
+        let mut safe_header_str = String::new();
+        for (k, v) in &safe_headers {
+            safe_header_str.push_str(k);
+            safe_header_str.push_str(": ");
+            safe_header_str.push_str(v);
+            safe_header_str.push_str("\r\n");
+        }
         let head = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n{}Connection: close\r\n\r\n",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nx-request-id: {request_id}\r\n{safe_header_str}{}Connection: close\r\n\r\n",
             cors_headers(origin)
         );
         stream
             .write_all(head.as_bytes())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
         let mut upstream = resp;
         let mut line_buf = Vec::new();
         // Completion aggregator: observes canonical SSE events without
@@ -3207,23 +4304,29 @@ async fn proxy_post(
                             stream
                                 .write_all(size.as_bytes())
                                 .await
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
                             stream
                                 .write_all(normalized.as_bytes())
                                 .await
-                                .map_err(|e| e.to_string())?;
-                            stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+                                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
+                            stream
+                                .write_all(b"\r\n")
+                                .await
+                                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
                         } else {
                             let size = format!("{:x}\r\n", line_bytes.len());
                             stream
                                 .write_all(size.as_bytes())
                                 .await
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
                             stream
                                 .write_all(&line_bytes)
                                 .await
-                                .map_err(|e| e.to_string())?;
-                            stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+                                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
+                            stream
+                                .write_all(b"\r\n")
+                                .await
+                                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
                         }
                     }
                 }
@@ -3251,12 +4354,15 @@ async fn proxy_post(
             stream
                 .write_all(size.as_bytes())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
             stream
                 .write_all(&line_buf)
                 .await
-                .map_err(|e| e.to_string())?;
-            stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
+            stream
+                .write_all(b"\r\n")
+                .await
+                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
         }
         if termination == crate::completion::StreamTermination::CleanEof {
             termination = if aggregator.saw_explicit_terminal() {
@@ -3305,8 +4411,11 @@ async fn proxy_post(
             stream
                 .write_all(b"0\r\n\r\n")
                 .await
-                .map_err(|e| e.to_string())?;
-            stream.flush().await.map_err(|e| e.to_string())
+                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
+            stream
+                .flush()
+                .await
+                .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))
         } else {
             // Incomplete stream: flush forwarded bytes then abort without
             // the chunked terminator so the client treats it as truncated.
@@ -3318,14 +4427,14 @@ async fn proxy_post(
         let body_bytes = resp
             .bytes()
             .await
-            .map_err(|e| format!("upstream body read: {e}"))?;
+            .map_err(|e| ApiError::bad_gateway(format!("upstream body read: {e}")))?;
         let mut final_bytes = body_bytes.to_vec();
         if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             normalize_chat_response_json(&mut val);
             // Truthful completion extension: preserves the provider's
             // `finish_reason` and `usage` verbatim while making the
             // completion contract explicit for diagnostics. A body without
-            // `finish_reason` is `unknown`, never promoted to `stop`.
+            // `finish_reason` is `unknown`, never promoted to `stop`..
             let model_fallback = model_from_body(body).unwrap_or_default();
             let normalized = crate::completion::normalize_non_streaming(
                 "openai-compatible",
@@ -3345,20 +4454,489 @@ async fn proxy_post(
                 final_bytes = s;
             }
         }
-        write_response_with_origin(stream, status, "application/json", &final_bytes, origin).await
+        let mut extra: Vec<(&str, &str)> = safe_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        extra.push(("x-request-id", request_id));
+        write_response_with_origin_and_headers(
+            stream,
+            status,
+            "application/json",
+            &final_bytes,
+            origin,
+            &extra,
+        )
+        .await
+        .map_err(|e| ApiError::new(500, e, "internal_error"))
     }
+}
+
+async fn proxy_embeddings(
+    stream: &mut TcpStream,
+    state: &Arc<AppState>,
+    port: u16,
+    body: &[u8],
+    origin: Option<&str>,
+    request_id: &str,
+    encoding_format: Option<&str>,
+    dimensions: Option<usize>,
+) -> Result<(), ApiError> {
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+    let api_key = {
+        let servers = state.servers.lock().unwrap();
+        servers
+            .values()
+            .find(|server| server.def.port == port)
+            .and_then(|server| crate::server::server_api_key(state, &server.def))
+    }
+    .or_else(|| {
+        state
+            .config()
+            .servers
+            .iter()
+            .find(|server| server.port == port)
+            .and_then(|server| crate::server::server_api_key(state, server))
+    });
+
+    let req = state
+        .chat_http
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(body.to_vec());
+
+    let resp = apply_vllm_auth(req, api_key.as_deref())
+        .send()
+        .await
+        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+
+    let status = resp.status().as_u16();
+    let safe_headers = extract_safe_upstream_headers(&resp);
+
+    if status == 429 {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut err = ApiError::rate_limited("upstream rate limit exceeded", retry_after);
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+    if status >= 500 {
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        let msg = String::from_utf8_lossy(&body_bytes);
+        let mut err = ApiError::bad_gateway(format!("upstream error ({status}): {msg}"));
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+
+    let body_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiError::bad_gateway(format!("upstream body read: {e}")))?;
+
+    let normalized_bytes = normalize_embedding_response(&body_bytes, encoding_format, dimensions)?;
+
+    let mut extra: Vec<(&str, &str)> = safe_headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    extra.push(("x-request-id", request_id));
+
+    write_response_with_origin_and_headers(
+        stream,
+        status,
+        "application/json",
+        &normalized_bytes,
+        origin,
+        &extra,
+    )
+    .await
+    .map_err(|e| ApiError::new(500, e, "internal_error"))
+}
+
+async fn proxy_responses(
+    stream: &mut TcpStream,
+    state: &Arc<AppState>,
+    port: u16,
+    chat_body: &[u8],
+    origin: Option<&str>,
+    request_id: &str,
+    req_model: &str,
+) -> Result<(), ApiError> {
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    let api_key = {
+        let servers = state.servers.lock().unwrap();
+        servers
+            .values()
+            .find(|server| server.def.port == port)
+            .and_then(|server| crate::server::server_api_key(state, &server.def))
+    }
+    .or_else(|| {
+        state
+            .config()
+            .servers
+            .iter()
+            .find(|server| server.port == port)
+            .and_then(|server| crate::server::server_api_key(state, server))
+    });
+
+    let req = state
+        .chat_http
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(chat_body.to_vec());
+
+    let resp = apply_vllm_auth(req, api_key.as_deref())
+        .send()
+        .await
+        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+
+    let status = resp.status().as_u16();
+    let safe_headers = extract_safe_upstream_headers(&resp);
+
+    if status == 429 {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut err = ApiError::rate_limited("upstream rate limit exceeded", retry_after);
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+    if status >= 500 {
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        let msg = String::from_utf8_lossy(&body_bytes);
+        let mut err = ApiError::bad_gateway(format!("upstream error ({status}): {msg}"));
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+
+    let body_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiError::bad_gateway(format!("upstream body read: {e}")))?;
+
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let val = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+        .map_err(|e| ApiError::bad_gateway(format!("invalid upstream JSON response: {e}")))?;
+
+    let resp_obj = chat_completion_to_responses(&val, req_model, created_at);
+    let final_bytes = serde_json::to_vec(&resp_obj)
+        .map_err(|e| ApiError::bad_gateway(format!("serialization error: {e}")))?;
+
+    let mut extra: Vec<(&str, &str)> = safe_headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    extra.push(("x-request-id", request_id));
+
+    write_response_with_origin_and_headers(
+        stream,
+        status,
+        "application/json",
+        &final_bytes,
+        origin,
+        &extra,
+    )
+    .await
+    .map_err(|e| ApiError::new(500, e, "internal_error"))
+}
+
+async fn proxy_responses_stream(
+    stream: &mut TcpStream,
+    state: &Arc<AppState>,
+    port: u16,
+    chat_body: &[u8],
+    origin: Option<&str>,
+    request_id: &str,
+    req_model: &str,
+) -> Result<(), ApiError> {
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    let api_key = {
+        let servers = state.servers.lock().unwrap();
+        servers
+            .values()
+            .find(|server| server.def.port == port)
+            .and_then(|server| crate::server::server_api_key(state, &server.def))
+    }
+    .or_else(|| {
+        state
+            .config()
+            .servers
+            .iter()
+            .find(|server| server.port == port)
+            .and_then(|server| crate::server::server_api_key(state, server))
+    });
+
+    let req = state
+        .chat_http
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(chat_body.to_vec());
+
+    let mut upstream = apply_vllm_auth(req, api_key.as_deref())
+        .send()
+        .await
+        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+
+    let status = upstream.status().as_u16();
+    if status == 429 {
+        let retry_after = upstream
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut err = ApiError::rate_limited("upstream rate limit exceeded", retry_after);
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+    if status >= 500 {
+        let body_bytes = upstream.bytes().await.unwrap_or_default();
+        let msg = String::from_utf8_lossy(&body_bytes);
+        let mut err = ApiError::bad_gateway(format!("upstream error ({status}): {msg}"));
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+
+    let reason = upstream.status().canonical_reason().unwrap_or("OK");
+    let safe_headers = extract_safe_upstream_headers(&upstream);
+    let mut safe_header_str = String::new();
+    for (k, v) in &safe_headers {
+        safe_header_str.push_str(k);
+        safe_header_str.push_str(": ");
+        safe_header_str.push_str(v);
+        safe_header_str.push_str("\r\n");
+    }
+
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nx-request-id: {request_id}\r\n{safe_header_str}{}Connection: close\r\n\r\n",
+        cors_headers(origin)
+    );
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|e| ApiError::new(500, e.to_string(), "internal_error"))?;
+
+    let resp_id = format!("resp_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let item_id = format!("item_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    async fn send_sse(
+        stream: &mut TcpStream,
+        event: &str,
+        data: &serde_json::Value,
+    ) -> Result<(), String> {
+        let payload = format!(
+            "event: {event}\ndata: {}\n\n",
+            serde_json::to_string(data).unwrap_or_default()
+        );
+        let size = format!("{:x}\r\n", payload.len());
+        stream
+            .write_all(size.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.write_all(b"\r\n").await.map_err(|e| e.to_string())?;
+        stream.flush().await.map_err(|e| e.to_string())
+    }
+
+    let initial_resp = serde_json::json!({
+        "response": {
+            "id": resp_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "in_progress",
+            "model": req_model,
+            "output": [],
+            "output_text": "",
+            "usage": serde_json::Value::Null,
+            "incomplete_details": serde_json::Value::Null,
+        }
+    });
+    let _ = send_sse(stream, "response.created", &initial_resp).await;
+    let _ = send_sse(stream, "response.in_progress", &initial_resp).await;
+
+    let mut decoder = crate::completion::SseDecoder::new();
+    let mut aggregator = crate::completion::StreamAggregator::new("openai-compatible", req_model);
+    let mut item_added = false;
+    let mut full_output_text = String::new();
+
+    loop {
+        match upstream.chunk().await {
+            Ok(Some(chunk)) => {
+                for event in decoder.feed(&chunk) {
+                    aggregator.apply(&event);
+                    if !event.is_comment {
+                        let line = event.joined_data();
+                        let trimmed = line.trim();
+                        if trimmed == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
+                                if let Some(first) = choices.first() {
+                                    if let Some(delta) = first.get("delta") {
+                                        if let Some(content) =
+                                            delta.get("content").and_then(|ct| ct.as_str())
+                                        {
+                                            if !content.is_empty() {
+                                                if !item_added {
+                                                    let added_payload = serde_json::json!({
+                                                        "output_index": 0,
+                                                        "item": {
+                                                            "id": item_id,
+                                                            "type": "message",
+                                                            "status": "in_progress",
+                                                            "role": "assistant",
+                                                            "content": []
+                                                        }
+                                                    });
+                                                    let _ = send_sse(
+                                                        stream,
+                                                        "response.output_item.added",
+                                                        &added_payload,
+                                                    )
+                                                    .await;
+                                                    item_added = true;
+                                                }
+                                                let delta_payload = serde_json::json!({
+                                                    "item_id": item_id,
+                                                    "output_index": 0,
+                                                    "content_index": 0,
+                                                    "delta": content
+                                                });
+                                                let _ = send_sse(
+                                                    stream,
+                                                    "response.output_text.delta",
+                                                    &delta_payload,
+                                                )
+                                                .await;
+                                                full_output_text.push_str(content);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("[gateway] upstream stream error during responses: {e}");
+                let err_payload = serde_json::json!({
+                    "error": {
+                        "message": format!("Upstream stream error: {e}"),
+                        "type": "api_error",
+                        "param": serde_json::Value::Null,
+                        "code": "upstream_error"
+                    }
+                });
+                let _ = send_sse(stream, "error", &err_payload).await;
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+                let _ = stream.flush().await;
+                return Ok(());
+            }
+        }
+    }
+
+    if let Some(final_event) = decoder.finish() {
+        aggregator.apply(&final_event);
+    }
+
+    let normalized = aggregator.finish(crate::completion::StreamTermination::DoneSentinel);
+
+    if item_added {
+        let item_done_payload = serde_json::json!({
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": full_output_text
+                    }
+                ]
+            }
+        });
+        let _ = send_sse(stream, "response.output_item.done", &item_done_payload).await;
+    }
+
+    let is_length = normalized.finish_reason == crate::completion::NormalizedFinishReason::Length;
+    let (event_name, status_str, incomplete_details) = if is_length {
+        (
+            "response.incomplete",
+            "incomplete",
+            serde_json::json!({ "reason": "max_output_tokens" }),
+        )
+    } else {
+        ("response.completed", "completed", serde_json::Value::Null)
+    };
+
+    let usage_val = normalized.usage.to_responses_usage();
+    let final_resp = serde_json::json!({
+        "response": {
+            "id": resp_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": status_str,
+            "model": req_model,
+            "output": if item_added {
+                vec![serde_json::json!({
+                    "id": item_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": full_output_text
+                        }
+                    ]
+                })]
+            } else {
+                vec![]
+            },
+            "output_text": full_output_text,
+            "usage": usage_val,
+            "incomplete_details": incomplete_details,
+        }
+    });
+
+    let _ = send_sse(stream, event_name, &final_resp).await;
+
+    let done_payload = "data: [DONE]\n\n";
+    let size = format!("{:x}\r\n", done_payload.len());
+    let _ = stream.write_all(size.as_bytes()).await;
+    let _ = stream.write_all(done_payload.as_bytes()).await;
+    let _ = stream.write_all(b"\r\n").await;
+
+    let _ = stream.write_all(b"0\r\n\r\n").await;
+    let _ = stream.flush().await;
+
+    Ok(())
 }
 
 async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) {
     let result = serve_connection(&mut stream, &state).await;
     if let Err(e) = result {
-        let _ = write_response(
-            &mut stream,
-            500,
-            "text/plain",
-            format!("gateway error: {e}").as_bytes(),
-        )
-        .await;
+        let _ = write_api_error_response(&mut stream, &e, None).await;
     }
     let _ = stream.shutdown().await;
 }
@@ -4834,7 +6412,10 @@ mod tests {
     fn test_spark_chat_template_analysis() {
         let template = r#"{%- set enable_thinking = enable_thinking | default(true) %}{%- set reasoning_instructions = '' %}{%- if enable_thinking is true %}{%- set resolved_reasoning_effort = reasoning_effort|default('high') %}{%- if resolved_reasoning_effort not in ('high', 'low') %}{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are high (default) and low.') }}{%- endif %}{%- endif %}"#;
         let info = analyze_chat_template(Some(template));
-        assert_eq!(info.ladder, Some(vec!["low".to_string(), "high".to_string()]));
+        assert_eq!(
+            info.ladder,
+            Some(vec!["low".to_string(), "high".to_string()])
+        );
         assert_eq!(info.default_effort, Some("high".to_string()));
         assert_eq!(info.is_reasoning, true);
         assert_eq!(info.is_toggle_only, false);
@@ -4844,9 +6425,15 @@ mod tests {
         def.model_id = "XHToken/Spark-X2.6-4B-GGUF".into();
         def.backend = "llamacpp".into();
         let row = model_row_with_template(&def, Some(64000), "configured", &[], &info);
-        assert_eq!(row["reasoning_config"]["levels"], serde_json::json!(["low", "high"]));
+        assert_eq!(
+            row["reasoning_config"]["levels"],
+            serde_json::json!(["low", "high"])
+        );
         assert_eq!(row["reasoning_config"]["default_level"], "high");
-        assert_eq!(row["reasoning_config"]["supported_efforts"], serde_json::json!(["low", "high"]));
+        assert_eq!(
+            row["reasoning_config"]["supported_efforts"],
+            serde_json::json!(["low", "high"])
+        );
         assert_eq!(row["reasoning_config"]["default_effort"], "high");
         assert_eq!(row["thinkingLevelMap"]["low"], "low");
         assert_eq!(row["thinkingLevelMap"]["high"], "high");
@@ -4889,7 +6476,9 @@ mod tests {
         assert_eq!(obj["chat_template_kwargs"]["enable_thinking"], true);
         assert_eq!(obj["thinking"]["type"], "enabled");
         assert!(obj.get("reasoning_effort").is_none());
-        assert!(obj["chat_template_kwargs"].get("reasoning_effort").is_none());
+        assert!(obj["chat_template_kwargs"]
+            .get("reasoning_effort")
+            .is_none());
     }
 
     #[test]
@@ -5015,8 +6604,14 @@ mod tests {
         def.model_id = "custom-org/Custom-Toggle-7B".into();
         let row = model_row_with_template(&def, Some(16384), "configured", &[], &info);
         assert_eq!(row["reasoning_config"]["control"], "enable_thinking");
-        assert_eq!(row["reasoning_config"]["parameters"]["reasoning_effort"], false);
-        assert_eq!(row["reasoning_config"]["parameters"]["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(
+            row["reasoning_config"]["parameters"]["reasoning_effort"],
+            false
+        );
+        assert_eq!(
+            row["reasoning_config"]["parameters"]["chat_template_kwargs"]["enable_thinking"],
+            true
+        );
         assert_eq!(row["reasoning"], true);
         assert_eq!(row["thinkingLevelMap"]["off"], "none");
         assert_eq!(row["thinkingLevelMap"]["medium"], "medium");
@@ -5048,11 +6643,454 @@ mod tests {
     #[test]
     fn test_route_matches_user_set_server_name() {
         let mut servers = BTreeMap::new();
-        let mut ls = live_server("s1", "C:\\models\\model.gguf", None, 8100, "instruct", ServerStatus::Running);
+        let mut ls = live_server(
+            "s1",
+            "C:\\models\\model.gguf",
+            None,
+            8100,
+            "instruct",
+            ServerStatus::Running,
+        );
         ls.def.name = "My Favorite Coder".into();
         servers.insert("s1".into(), ls);
 
-        assert_eq!(find_server_port_for(&servers, "My Favorite Coder", "instruct"), Some(8100));
-        assert_eq!(find_server_port_for(&servers, "my favorite coder", "instruct"), Some(8100));
+        assert_eq!(
+            find_server_port_for(&servers, "My Favorite Coder", "instruct"),
+            Some(8100)
+        );
+        assert_eq!(
+            find_server_port_for(&servers, "my favorite coder", "instruct"),
+            Some(8100)
+        );
+    }
+
+    #[test]
+    fn test_api_error_json_structure() {
+        let err = ApiError::bad_request(
+            "invalid input",
+            Some("model".into()),
+            Some("missing_required_field".into()),
+        )
+        .with_request_id("req_123");
+        assert_eq!(err.status, 400);
+        let val = err.to_json_value();
+        assert_eq!(val["error"]["message"], "invalid input");
+        assert_eq!(val["error"]["type"], "invalid_request_error");
+        assert_eq!(val["error"]["param"], "model");
+        assert_eq!(val["error"]["code"], "missing_required_field");
+
+        let auth_err = ApiError::unauthorized("bad key");
+        assert_eq!(auth_err.status, 401);
+        let auth_val = auth_err.to_json_value();
+        assert_eq!(auth_val["error"]["type"], "authentication_error");
+
+        let forbidden_err = ApiError::forbidden("forbidden origin");
+        assert_eq!(forbidden_err.status, 403);
+        assert_eq!(
+            forbidden_err.to_json_value()["error"]["type"],
+            "permission_error"
+        );
+
+        let not_found_err = ApiError::not_found("not found", None, None);
+        assert_eq!(not_found_err.status, 404);
+        assert_eq!(
+            not_found_err.to_json_value()["error"]["type"],
+            "invalid_request_error"
+        );
+
+        let method_not_allowed = ApiError::method_not_allowed("GET only");
+        assert_eq!(method_not_allowed.status, 405);
+        assert_eq!(
+            method_not_allowed.to_json_value()["error"]["code"],
+            "method_not_allowed"
+        );
+
+        let payload_err = ApiError::payload_too_large("exceeds limit");
+        assert_eq!(payload_err.status, 413);
+        assert_eq!(
+            payload_err.to_json_value()["error"]["code"],
+            "request_too_large"
+        );
+
+        let rate_err = ApiError::rate_limited("slow down", Some("60".into()));
+        assert_eq!(rate_err.status, 429);
+        assert_eq!(rate_err.retry_after.as_deref(), Some("60"));
+        assert_eq!(
+            rate_err.to_json_value()["error"]["type"],
+            "rate_limit_error"
+        );
+
+        let bg_err = ApiError::bad_gateway("backend down");
+        assert_eq!(bg_err.status, 502);
+        assert_eq!(bg_err.to_json_value()["error"]["type"], "api_error");
+
+        let su_err = ApiError::service_unavailable("gateway not configured");
+        assert_eq!(su_err.status, 503);
+        assert_eq!(su_err.to_json_value()["error"]["type"], "api_error");
+    }
+
+    #[test]
+    fn test_request_id_validation_and_generation() {
+        assert!(is_valid_request_id("req_abc123"));
+        assert!(is_valid_request_id("my-client-req-99"));
+        assert!(!is_valid_request_id(""));
+        assert!(!is_valid_request_id(&"a".repeat(513)));
+        assert!(!is_valid_request_id("non_ascii_test_latin_\u{00FF}"));
+        assert!(!is_valid_request_id("has newline\n"));
+
+        let gen = generate_request_id();
+        assert!(gen.starts_with("req_"));
+        assert!(is_valid_request_id(&gen));
+
+        let mut head = RequestHead {
+            method: "POST".into(),
+            target: "/v1/chat/completions".into(),
+            headers: HashMap::new(),
+            content_length: 0,
+            chunked: false,
+        };
+        let req_id1 = extract_or_generate_request_id(&head);
+        assert!(req_id1.starts_with("req_"));
+
+        head.headers
+            .insert("x-client-request-id".into(), "client-abc".into());
+        assert_eq!(extract_or_generate_request_id(&head), "client-abc");
+
+        head.headers
+            .insert("x-request-id".into(), "req-server-xyz".into());
+        assert_eq!(extract_or_generate_request_id(&head), "req-server-xyz");
+    }
+
+    #[test]
+    fn test_responses_api_request_translation() {
+        let input_text = serde_json::json!({
+            "model": "qwen2.5-coder",
+            "input": "Write a rust function",
+            "instructions": "You are a coding assistant",
+            "max_output_tokens": 100,
+            "temperature": 0.7,
+            "stream": false
+        });
+        let (model, chat_req, stream) = responses_request_to_chat_completions(&input_text).unwrap();
+        assert_eq!(model, "qwen2.5-coder");
+        assert_eq!(stream, false);
+        assert_eq!(chat_req["max_tokens"], 100);
+        assert_eq!(chat_req["temperature"], 0.7);
+        let msgs = chat_req["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "You are a coding assistant");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "Write a rust function");
+
+        let input_msgs = serde_json::json!({
+            "model": "qwen2.5-coder",
+            "input": [
+                { "role": "user", "content": "hello" }
+            ],
+            "stream": true
+        });
+        let (_, chat_req_stream, stream_flag) =
+            responses_request_to_chat_completions(&input_msgs).unwrap();
+        assert_eq!(stream_flag, true);
+        assert_eq!(chat_req_stream["stream"], true);
+        assert_eq!(chat_req_stream["stream_options"]["include_usage"], true);
+
+        let prev_resp = serde_json::json!({
+            "model": "qwen2.5-coder",
+            "input": "test",
+            "previous_response_id": "resp_123"
+        });
+        assert_eq!(
+            responses_request_to_chat_completions(&prev_resp)
+                .unwrap_err()
+                .status,
+            400
+        );
+
+        let store_true = serde_json::json!({
+            "model": "qwen2.5-coder",
+            "input": "test",
+            "store": true
+        });
+        assert_eq!(
+            responses_request_to_chat_completions(&store_true)
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+
+    #[test]
+    fn test_chat_completion_to_responses_mapping() {
+        let chat_resp = serde_json::json!({
+            "id": "chatcmpl-test456",
+            "model": "qwen2.5-coder",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello world!"
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "total_tokens": 17
+            }
+        });
+
+        let resp = chat_completion_to_responses(&chat_resp, "qwen2.5-coder", 1700000000);
+        assert_eq!(resp["id"], "resp_test456");
+        assert_eq!(resp["object"], "response");
+        assert_eq!(resp["created_at"], 1700000000);
+        assert_eq!(resp["status"], "completed");
+        assert_eq!(resp["model"], "qwen2.5-coder");
+        assert_eq!(resp["output_text"], "Hello world!");
+        assert_eq!(resp["usage"]["input_tokens"], 12);
+        assert_eq!(resp["usage"]["output_tokens"], 5);
+        assert_eq!(resp["usage"]["total_tokens"], 17);
+        assert_eq!(resp["incomplete_details"], serde_json::Value::Null);
+
+        let output_arr = resp["output"].as_array().unwrap();
+        assert_eq!(output_arr.len(), 1);
+        assert_eq!(output_arr[0]["type"], "message");
+        assert_eq!(output_arr[0]["role"], "assistant");
+        assert_eq!(output_arr[0]["content"][0]["type"], "output_text");
+        assert_eq!(output_arr[0]["content"][0]["text"], "Hello world!");
+
+        let refusal_resp = serde_json::json!({
+            "id": "chatcmpl-refusal",
+            "model": "qwen",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "refusal": "I cannot do that."
+                    },
+                    "finish_reason": "content_filter"
+                }
+            ]
+        });
+        let resp_refusal = chat_completion_to_responses(&refusal_resp, "qwen", 1700000000);
+        assert_eq!(resp_refusal["status"], "incomplete");
+        assert_eq!(
+            resp_refusal["incomplete_details"]["reason"],
+            "content_filter"
+        );
+        assert_eq!(resp_refusal["output"][0]["content"][0]["type"], "refusal");
+        assert_eq!(
+            resp_refusal["output"][0]["content"][0]["refusal"],
+            "I cannot do that."
+        );
+
+        let tool_resp = serde_json::json!({
+            "id": "chatcmpl-tools",
+            "model": "qwen",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "call_abc",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": "{\"location\":\"Boston\"}"
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }
+            ]
+        });
+        let resp_tools = chat_completion_to_responses(&tool_resp, "qwen", 1700000000);
+        assert_eq!(resp_tools["status"], "completed");
+        assert_eq!(resp_tools["output"][0]["type"], "function_call");
+        assert_eq!(resp_tools["output"][0]["name"], "get_weather");
+        assert_eq!(resp_tools["output"][0]["call_id"], "call_abc");
+    }
+
+    #[test]
+    fn test_embeddings_input_validation_and_normalization() {
+        assert!(validate_embedding_input(&serde_json::json!("hello")).is_ok());
+        assert!(validate_embedding_input(&serde_json::json!(["hello", "world"])).is_ok());
+        assert!(validate_embedding_input(&serde_json::json!([1, 2, 3])).is_ok());
+        assert!(validate_embedding_input(&serde_json::json!([[1, 2], [3, 4]])).is_ok());
+
+        assert!(validate_embedding_input(&serde_json::json!(123)).is_err());
+        assert!(validate_embedding_input(&serde_json::json!([])).is_err());
+        assert!(validate_embedding_input(&serde_json::json!([true])).is_err());
+
+        let raw_upstream = serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": [1.0, 2.0, 3.0, 4.0]
+                }
+            ],
+            "model": "bge-small",
+            "usage": {
+                "prompt_tokens": 4,
+                "total_tokens": 4
+            }
+        });
+
+        let upstream_bytes = serde_json::to_vec(&raw_upstream).unwrap();
+        let norm_dim_bytes = normalize_embedding_response(&upstream_bytes, None, Some(2)).unwrap();
+        let norm_dim: serde_json::Value = serde_json::from_slice(&norm_dim_bytes).unwrap();
+        let emb_dim = norm_dim["data"][0]["embedding"].as_array().unwrap();
+        assert_eq!(emb_dim.len(), 2);
+        assert_eq!(emb_dim[0], 1.0);
+        assert_eq!(emb_dim[1], 2.0);
+
+        let norm_b64_bytes =
+            normalize_embedding_response(&upstream_bytes, Some("base64"), None).unwrap();
+        let norm_b64: serde_json::Value = serde_json::from_slice(&norm_b64_bytes).unwrap();
+        let b64_str = norm_b64["data"][0]["embedding"].as_str().unwrap();
+        assert!(!b64_str.is_empty());
+        assert_eq!(b64_str.len(), 24);
+    }
+
+    #[test]
+    fn test_http_head_parsing_and_limits() {
+        let valid = b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 42\r\n\r\n";
+        let parsed = parse_head_result(valid).unwrap();
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.target, "/v1/chat/completions");
+        assert_eq!(parsed.content_length, 42);
+        assert!(!parsed.chunked);
+
+        let dup = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 10\r\nContent-Length: 10\r\n\r\n";
+        let err_dup = parse_head_result(dup).unwrap_err();
+        assert_eq!(err_dup.status, 400);
+        assert_eq!(err_dup.code.as_deref(), Some("duplicate_header"));
+
+        let conflict = b"POST /v1/chat/completions HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 10\r\n\r\n";
+        let err_conflict = parse_head_result(conflict).unwrap_err();
+        assert_eq!(err_conflict.status, 400);
+        assert_eq!(err_conflict.code.as_deref(), Some("conflicting_framing"));
+
+        let bad_te = b"POST /v1/chat/completions HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n";
+        let err_bad_te = parse_head_result(bad_te).unwrap_err();
+        assert_eq!(err_bad_te.status, 400);
+
+        let bad_line = b"GARBAGE_NO_SPACES\r\n\r\n";
+        assert_eq!(parse_head_result(bad_line).unwrap_err().status, 400);
+    }
+
+    #[tokio::test]
+    async fn test_mock_upstream_gateway_integration() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mock_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = mock_upstream.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = mock_upstream.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let resp_body = serde_json::json!({
+                        "id": "chatcmpl-mock1",
+                        "object": "chat.completion",
+                        "created": 1700000000,
+                        "model": "mock-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "mock response from local upstream"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8,
+                            "completion_tokens": 6,
+                            "total_tokens": 14
+                        }
+                    })
+                    .to_string();
+                    let http_resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = socket.write_all(http_resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
+            }
+        });
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "mock-srv".into(),
+            live_server(
+                "mock-srv",
+                "mock-model",
+                None,
+                upstream_port,
+                "instruct",
+                ServerStatus::Running,
+            ),
+        );
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key-123".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let (stream, _) = gateway_listener.accept().await.unwrap();
+            handle_connection(stream, state_clone).await;
+        });
+
+        let req_payload = serde_json::json!({
+            "model": "mock-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        })
+        .to_string();
+        let req_data = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key-123\r\nContent-Type: application/json\r\nX-Client-Request-Id: test-client-req-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_payload.len(),
+            req_payload
+        );
+
+        let mut client_stream = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
+        client_stream.write_all(req_data.as_bytes()).await.unwrap();
+
+        let mut resp_buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = client_stream.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            resp_buf.extend_from_slice(&tmp[..n]);
+        }
+        let resp_str = String::from_utf8_lossy(&resp_buf);
+        eprintln!("GATEWAY RESPONSE:\n{resp_str}");
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("x-request-id: test-client-req-01"));
+        assert!(resp_str.contains("mock response from local upstream"));
     }
 }
