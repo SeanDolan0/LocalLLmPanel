@@ -136,7 +136,7 @@ jobs:
         run: node scripts/validate-release.mjs --all --artifacts
 
       - name: Upload Windows installer packages and standalone executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: local-llm-panel-windows-artifacts
           path: |
