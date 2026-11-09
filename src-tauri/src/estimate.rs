@@ -52,6 +52,7 @@ pub fn kv_bytes_per_token(n_layers: usize, n_kv_heads: usize, head_dim: usize) -
 /// KV-cache bytes per token for hybrid attention models.
 /// Only full-attention layers allocate KV cache. Bonsai 2 has full attention
 /// on every Nth layer (e.g., every 4th layer out of 64).
+#[allow(dead_code)]
 pub fn kv_bytes_per_token_hybrid(
     total_layers: usize,
     full_attention_interval: usize,
@@ -374,6 +375,7 @@ pub enum ContextSource {
     /// Read directly from config.json
     Config,
     /// Family-based default because config.json was missing the key
+    #[allow(dead_code)]
     Family,
     /// No information at all — generic default
     Default,
@@ -599,6 +601,100 @@ pub fn parse_params_from_index(
         _ => 2.0, // bf16 is the overwhelming majority on HF today
     };
     Some(total / divisor / 1e9)
+}
+
+
+/// Parse a version string (e.g., "0.7.3", "v0.6.0.post1") into (major, minor, patch).
+pub fn parse_version_tuple(version_str: &str) -> Option<(u32, u32, u32)> {
+    let cleaned = version_str.trim().trim_start_matches('v');
+    let mut parts = cleaned.split('.');
+    let parse_num = |s: &str| -> Option<u32> {
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    let major = parse_num(parts.next()?)?;
+    let minor = parts.next().and_then(parse_num).unwrap_or(0);
+    let patch = parts.next().and_then(parse_num).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Version-gate for vLLM RAM-overflow context flag.
+/// In modern vLLM (>= 0.6.0), `--kv-offloading-size` is valid and supported for host RAM swap.
+/// For older legacy vLLM (< 0.6.0), `--swap-space` was used.
+pub fn vllm_kv_offloading_flag(vllm_version: Option<&str>) -> &'static str {
+    if let Some(ver) = vllm_version {
+        if let Some(tuple) = parse_version_tuple(ver) {
+            if tuple < (0, 6, 0) {
+                return "--swap-space";
+            }
+        }
+    }
+    "--kv-offloading-size"
+}
+
+/// Parse memory configuration from `.wslconfig` INI content.
+/// Format example:
+/// ```ini
+/// [wsl2]
+/// memory=16GB
+/// ```
+/// Returns memory in megabytes (MB).
+pub fn parse_wslconfig_memory(content: &str) -> Option<u64> {
+    let mut in_wsl2 = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = &trimmed[1..trimmed.len() - 1].trim();
+            in_wsl2 = section.eq_ignore_ascii_case("wsl2");
+            continue;
+        }
+        if in_wsl2 {
+            if let Some((key, val)) = trimmed.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("memory") {
+                    let val = val.trim();
+                    let lower = val.to_ascii_lowercase();
+                    if let Some(gb) = lower.strip_suffix("gb").or_else(|| lower.strip_suffix("g")) {
+                        if let Ok(n) = gb.trim().parse::<u64>() {
+                            return Some(n * 1024);
+                        }
+                    } else if let Some(mb) = lower.strip_suffix("mb").or_else(|| lower.strip_suffix("m")) {
+                        if let Ok(n) = mb.trim().parse::<u64>() {
+                            return Some(n);
+                        }
+                    } else if let Ok(bytes) = val.parse::<u64>() {
+                        return Some(bytes / (1024 * 1024));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Calculate estimated WSL2 total and available memory when WSL is stopped.
+/// If `.wslconfig` specifies `memory=...`, that limit is respected.
+/// Otherwise, default WSL2 allocation policy applies 50% of host physical RAM.
+/// Returns None if Windows physical RAM is not provided and `.wslconfig` does not specify memory.
+pub fn estimate_wsl_memory_from_host(
+    windows_physical_ram_mb: Option<u64>,
+    wslconfig_content: Option<&str>,
+) -> Option<(u64, u64)> {
+    if let Some(cfg) = wslconfig_content {
+        if let Some(mem_mb) = parse_wslconfig_memory(cfg) {
+            let avail_mb = (mem_mb as f64 * 0.75).round() as u64;
+            return Some((mem_mb, avail_mb));
+        }
+    }
+    let host_mb = windows_physical_ram_mb?;
+    if host_mb == 0 {
+        return None;
+    }
+    let wsl_total_mb = host_mb / 2;
+    let wsl_avail_mb = (wsl_total_mb as f64 * 0.75).round() as u64;
+    Some((wsl_total_mb, wsl_avail_mb))
 }
 
 #[cfg(test)]
@@ -1054,4 +1150,45 @@ mod tests {
         assert_eq!(res_small_ctx.extended_context, 256);
         assert!(res_small_ctx.extended_context <= 256);
     }
+
+    #[test]
+    fn test_vllm_kv_offloading_flag_version_gating() {
+        assert_eq!(super::vllm_kv_offloading_flag(Some("0.7.3")), "--kv-offloading-size");
+        assert_eq!(super::vllm_kv_offloading_flag(Some("0.6.0")), "--kv-offloading-size");
+        assert_eq!(super::vllm_kv_offloading_flag(Some("0.5.4")), "--swap-space");
+        assert_eq!(super::vllm_kv_offloading_flag(None), "--kv-offloading-size");
+    }
+
+    #[test]
+    fn test_parse_wslconfig_memory() {
+        let sample = "[wsl2]\nmemory=16GB\nprocessors=8\n";
+        assert_eq!(super::parse_wslconfig_memory(sample), Some(16384));
+
+        let sample_mb = "[wsl2]\nmemory=8192MB\n";
+        assert_eq!(super::parse_wslconfig_memory(sample_mb), Some(8192));
+
+        let sample_commented = "[wsl2]\n# memory=32GB\nmemory=12GB\n";
+        assert_eq!(super::parse_wslconfig_memory(sample_commented), Some(12288));
+
+        let sample_other_section = "[experimental]\nmemory=32GB\n[wsl2]\nmemory=4GB\n";
+        assert_eq!(super::parse_wslconfig_memory(sample_other_section), Some(4096));
+    }
+
+    #[test]
+    fn test_estimate_wsl_memory_from_host() {
+        // With .wslconfig
+        let wslcfg = "[wsl2]\nmemory=24GB\n";
+        let (total, avail) = super::estimate_wsl_memory_from_host(Some(65536), Some(wslcfg)).unwrap();
+        assert_eq!(total, 24576);
+        assert_eq!(avail, 18432);
+
+        // Without .wslconfig, falls back to 50% of host RAM
+        let (total, avail) = super::estimate_wsl_memory_from_host(Some(32768), None).unwrap();
+        assert_eq!(total, 16384);
+        assert_eq!(avail, 12288);
+
+        // Unknown host RAM and no .wslconfig preserves None
+        assert!(super::estimate_wsl_memory_from_host(None, None).is_none());
+    }
+
 }
