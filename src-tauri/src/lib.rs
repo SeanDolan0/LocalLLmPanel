@@ -4,6 +4,7 @@ pub mod cleanup;
 pub mod commands;
 pub mod completion;
 pub mod context_fit;
+pub mod diagnostics;
 pub mod download_manager;
 mod estimate;
 pub mod fit;
@@ -225,6 +226,10 @@ pub fn run() {
             commands::download_clear_completed,
             commands::cleanup_inspect,
             commands::cleanup_execute,
+            commands::diagnostics_run,
+            commands::diagnostics_export_bundle,
+            commands::disk_preflight,
+            commands::servers_compatibility_test,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

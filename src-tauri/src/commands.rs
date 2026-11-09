@@ -5837,3 +5837,60 @@ pub async fn cleanup_execute(
 ) -> Result<crate::cleanup::CleanupExecutionReport, String> {
     Ok(crate::cleanup::execute_cleanup(&state, &confirmed_targets))
 }
+
+
+// ---------------------------------------------------------------------------
+// Unified First-run Diagnostics, Windows Trust & Compatibility Test (Stream G)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn diagnostics_run(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::diagnostics::DiagnosticReport, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::diagnostics::run_ordered_diagnostics(&st))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn diagnostics_export_bundle(
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundle = crate::diagnostics::generate_redacted_bundle(&st);
+        serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn disk_preflight(
+    state: State<'_, Arc<AppState>>,
+    target_path: Option<String>,
+    required_bytes: Option<u64>,
+) -> Result<crate::diagnostics::DiskPreflightInfo, String> {
+    let _ = state;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = target_path
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("huggingface")))
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\"));
+        Ok(crate::diagnostics::evaluate_disk_preflight(&path, required_bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn servers_compatibility_test(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<crate::diagnostics::CompatibilityTestReport, String> {
+    let st = (*state).clone();
+    crate::diagnostics::run_server_compatibility_test(&st, &id).await
+}
