@@ -384,7 +384,7 @@ pub fn verbose_state_is_running(text: &str, distro: &str) -> bool {
         let state = if tokens.len() >= 3
             && tokens
                 .last()
-                .map_or(false, |t| t.chars().all(|c| c.is_ascii_digit()))
+                .is_some_and(|t| t.chars().all(|c| c.is_ascii_digit()))
         {
             tokens[1..tokens.len() - 1].join(" ")
         } else {
@@ -1023,7 +1023,7 @@ impl WslChild {
     }
 
     pub fn has_active_guard(&self) -> bool {
-        self.exec_guard.as_ref().map_or(false, |g| g.is_active())
+        self.exec_guard.as_ref().is_some_and(|g| g.is_active())
     }
 
     pub fn script_path(&self) -> Option<&str> {
