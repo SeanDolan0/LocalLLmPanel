@@ -321,6 +321,7 @@ export interface GatewayStatus {
   port: number;
   running: boolean;
   auth_configured: boolean;
+  port_conflict?: boolean;
 }
 
 export interface Settings {
@@ -847,4 +848,4 @@ export type DiscoveryCategory =
   | "chat"
   | "small"
   | "embeddings"
-  | "vision";
+  | "vision";

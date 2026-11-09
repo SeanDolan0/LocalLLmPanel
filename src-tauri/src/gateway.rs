@@ -203,19 +203,78 @@ fn running_servers<'a>(
 /// `Qwen2.5-7B-Instruct` finds `Qwen/Qwen2.5-7B-Instruct`).
 /// Strips `:latest` tags, recognizes wildcard aliases (`default`, `local`, `*`),
 /// and falls back to the sole running server if only one is active.
-pub fn find_server_port_for(
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModelRouteError {
+    EmptyModel,
+    NotFound {
+        requested: String,
+        running: Vec<String>,
+    },
+    Ambiguous {
+        requested: String,
+        candidates: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for ModelRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyModel => write!(f, "model name cannot be empty"),
+            Self::NotFound { requested, running } => {
+                write!(
+                    f,
+                    "no running server for model '{requested}'. Running: [{}]",
+                    running.join(", ")
+                )
+            }
+            Self::Ambiguous { requested, candidates } => {
+                write!(
+                    f,
+                    "model '{requested}' is ambiguous; matches multiple running models: [{}]. Please specify the exact model name.",
+                    candidates.join(", ")
+                )
+            }
+        }
+    }
+}
+
+pub fn route_server_for(
     servers: &BTreeMap<String, crate::state::LiveServer>,
     model: &str,
     task: &str,
-) -> Option<u16> {
-    let running = running_servers(servers, task);
-    if running.is_empty() {
-        return None;
-    }
+) -> Result<u16, ModelRouteError> {
+    let running: Vec<&crate::state::LiveServer> = servers
+        .values()
+        .filter(|ls| {
+            (ls.status == ServerStatus::Running || ls.status == ServerStatus::Starting)
+                && ls.def.task == task
+        })
+        .collect();
+    let running_names: Vec<String> = running
+        .iter()
+        .map(|ls| {
+            ls.def
+                .served_model_name
+                .clone()
+                .unwrap_or_else(|| {
+                    if !ls.def.model_id.is_empty() {
+                        ls.def.model_id.clone()
+                    } else {
+                        ls.def.name.clone()
+                    }
+                })
+        })
+        .collect();
     let m = model.trim();
     let m = m.strip_suffix(":latest").unwrap_or(m);
     if m.is_empty() {
-        return None;
+        return Err(ModelRouteError::EmptyModel);
+    }
+    if running.is_empty() {
+        return Err(ModelRouteError::NotFound {
+            requested: m.to_string(),
+            running: running_names,
+        });
     }
 
     // If wildcard/default aliases, and exactly one server is running, route to it.
@@ -225,11 +284,17 @@ pub fn find_server_port_for(
         || m == "*";
     if is_wildcard {
         return if running.len() == 1 {
-            Some(running[0].def.port)
+            Ok(running[0].def.port)
         } else {
-            None
+            Err(ModelRouteError::Ambiguous {
+                requested: m.to_string(),
+                candidates: running_names,
+            })
         };
     }
+
+    // Pass 1: Exact matches. Exact match always wins over fuzzy.
+    let mut exact_matches = Vec::new();
     for ls in &running {
         if ls.def.effective_model_name().eq_ignore_ascii_case(m)
             || ls.def.model_id.eq_ignore_ascii_case(m)
@@ -241,25 +306,75 @@ pub fn find_server_port_for(
                 .map(|s| s.eq_ignore_ascii_case(m))
                 .unwrap_or(false)
         {
-            return Some(ls.def.port);
+            exact_matches.push(ls);
         }
     }
+    if !exact_matches.is_empty() {
+        return Ok(exact_matches[0].def.port);
+    }
+
+    // Pass 2: Fuzzy matches (suffix, prefix, substring).
     let lower = m.to_lowercase();
+    let mut fuzzy_matches = Vec::new();
     for ls in &running {
         let hf = ls.def.model_id.to_lowercase();
         let name = ls.def.effective_model_name().to_lowercase();
         let sname = ls.def.name.to_lowercase();
-        if hf.ends_with(&lower)
+        let matched = hf.ends_with(&lower)
             || name.ends_with(&lower)
             || sname.ends_with(&lower)
             || lower.ends_with(&hf)
             || lower.ends_with(&name)
             || lower.ends_with(&sname)
-        {
-            return Some(ls.def.port);
+            || hf.starts_with(&lower)
+            || name.starts_with(&lower)
+            || sname.starts_with(&lower)
+            || lower.starts_with(&hf)
+            || lower.starts_with(&name)
+            || lower.starts_with(&sname)
+            || (lower.len() >= 3 && (hf.contains(&lower) || name.contains(&lower) || sname.contains(&lower)));
+        if matched {
+            fuzzy_matches.push(ls);
         }
     }
-    None
+
+    if fuzzy_matches.len() == 1 {
+        return Ok(fuzzy_matches[0].def.port);
+    } else if fuzzy_matches.len() > 1 {
+        let mut candidates = Vec::new();
+        for ls in fuzzy_matches {
+            let label = ls
+                .def
+                .served_model_name
+                .as_deref()
+                .unwrap_or(if !ls.def.model_id.is_empty() {
+                    &ls.def.model_id
+                } else {
+                    &ls.def.name
+                });
+            if !candidates.contains(&label.to_string()) {
+                candidates.push(label.to_string());
+            }
+        }
+        candidates.sort();
+        return Err(ModelRouteError::Ambiguous {
+            requested: m.to_string(),
+            candidates,
+        });
+    }
+
+    Err(ModelRouteError::NotFound {
+        requested: m.to_string(),
+        running: running_names,
+    })
+}
+
+pub fn find_server_port_for(
+    servers: &BTreeMap<String, crate::state::LiveServer>,
+    model: &str,
+    task: &str,
+) -> Option<u16> {
+    route_server_for(servers, model, task).ok()
 }
 
 fn configured_context_tokens(def: &ServerDef) -> Option<usize> {
@@ -3168,7 +3283,7 @@ pub fn is_head_terminated(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn running_model_names(
+pub fn running_model_names(
     servers: &BTreeMap<String, crate::state::LiveServer>,
     task: &str,
 ) -> Vec<String> {
@@ -3536,12 +3651,13 @@ async fn route(
             .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
         ("GET", "/health") | ("GET", "/v1/health") => {
-            write_request_response(
+            write_response_with_origin_and_headers(
                 stream,
-                head,
                 200,
                 "application/json",
-                b"{\"status\":\"ok\"}",
+                b"{\"status\":\"ok\",\"service\":\"llm-panel-gateway\"}",
+                head.headers.get("origin").map(String::as_str),
+                &[("X-Gateway-Service", "llm-panel-gateway")],
             )
             .await
             .map_err(|e| ApiError::new(500, e, "internal_error"))
@@ -3655,34 +3771,50 @@ async fn route(
             validate_json_content_type(&head.headers)?;
             let val = parse_json_body(body)?;
             let model = model_from_json_body(&val)?;
-            let port = {
+            let route_res = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for(&servers, &model, "instruct")
+                route_server_for(&servers, &model, "instruct")
             };
-            match port {
-                Some(port) => {
-                    proxy_chat(
-                        stream,
-                        state,
-                        port,
-                        body,
-                        head.headers.get("origin").map(String::as_str),
-                        &request_id,
-                    )
-                    .await
-                }
-                None => {
-                    let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    Err(ApiError::not_found(
+            let port = match route_res {
+                Ok(port) => port,
+                Err(ModelRouteError::Ambiguous { requested, candidates }) => {
+                    return Err(ApiError::bad_request(
                         format!(
-                            "no running instruction server for model '{model}'. Running: [{}]",
+                            "model '{requested}' is ambiguous; matches multiple running models: [{}]. Please specify the exact model name.",
+                            candidates.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("ambiguous_model".into()),
+                    ));
+                }
+                Err(ModelRouteError::NotFound { requested, running }) => {
+                    return Err(ApiError::not_found(
+                        format!(
+                            "no running instruction server for model '{requested}'. Running: [{}]",
                             running.join(", ")
                         ),
                         Some("model".into()),
                         Some("model_not_found".into()),
-                    ))
+                    ));
                 }
-            }
+                Err(ModelRouteError::EmptyModel) => {
+                    return Err(ApiError::bad_request(
+                        "model name cannot be empty",
+                        Some("model".into()),
+                        Some("missing_model".into()),
+                    ));
+                }
+            };
+            let _permit = acquire_server_permit(state, port, &request_id)?;
+            proxy_chat(
+                stream,
+                state,
+                port,
+                body,
+                head.headers.get("origin").map(String::as_str),
+                &request_id,
+            )
+            .await
         }
         ("POST", "/v1/completions") | ("POST", "/api/generate") => {
             validate_json_content_type(&head.headers)?;
@@ -3695,35 +3827,51 @@ async fn route(
                 ));
             }
             let model = model_from_json_body(&val)?;
-            let port = {
+            let route_res = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for(&servers, &model, "instruct")
+                route_server_for(&servers, &model, "instruct")
             };
-            match port {
-                Some(port) => {
-                    proxy_post(
-                        stream,
-                        state,
-                        port,
-                        "/v1/completions",
-                        body,
-                        head.headers.get("origin").map(String::as_str),
-                        &request_id,
-                    )
-                    .await
-                }
-                None => {
-                    let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    Err(ApiError::not_found(
+            let port = match route_res {
+                Ok(port) => port,
+                Err(ModelRouteError::Ambiguous { requested, candidates }) => {
+                    return Err(ApiError::bad_request(
                         format!(
-                            "no running instruction server for model '{model}'. Running: [{}]",
+                            "model '{requested}' is ambiguous; matches multiple running models: [{}]. Please specify the exact model name.",
+                            candidates.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("ambiguous_model".into()),
+                    ));
+                }
+                Err(ModelRouteError::NotFound { requested, running }) => {
+                    return Err(ApiError::not_found(
+                        format!(
+                            "no running instruction server for model '{requested}'. Running: [{}]",
                             running.join(", ")
                         ),
                         Some("model".into()),
                         Some("model_not_found".into()),
-                    ))
+                    ));
                 }
-            }
+                Err(ModelRouteError::EmptyModel) => {
+                    return Err(ApiError::bad_request(
+                        "model name cannot be empty",
+                        Some("model".into()),
+                        Some("missing_model".into()),
+                    ));
+                }
+            };
+            let _permit = acquire_server_permit(state, port, &request_id)?;
+            proxy_post(
+                stream,
+                state,
+                port,
+                "/v1/completions",
+                body,
+                head.headers.get("origin").map(String::as_str),
+                &request_id,
+            )
+            .await
         }
         ("POST", "/v1/embeddings") | ("POST", "/api/embeddings") | ("POST", "/api/embed") => {
             validate_json_content_type(&head.headers)?;
@@ -3760,85 +3908,117 @@ async fn route(
                 }
             }
 
-            let port = {
+            let route_res = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for(&servers, &model, "embed")
+                route_server_for(&servers, &model, "embed")
             };
-            match port {
-                Some(port) => {
-                    proxy_embeddings(
-                        stream,
-                        state,
-                        port,
-                        body,
-                        head.headers.get("origin").map(String::as_str),
-                        &request_id,
-                        encoding_format,
-                        dimensions,
-                    )
-                    .await
-                }
-                None => {
-                    let running = running_model_names(&state.servers.lock().unwrap(), "embed");
-                    Err(ApiError::not_found(
+            let port = match route_res {
+                Ok(port) => port,
+                Err(ModelRouteError::Ambiguous { requested, candidates }) => {
+                    return Err(ApiError::bad_request(
                         format!(
-                            "no running embedding server for model '{model}'. Running: [{}]",
+                            "model '{requested}' is ambiguous; matches multiple running models: [{}]. Please specify the exact model name.",
+                            candidates.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("ambiguous_model".into()),
+                    ));
+                }
+                Err(ModelRouteError::NotFound { requested, running }) => {
+                    return Err(ApiError::not_found(
+                        format!(
+                            "no running embedding server for model '{requested}'. Running: [{}]",
                             running.join(", ")
                         ),
                         Some("model".into()),
                         Some("model_not_found".into()),
-                    ))
+                    ));
                 }
-            }
+                Err(ModelRouteError::EmptyModel) => {
+                    return Err(ApiError::bad_request(
+                        "model name cannot be empty",
+                        Some("model".into()),
+                        Some("missing_model".into()),
+                    ));
+                }
+            };
+            let _permit = acquire_server_permit(state, port, &request_id)?;
+            proxy_embeddings(
+                stream,
+                state,
+                port,
+                body,
+                head.headers.get("origin").map(String::as_str),
+                &request_id,
+                encoding_format,
+                dimensions,
+            )
+            .await
         }
         ("POST", "/v1/responses") => {
             validate_json_content_type(&head.headers)?;
             let req_val = parse_json_body(body)?;
             let (model, chat_req_val, stream_mode) =
                 responses_request_to_chat_completions(&req_val)?;
-            let port = {
+            let route_res = {
                 let servers = state.servers.lock().unwrap();
-                find_server_port_for(&servers, &model, "instruct")
+                route_server_for(&servers, &model, "instruct")
             };
-            match port {
-                Some(port) => {
-                    let chat_req_bytes = serde_json::to_vec(&chat_req_val).unwrap_or_default();
-                    let origin = head.headers.get("origin").map(String::as_str);
-                    if stream_mode {
-                        proxy_responses_stream(
-                            stream,
-                            state,
-                            port,
-                            &chat_req_bytes,
-                            origin,
-                            &request_id,
-                            &model,
-                        )
-                        .await
-                    } else {
-                        proxy_responses(
-                            stream,
-                            state,
-                            port,
-                            &chat_req_bytes,
-                            origin,
-                            &request_id,
-                            &model,
-                        )
-                        .await
-                    }
-                }
-                None => {
-                    let running = running_model_names(&state.servers.lock().unwrap(), "instruct");
-                    Err(ApiError::not_found(
+            let port = match route_res {
+                Ok(port) => port,
+                Err(ModelRouteError::Ambiguous { requested, candidates }) => {
+                    return Err(ApiError::bad_request(
                         format!(
-                            "no running instruction server for model '{model}'. Running: [{}]",
+                            "model '{requested}' is ambiguous; matches multiple running models: [{}]. Please specify the exact model name.",
+                            candidates.join(", ")
+                        ),
+                        Some("model".into()),
+                        Some("ambiguous_model".into()),
+                    ));
+                }
+                Err(ModelRouteError::NotFound { requested, running }) => {
+                    return Err(ApiError::not_found(
+                        format!(
+                            "no running instruction server for model '{requested}'. Running: [{}]",
                             running.join(", ")
                         ),
                         Some("model".into()),
                         Some("model_not_found".into()),
-                    ))
+                    ));
                 }
+                Err(ModelRouteError::EmptyModel) => {
+                    return Err(ApiError::bad_request(
+                        "model name cannot be empty",
+                        Some("model".into()),
+                        Some("missing_model".into()),
+                    ));
+                }
+            };
+            let _permit = acquire_server_permit(state, port, &request_id)?;
+            let chat_req_bytes = serde_json::to_vec(&chat_req_val).unwrap_or_default();
+            let origin = head.headers.get("origin").map(String::as_str);
+            if stream_mode {
+                proxy_responses_stream(
+                    stream,
+                    state,
+                    port,
+                    &chat_req_bytes,
+                    origin,
+                    &request_id,
+                    &model,
+                )
+                .await
+            } else {
+                proxy_responses(
+                    stream,
+                    state,
+                    port,
+                    &chat_req_bytes,
+                    origin,
+                    &request_id,
+                    &model,
+                )
+                .await
             }
         }
         ("GET", p) if p == "/v1/responses" || p.starts_with("/v1/responses/") => {
@@ -4231,10 +4411,22 @@ async fn proxy_post(
         .post(&url)
         .header("Content-Type", "application/json")
         .body(body.to_vec());
-    let resp = apply_vllm_auth(req, api_key.as_deref())
-        .send()
-        .await
-        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+    let resp = match apply_vllm_auth(req, api_key.as_deref()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_connect() || e.is_timeout() {
+                let mut err = ApiError::service_unavailable(format!(
+                    "Upstream server on port {port} is temporarily unreachable: {e}"
+                ));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            } else {
+                let mut err = ApiError::bad_gateway(format!("upstream POST {url}: {e}"));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            }
+        }
+    };
 
     let status = resp.status().as_u16();
     let safe_headers = extract_safe_upstream_headers(&resp);
@@ -4505,10 +4697,22 @@ async fn proxy_embeddings(
         .header("Content-Type", "application/json")
         .body(body.to_vec());
 
-    let resp = apply_vllm_auth(req, api_key.as_deref())
-        .send()
-        .await
-        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+    let resp = match apply_vllm_auth(req, api_key.as_deref()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_connect() || e.is_timeout() {
+                let mut err = ApiError::service_unavailable(format!(
+                    "Upstream server on port {port} is temporarily unreachable: {e}"
+                ));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            } else {
+                let mut err = ApiError::bad_gateway(format!("upstream POST {url}: {e}"));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            }
+        }
+    };
 
     let status = resp.status().as_u16();
     let safe_headers = extract_safe_upstream_headers(&resp);
@@ -4588,10 +4792,22 @@ async fn proxy_responses(
         .header("Content-Type", "application/json")
         .body(chat_body.to_vec());
 
-    let resp = apply_vllm_auth(req, api_key.as_deref())
-        .send()
-        .await
-        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+    let resp = match apply_vllm_auth(req, api_key.as_deref()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_connect() || e.is_timeout() {
+                let mut err = ApiError::service_unavailable(format!(
+                    "Upstream server on port {port} is temporarily unreachable: {e}"
+                ));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            } else {
+                let mut err = ApiError::bad_gateway(format!("upstream POST {url}: {e}"));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            }
+        }
+    };
 
     let status = resp.status().as_u16();
     let safe_headers = extract_safe_upstream_headers(&resp);
@@ -4681,10 +4897,22 @@ async fn proxy_responses_stream(
         .header("Content-Type", "application/json")
         .body(chat_body.to_vec());
 
-    let mut upstream = apply_vllm_auth(req, api_key.as_deref())
-        .send()
-        .await
-        .map_err(|e| ApiError::bad_gateway(format!("upstream POST {url}: {e}")))?;
+    let mut upstream = match apply_vllm_auth(req, api_key.as_deref()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_connect() || e.is_timeout() {
+                let mut err = ApiError::service_unavailable(format!(
+                    "Upstream server on port {port} is temporarily unreachable: {e}"
+                ));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            } else {
+                let mut err = ApiError::bad_gateway(format!("upstream POST {url}: {e}"));
+                err.request_id = Some(request_id.to_string());
+                return Err(err);
+            }
+        }
+    };
 
     let status = upstream.status().as_u16();
     if status == 429 {
@@ -4769,10 +4997,23 @@ async fn proxy_responses_stream(
     let _ = send_sse(stream, "response.created", &initial_resp).await;
     let _ = send_sse(stream, "response.in_progress", &initial_resp).await;
 
+    #[derive(Default)]
+    struct ActiveToolItem {
+        output_index: usize,
+        call_id: String,
+        name: String,
+        arguments: String,
+        added_emitted: bool,
+        done_emitted: bool,
+    }
+
     let mut decoder = crate::completion::SseDecoder::new();
     let mut aggregator = crate::completion::StreamAggregator::new("openai-compatible", req_model);
+    let mut next_output_index: usize = 0;
+    let mut message_output_index: Option<usize> = None;
     let mut item_added = false;
     let mut full_output_text = String::new();
+    let mut active_tools: BTreeMap<usize, ActiveToolItem> = BTreeMap::new();
 
     loop {
         match upstream.chunk().await {
@@ -4794,10 +5035,13 @@ async fn proxy_responses_stream(
                                         {
                                             if !content.is_empty() {
                                                 if !item_added {
+                                                    let out_idx = next_output_index;
+                                                    next_output_index += 1;
+                                                    message_output_index = Some(out_idx);
                                                     let added_payload = serde_json::json!({
-                                                        "output_index": 0,
+                                                        "output_index": out_idx,
                                                         "item": {
-                                                            "id": item_id,
+                                                            "id": &item_id,
                                                             "type": "message",
                                                             "status": "in_progress",
                                                             "role": "assistant",
@@ -4812,9 +5056,10 @@ async fn proxy_responses_stream(
                                                     .await;
                                                     item_added = true;
                                                 }
+                                                let out_idx = message_output_index.unwrap_or(0);
                                                 let delta_payload = serde_json::json!({
-                                                    "item_id": item_id,
-                                                    "output_index": 0,
+                                                    "item_id": &item_id,
+                                                    "output_index": out_idx,
                                                     "content_index": 0,
                                                     "delta": content
                                                 });
@@ -4825,6 +5070,74 @@ async fn proxy_responses_stream(
                                                 )
                                                 .await;
                                                 full_output_text.push_str(content);
+                                            }
+                                        }
+
+                                        if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                            for tc in tool_calls {
+                                                let tc_idx = tc.get("index").and_then(|i| i.as_u64()).map(|i| i as usize).unwrap_or(0);
+                                                let tool = active_tools.entry(tc_idx).or_insert_with(|| {
+                                                    let out_idx = next_output_index;
+                                                    next_output_index += 1;
+                                                    ActiveToolItem {
+                                                        output_index: out_idx,
+                                                        call_id: format!("call_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed)),
+                                                        name: String::new(),
+                                                        arguments: String::new(),
+                                                        added_emitted: false,
+                                                        done_emitted: false,
+                                                    }
+                                                });
+
+                                                if let Some(id) = tc.get("id").and_then(|id| id.as_str()).filter(|s| !s.is_empty()) {
+                                                    tool.call_id = id.to_string();
+                                                }
+                                                if let Some(fn_obj) = tc.get("function") {
+                                                    if let Some(name) = fn_obj.get("name").and_then(|n| n.as_str()).filter(|s| !s.is_empty()) {
+                                                        tool.name = name.to_string();
+                                                    }
+                                                }
+
+                                                if !tool.added_emitted {
+                                                    let added_payload = serde_json::json!({
+                                                        "output_index": tool.output_index,
+                                                        "item": {
+                                                            "id": &tool.call_id,
+                                                            "type": "function_call",
+                                                            "status": "in_progress",
+                                                            "name": &tool.name,
+                                                            "call_id": &tool.call_id,
+                                                            "arguments": ""
+                                                        }
+                                                    });
+                                                    let _ = send_sse(
+                                                        stream,
+                                                        "response.output_item.added",
+                                                        &added_payload,
+                                                    )
+                                                    .await;
+                                                    tool.added_emitted = true;
+                                                }
+
+                                                if let Some(fn_obj) = tc.get("function") {
+                                                    if let Some(arg_delta) = fn_obj.get("arguments").and_then(|a| a.as_str()) {
+                                                        if !arg_delta.is_empty() {
+                                                            let delta_payload = serde_json::json!({
+                                                                "item_id": &tool.call_id,
+                                                                "output_index": tool.output_index,
+                                                                "call_id": &tool.call_id,
+                                                                "delta": arg_delta
+                                                            });
+                                                            let _ = send_sse(
+                                                                stream,
+                                                                "response.function_call_arguments.delta",
+                                                                &delta_payload,
+                                                            )
+                                                            .await;
+                                                            tool.arguments.push_str(arg_delta);
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -4860,22 +5173,54 @@ async fn proxy_responses_stream(
     let normalized = aggregator.finish(crate::completion::StreamTermination::DoneSentinel);
 
     if item_added {
+        let out_idx = message_output_index.unwrap_or(0);
         let item_done_payload = serde_json::json!({
-            "output_index": 0,
+            "output_index": out_idx,
             "item": {
-                "id": item_id,
+                "id": &item_id,
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
                 "content": [
                     {
                         "type": "output_text",
-                        "text": full_output_text
+                        "text": &full_output_text
                     }
                 ]
             }
         });
         let _ = send_sse(stream, "response.output_item.done", &item_done_payload).await;
+    }
+
+    for (_, tool) in active_tools.iter_mut() {
+        if !tool.done_emitted {
+            let args_done_payload = serde_json::json!({
+                "item_id": &tool.call_id,
+                "output_index": tool.output_index,
+                "call_id": &tool.call_id,
+                "arguments": &tool.arguments
+            });
+            let _ = send_sse(
+                stream,
+                "response.function_call_arguments.done",
+                &args_done_payload,
+            )
+            .await;
+
+            let item_done_payload = serde_json::json!({
+                "output_index": tool.output_index,
+                "item": {
+                    "id": &tool.call_id,
+                    "type": "function_call",
+                    "status": "completed",
+                    "name": &tool.name,
+                    "call_id": &tool.call_id,
+                    "arguments": &tool.arguments
+                }
+            });
+            let _ = send_sse(stream, "response.output_item.done", &item_done_payload).await;
+            tool.done_emitted = true;
+        }
     }
 
     let is_length = normalized.finish_reason == crate::completion::NormalizedFinishReason::Length;
@@ -4889,6 +5234,35 @@ async fn proxy_responses_stream(
         ("response.completed", "completed", serde_json::Value::Null)
     };
 
+    let mut output_items: Vec<(usize, serde_json::Value)> = Vec::new();
+    if item_added {
+        let out_idx = message_output_index.unwrap_or(0);
+        output_items.push((out_idx, serde_json::json!({
+            "id": &item_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": &full_output_text
+                }
+            ]
+        })));
+    }
+    for tool in active_tools.values() {
+        output_items.push((tool.output_index, serde_json::json!({
+            "id": &tool.call_id,
+            "type": "function_call",
+            "status": "completed",
+            "name": &tool.name,
+            "call_id": &tool.call_id,
+            "arguments": &tool.arguments
+        })));
+    }
+    output_items.sort_by_key(|(idx, _)| *idx);
+    let output_values: Vec<serde_json::Value> = output_items.into_iter().map(|(_, val)| val).collect();
+
     let usage_val = normalized.usage.to_responses_usage();
     let final_resp = serde_json::json!({
         "response": {
@@ -4897,22 +5271,7 @@ async fn proxy_responses_stream(
             "created_at": created_at,
             "status": status_str,
             "model": req_model,
-            "output": if item_added {
-                vec![serde_json::json!({
-                    "id": item_id,
-                    "type": "message",
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": full_output_text
-                        }
-                    ]
-                })]
-            } else {
-                vec![]
-            },
+            "output": output_values,
             "output_text": full_output_text,
             "usage": usage_val,
             "incomplete_details": incomplete_details,
@@ -4939,6 +5298,171 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) {
         let _ = write_api_error_response(&mut stream, &e, None).await;
     }
     let _ = stream.shutdown().await;
+}
+
+/// Bind the gateway on `port` and serve until aborted. Returns a join handle
+/// so the supervisor can stop it by aborting.
+pub const DEFAULT_SERVER_CONCURRENCY: usize = 16;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConcurrencyError {
+    LimitExceeded { port: u16, current: usize, limit: usize },
+}
+
+#[derive(Default, Debug)]
+pub struct ServerConcurrencyManager {
+    inflight: std::sync::Mutex<HashMap<u16, usize>>,
+}
+
+#[derive(Debug)]
+pub struct ServerPermit {
+    port: u16,
+    manager: Arc<ServerConcurrencyManager>,
+}
+
+impl Drop for ServerPermit {
+    fn drop(&mut self) {
+        let mut map = self.manager.inflight.lock().unwrap();
+        if let Some(count) = map.get_mut(&self.port) {
+            if *count > 0 {
+                *count -= 1;
+            }
+        }
+    }
+}
+
+impl ServerConcurrencyManager {
+    pub fn new() -> Self {
+        Self {
+            inflight: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn current_inflight(&self, port: u16) -> usize {
+        *self.inflight.lock().unwrap().get(&port).unwrap_or(&0)
+    }
+
+    pub fn try_acquire(
+        self: &Arc<Self>,
+        port: u16,
+        limit: usize,
+    ) -> Result<ServerPermit, ConcurrencyError> {
+        let mut map = self.inflight.lock().unwrap();
+        let current = map.entry(port).or_insert(0);
+        if *current >= limit {
+            return Err(ConcurrencyError::LimitExceeded {
+                port,
+                current: *current,
+                limit,
+            });
+        }
+        *current += 1;
+        Ok(ServerPermit {
+            port,
+            manager: Arc::clone(self),
+        })
+    }
+}
+
+pub static CONCURRENCY_MANAGER: LazyLock<Arc<ServerConcurrencyManager>> =
+    LazyLock::new(|| Arc::new(ServerConcurrencyManager::new()));
+
+pub fn acquire_server_permit(
+    state: &Arc<AppState>,
+    port: u16,
+    request_id: &str,
+) -> Result<ServerPermit, ApiError> {
+    let (status, parallel) = {
+        let servers = state.servers.lock().unwrap();
+        let server = servers.values().find(|s| s.def.port == port);
+        match server {
+            Some(s) => (s.status, s.def.parallel),
+            None => (ServerStatus::Stopped, 0),
+        }
+    };
+
+    if status == ServerStatus::Starting {
+        let mut err = ApiError::service_unavailable(format!(
+            "Server on port {port} is still starting. Please retry in a few seconds."
+        ));
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+    if status != ServerStatus::Running {
+        let mut err = ApiError::service_unavailable(format!(
+            "Server on port {port} is not running (status: {status:?})."
+        ));
+        err.request_id = Some(request_id.to_string());
+        return Err(err);
+    }
+
+    let limit = if parallel > 0 {
+        parallel
+    } else {
+        DEFAULT_SERVER_CONCURRENCY
+    };
+
+    CONCURRENCY_MANAGER.try_acquire(port, limit).map_err(|e| match e {
+        ConcurrencyError::LimitExceeded { port, current, limit } => {
+            let mut err = ApiError::rate_limited(
+                format!("Server on port {port} concurrency limit reached ({current}/{limit} active requests). Please retry after a moment."),
+                Some("1".to_string()),
+            );
+            err.request_id = Some(request_id.to_string());
+            err
+        }
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", content = "details")]
+pub enum SupervisorState {
+    Stopped,
+    Running { port: u16 },
+    PortConflict { port: u16, error: String },
+    TransientError { port: u16, error: String, retry_in_secs: u64 },
+}
+
+static SUPERVISOR_STATE: LazyLock<std::sync::Mutex<SupervisorState>> =
+    LazyLock::new(|| std::sync::Mutex::new(SupervisorState::Stopped));
+
+pub fn get_supervisor_state() -> SupervisorState {
+    SUPERVISOR_STATE.lock().unwrap().clone()
+}
+
+pub fn set_supervisor_state(s: SupervisorState) {
+    *SUPERVISOR_STATE.lock().unwrap() = s;
+}
+
+pub fn is_port_conflict(port: u16) -> bool {
+    matches!(*SUPERVISOR_STATE.lock().unwrap(), SupervisorState::PortConflict { port: p, .. } if p == port)
+}
+
+pub fn verify_gateway_health(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(300)));
+    let req = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if std::io::Write::write_all(&mut stream, req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut resp = Vec::new();
+    let mut buf = [0u8; 1024];
+    while let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
+        if n == 0 {
+            break;
+        }
+        resp.extend_from_slice(&buf[..n]);
+        if resp.len() >= 2048 {
+            break;
+        }
+    }
+    let resp_str = String::from_utf8_lossy(&resp);
+    resp_str.contains("200 OK")
+        && (resp_str.contains("llm-panel-gateway") || resp_str.contains("x-gateway-service: llm-panel-gateway"))
 }
 
 /// Bind the gateway on `port` and serve until aborted. Returns a join handle
@@ -4973,8 +5497,12 @@ pub fn start_gateway(state: Arc<AppState>, port: u16) -> tokio::task::JoinHandle
 pub fn spawn_supervisor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut running: Option<(u16, tokio::task::JoinHandle<()>)> = None;
+        let mut last_attempted_port: Option<u16> = None;
+        let mut transient_backoff_secs: u64 = 1;
+        let mut next_retry_at: Option<std::time::Instant> = None;
+
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let state: tauri::State<Arc<AppState>> = app.state();
             let cfg = state.config();
             let wanted = (cfg.advanced_settings.gateway_enabled
@@ -4985,18 +5513,99 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
                     .map(str::trim)
                     .is_some_and(|key| !key.is_empty()))
             .then_some(cfg.advanced_settings.gateway_port);
+
             if let Some(port) = wanted {
-                let stale = matches!(&running, Some((p, h)) if *p != port || h.is_finished());
-                if stale {
+                // If config changed to a different port, reset conflict and backoff
+                if last_attempted_port != Some(port) {
+                    last_attempted_port = Some(port);
+                    transient_backoff_secs = 1;
+                    next_retry_at = None;
                     if let Some((_, h)) = running.take() {
                         h.abort();
                     }
+                    set_supervisor_state(SupervisorState::Stopped);
                 }
+
+                // If currently running, check if task finished unexpectedly or port changed
+                let is_running_stale = matches!(&running, Some((p, h)) if *p != port || h.is_finished());
+                if is_running_stale {
+                    if let Some((_, h)) = running.take() {
+                        h.abort();
+                    }
+                    set_supervisor_state(SupervisorState::Stopped);
+                }
+
                 if running.is_none() {
-                    running = Some((port, start_gateway(Arc::clone(&state), port)));
+                    // Check if in PortConflict: do not retry until config change or explicit reset
+                    if is_port_conflict(port) {
+                        continue;
+                    }
+
+                    // Check if in transient backoff delay
+                    if let Some(retry_time) = next_retry_at {
+                        if std::time::Instant::now() < retry_time {
+                            continue;
+                        }
+                    }
+
+                    // Attempt bind
+                    match TcpListener::bind(("127.0.0.1", port)).await {
+                        Ok(listener) => {
+                            eprintln!("[gateway] OpenAI-compatible gateway listening on 127.0.0.1:{port}");
+                            set_supervisor_state(SupervisorState::Running { port });
+                            transient_backoff_secs = 1;
+                            next_retry_at = None;
+
+                            let st = Arc::clone(&state);
+                            let handle = tokio::spawn(async move {
+                                loop {
+                                    match listener.accept().await {
+                                        Ok((stream, _peer)) => {
+                                            let st_conn = Arc::clone(&st);
+                                            tokio::spawn(handle_connection(stream, st_conn));
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[gateway] accept error: {e}");
+                                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                        }
+                                    }
+                                }
+                            });
+                            running = Some((port, handle));
+                        }
+                        Err(e) => {
+                            let is_conflict = e.kind() == std::io::ErrorKind::AddrInUse
+                                || e.raw_os_error() == Some(10048)
+                                || e.raw_os_error() == Some(98);
+
+                            if is_conflict {
+                                eprintln!("[gateway] port conflict on {port}: {e}. Halting retries until port or config changes.");
+                                set_supervisor_state(SupervisorState::PortConflict {
+                                    port,
+                                    error: e.to_string(),
+                                });
+                                next_retry_at = None;
+                            } else {
+                                eprintln!("[gateway] failed to bind {port}: {e}. Backing off for {transient_backoff_secs}s");
+                                set_supervisor_state(SupervisorState::TransientError {
+                                    port,
+                                    error: e.to_string(),
+                                    retry_in_secs: transient_backoff_secs,
+                                });
+                                next_retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(transient_backoff_secs));
+                                transient_backoff_secs = (transient_backoff_secs * 2).min(30);
+                            }
+                        }
+                    }
                 }
-            } else if let Some((_, h)) = running.take() {
-                h.abort();
+            } else {
+                last_attempted_port = None;
+                transient_backoff_secs = 1;
+                next_retry_at = None;
+                if let Some((_, h)) = running.take() {
+                    h.abort();
+                }
+                set_supervisor_state(SupervisorState::Stopped);
             }
         }
     });
@@ -6417,8 +7026,8 @@ mod tests {
             Some(vec!["low".to_string(), "high".to_string()])
         );
         assert_eq!(info.default_effort, Some("high".to_string()));
-        assert_eq!(info.is_reasoning, true);
-        assert_eq!(info.is_toggle_only, false);
+        assert!(info.is_reasoning);
+        assert!(!info.is_toggle_only);
 
         let mut def = running_map().remove("srv-a").unwrap().def;
         def.name = "Spark-X2.6-4B-Q4_K_M".into();
@@ -6773,7 +7382,7 @@ mod tests {
         });
         let (model, chat_req, stream) = responses_request_to_chat_completions(&input_text).unwrap();
         assert_eq!(model, "qwen2.5-coder");
-        assert_eq!(stream, false);
+        assert!(!stream);
         assert_eq!(chat_req["max_tokens"], 100);
         assert_eq!(chat_req["temperature"], 0.7);
         let msgs = chat_req["messages"].as_array().unwrap();
@@ -6792,7 +7401,7 @@ mod tests {
         });
         let (_, chat_req_stream, stream_flag) =
             responses_request_to_chat_completions(&input_msgs).unwrap();
-        assert_eq!(stream_flag, true);
+        assert!(stream_flag);
         assert_eq!(chat_req_stream["stream"], true);
         assert_eq!(chat_req_stream["stream_options"]["include_usage"], true);
 
@@ -7092,5 +7701,701 @@ mod tests {
         assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
         assert!(resp_str.contains("x-request-id: test-client-req-01"));
         assert!(resp_str.contains("mock response from local upstream"));
+    }
+
+    #[test]
+    fn test_route_server_exact_match_wins_over_fuzzy() {
+        let mut servers = BTreeMap::new();
+        let mut s1 = live_server("srv1", "qwen2.5-7b", Some("qwen"), 8001, "instruct", ServerStatus::Running);
+        s1.def.max_model_len = Some(4096);
+        let mut s2 = live_server("srv2", "qwen-7b", None, 8002, "instruct", ServerStatus::Running);
+        s2.def.max_model_len = Some(4096);
+        servers.insert("srv1".into(), s1);
+        servers.insert("srv2".into(), s2);
+
+        // "qwen" is an exact match for srv1 (served_model_name) and a prefix/fuzzy match for srv2 ("qwen-7b").
+        // Exact match MUST win over fuzzy.
+        let port = route_server_for(&servers, "qwen", "instruct").unwrap();
+        assert_eq!(port, 8001);
+    }
+
+    #[test]
+    fn test_route_server_multiple_fuzzy_matches_returns_ambiguous_error() {
+        let mut servers = BTreeMap::new();
+        let mut s1 = live_server("srv1", "Qwen/Qwen2.5-7B-Instruct", Some("qwen2.5-7b"), 8001, "instruct", ServerStatus::Running);
+        s1.def.max_model_len = Some(4096);
+        let mut s2 = live_server("srv2", "Qwen/Qwen2.5-14B-Instruct", Some("qwen2.5-14b"), 8002, "instruct", ServerStatus::Running);
+        s2.def.max_model_len = Some(4096);
+        servers.insert("srv1".into(), s1);
+        servers.insert("srv2".into(), s2);
+
+        // "qwen" matches both srv1 and srv2 fuzzily.
+        let err = route_server_for(&servers, "qwen", "instruct").unwrap_err();
+        match err {
+            ModelRouteError::Ambiguous { requested, candidates } => {
+                assert_eq!(requested, "qwen");
+                assert_eq!(candidates, vec!["qwen2.5-14b", "qwen2.5-7b"]);
+            }
+            _ => panic!("Expected Ambiguous error, got {err:?}"),
+        }
+
+        // Wildcard with multiple servers must also return Ambiguous
+        let wildcard_err = route_server_for(&servers, "*", "instruct").unwrap_err();
+        assert!(matches!(wildcard_err, ModelRouteError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn test_concurrency_policy_limit_enforced() {
+        let manager = Arc::new(ServerConcurrencyManager::new());
+        let port = 9050;
+        assert_eq!(manager.current_inflight(port), 0);
+
+        let permit1 = manager.try_acquire(port, 2).expect("first acquire succeeds");
+        assert_eq!(manager.current_inflight(port), 1);
+
+        let permit2 = manager.try_acquire(port, 2).expect("second acquire succeeds");
+        assert_eq!(manager.current_inflight(port), 2);
+
+        // Third acquire exceeds limit 2
+        let err = manager.try_acquire(port, 2);
+        assert!(matches!(err, Err(ConcurrencyError::LimitExceeded { port: 9050, current: 2, limit: 2 })));
+
+        // Dropping one permit frees a slot
+        drop(permit1);
+        assert_eq!(manager.current_inflight(port), 1);
+
+        let permit3 = manager.try_acquire(port, 2).expect("third acquire succeeds after drop");
+        assert_eq!(manager.current_inflight(port), 2);
+        drop(permit2);
+        drop(permit3);
+        assert_eq!(manager.current_inflight(port), 0);
+    }
+
+    #[test]
+    fn test_port_conflict_state_and_identity_verification() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // 1. Verify foreign service fails identity check (on dedicated thread)
+        let foreign_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let foreign_port = foreign_listener.local_addr().unwrap().port();
+        let handle1 = std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = foreign_listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf);
+                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
+                let _ = socket.write_all(resp.as_bytes());
+            }
+        });
+        assert!(!verify_gateway_health(foreign_port));
+        let _ = handle1.join();
+
+        // 2. Verify authentic gateway passes identity check
+        let gw_mock_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let gw_mock_port = gw_mock_listener.local_addr().unwrap().port();
+        let handle2 = std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = gw_mock_listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf);
+                let body = r#"{"status":"ok","service":"llm-panel-gateway"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Gateway-Service: llm-panel-gateway\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes());
+            }
+        });
+        assert!(verify_gateway_health(gw_mock_port));
+        let _ = handle2.join();
+
+        // 3. Verify supervisor PortConflict state tracking
+        set_supervisor_state(SupervisorState::PortConflict {
+            port: 11434,
+            error: "Address already in use".into(),
+        });
+        assert!(is_port_conflict(11434));
+        assert!(!is_port_conflict(11435));
+        set_supervisor_state(SupervisorState::Stopped);
+        assert!(!is_port_conflict(11434));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_streaming_chat() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mock_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = mock_upstream.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = mock_upstream.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let chunk1 = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n";
+                    let chunk2 = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n";
+                    let chunk3 = "data: [DONE]\n\n";
+                    let sse_stream = format!("{chunk1}{chunk2}{chunk3}");
+                    let http_resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                        sse_stream.len(),
+                        sse_stream
+                    );
+                    let _ = socket.write_all(http_resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        });
+
+        let mut servers = BTreeMap::new();
+        let mut srv = live_server("stream-srv", "stream-model", None, upstream_port, "instruct", ServerStatus::Running);
+        srv.def.max_model_len = Some(4096);
+        servers.insert("stream-srv".into(), srv);
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let (stream, _) = gateway_listener.accept().await.unwrap();
+            handle_connection(stream, state_clone).await;
+        });
+
+        let req_body = serde_json::json!({
+            "model": "stream-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        })
+        .to_string();
+
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut resp_buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = client.read(&mut tmp).await.unwrap();
+            if n == 0 { break; }
+            resp_buf.extend_from_slice(&tmp[..n]);
+        }
+        let resp_str = String::from_utf8_lossy(&resp_buf);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("text/event-stream"));
+        assert!(resp_str.contains("Hello"));
+        assert!(resp_str.contains("world"));
+        assert!(resp_str.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_tool_calling_and_structured_output() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mock_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = mock_upstream.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = mock_upstream.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    let _req_text = String::from_utf8_lossy(&buf[..n]);
+
+                    let resp_body = serde_json::json!({
+                        "id": "chatcmpl-tools",
+                        "object": "chat.completion",
+                        "created": 1700000000,
+                        "model": "tool-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_weather123",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "get_weather",
+                                                "arguments": "{\"location\": \"Boston, MA\"}"
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25}
+                    })
+                    .to_string();
+
+                    let http_resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = socket.write_all(http_resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        });
+
+        let mut servers = BTreeMap::new();
+        let mut srv = live_server("tool-srv", "tool-model", None, upstream_port, "instruct", ServerStatus::Running);
+        srv.def.max_model_len = Some(4096);
+        servers.insert("tool-srv".into(), srv);
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let (stream, _) = gateway_listener.accept().await.unwrap();
+            handle_connection(stream, state_clone).await;
+        });
+
+        let req_body = serde_json::json!({
+            "model": "tool-model",
+            "messages": [{"role": "user", "content": "what is the weather in Boston?"}],
+            "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            "response_format": {"type": "json_object"}
+        })
+        .to_string();
+
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut resp_buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = client.read(&mut tmp).await.unwrap();
+            if n == 0 { break; }
+            resp_buf.extend_from_slice(&tmp[..n]);
+        }
+        let resp_str = String::from_utf8_lossy(&resp_buf);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("call_weather123"));
+        assert!(resp_str.contains("get_weather"));
+        assert!(resp_str.contains("Boston, MA"));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_system_prompt_normalization() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mock_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = mock_upstream.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = mock_upstream.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    let req_text = String::from_utf8_lossy(&buf[..n]);
+                    // Verify developer role was normalized to system
+                    assert!(req_text.contains(r#"role":"system"#));
+                    assert!(!req_text.contains(r#"role":"developer"#));
+
+                    let resp_body = serde_json::json!({
+                        "id": "chatcmpl-sys",
+                        "object": "chat.completion",
+                        "created": 1700000000,
+                        "model": "sys-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "I am system-instructed."},
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+                    })
+                    .to_string();
+
+                    let http_resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = socket.write_all(http_resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        });
+
+        let mut servers = BTreeMap::new();
+        let mut srv = live_server("sys-srv", "sys-model", None, upstream_port, "instruct", ServerStatus::Running);
+        srv.def.max_model_len = Some(4096);
+        servers.insert("sys-srv".into(), srv);
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let (stream, _) = gateway_listener.accept().await.unwrap();
+            handle_connection(stream, state_clone).await;
+        });
+
+        let req_body = serde_json::json!({
+            "model": "sys-model",
+            "messages": [
+                {"role": "developer", "content": "Follow system directives precisely."},
+                {"role": "user", "content": "Hello"}
+            ]
+        })
+        .to_string();
+
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut resp_buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = client.read(&mut tmp).await.unwrap();
+            if n == 0 { break; }
+            resp_buf.extend_from_slice(&tmp[..n]);
+        }
+        let resp_str = String::from_utf8_lossy(&resp_buf);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("I am system-instructed."));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_responses_tool_call_streaming_lifecycle() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mock_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = mock_upstream.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = mock_upstream.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+
+                    // Stream tool call chunks from upstream chat completions
+                    let c1 = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_calc_99\",\"type\":\"function\",\"function\":{\"name\":\"calculate\",\"arguments\":\"\"}}]}}]}\n\n";
+                    let c2 = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"expr\\\":\\\"40 + 2\\\"}\"}}]}}]}\n\n";
+                    let c3 = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+                    let c4 = "data: [DONE]\n\n";
+
+                    let sse_stream = format!("{c1}{c2}{c3}{c4}");
+                    let http_resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                        sse_stream.len(),
+                        sse_stream
+                    );
+                    let _ = socket.write_all(http_resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        });
+
+        let mut servers = BTreeMap::new();
+        let mut srv = live_server("resp-srv", "resp-model", None, upstream_port, "instruct", ServerStatus::Running);
+        srv.def.max_model_len = Some(4096);
+        servers.insert("resp-srv".into(), srv);
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let (stream, _) = gateway_listener.accept().await.unwrap();
+            handle_connection(stream, state_clone).await;
+        });
+
+        let req_body = serde_json::json!({
+            "model": "resp-model",
+            "input": "compute 40 + 2",
+            "tools": [{"type": "function", "name": "calculate", "description": "calc"}],
+            "stream": true
+        })
+        .to_string();
+
+        let req = format!(
+            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut resp_buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = client.read(&mut tmp).await.unwrap();
+            if n == 0 { break; }
+            resp_buf.extend_from_slice(&tmp[..n]);
+        }
+        let resp_str = String::from_utf8_lossy(&resp_buf);
+
+        // Verify Responses API tool call streaming event lifecycle:
+        assert!(resp_str.contains("event: response.created"));
+        assert!(resp_str.contains("event: response.output_item.added"));
+        assert!(resp_str.contains(r#""type":"function_call""#));
+        assert!(resp_str.contains("call_calc_99"));
+        assert!(resp_str.contains("calculate"));
+        assert!(resp_str.contains("event: response.function_call_arguments.delta"));
+        assert!(resp_str.contains("event: response.function_call_arguments.done"));
+        assert!(resp_str.contains("event: response.output_item.done"));
+        assert!(resp_str.contains("event: response.completed"));
+        assert!(resp_str.contains("40 + 2"));
+        assert!(resp_str.contains("expr"));
+        assert!(resp_str.contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_auth_rejection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        state.config.lock().unwrap().advanced_settings.api_key = Some("correct-secret".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = gateway_listener.accept().await {
+                    let st = Arc::clone(&state_clone);
+                    tokio::spawn(handle_connection(stream, st));
+                }
+            }
+        });
+
+        // 1. Missing Authorization header
+        let req1 = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client1.write_all(req1.as_bytes()).await.unwrap();
+        let mut resp1 = String::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = client1.read(&mut buf).await {
+            if n == 0 { break; }
+            resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp1.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(resp1.contains("Missing Authorization header"));
+
+        // 2. Invalid API key
+        let req2 = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer wrong-key\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client2.write_all(req2.as_bytes()).await.unwrap();
+        let mut resp2 = String::new();
+        while let Ok(n) = client2.read(&mut buf).await {
+            if n == 0 { break; }
+            resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp2.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(resp2.contains("Invalid API key"));
+
+        // 3. Wrong authorization scheme (Basic instead of Bearer)
+        let req3 = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        let mut client3 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client3.write_all(req3.as_bytes()).await.unwrap();
+        let mut resp3 = String::new();
+        while let Ok(n) = client3.read(&mut buf).await {
+            if n == 0 { break; }
+            resp3.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp3.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(resp3.contains("Authorization header must use Bearer scheme"));
+
+        // 4. Gateway key not configured at all in settings -> 503
+        state.config.lock().unwrap().advanced_settings.api_key = None;
+        let req4 = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer some-key\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        let mut client4 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client4.write_all(req4.as_bytes()).await.unwrap();
+        let mut resp4 = String::new();
+        while let Ok(n) = client4.read(&mut buf).await {
+            if n == 0 { break; }
+            resp4.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp4.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(resp4.contains("Gateway API key is not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_cors_handling() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = gateway_listener.accept().await {
+                    let st = Arc::clone(&state_clone);
+                    tokio::spawn(handle_connection(stream, st));
+                }
+            }
+        });
+
+        // 1. OPTIONS preflight with allowed local origin
+        let preflight = format!(
+            "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nOrigin: http://localhost:3000\r\nConnection: close\r\n\r\n"
+        );
+        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client1.write_all(preflight.as_bytes()).await.unwrap();
+        let mut resp1 = String::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = client1.read(&mut buf).await {
+            if n == 0 { break; }
+            resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp1.starts_with("HTTP/1.1 204 No Content"));
+        assert!(resp1.to_lowercase().contains("access-control-allow-origin: http://localhost:3000"));
+        assert!(resp1.to_lowercase().contains("access-control-allow-methods: get, post, options"));
+        assert!(resp1.to_lowercase().contains("authorization"));
+
+        // 2. OPTIONS preflight with untrusted external origin
+        let untrusted = format!(
+            "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nOrigin: https://evil.attacker.com\r\nConnection: close\r\n\r\n"
+        );
+        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client2.write_all(untrusted.as_bytes()).await.unwrap();
+        let mut resp2 = String::new();
+        while let Ok(n) = client2.read(&mut buf).await {
+            if n == 0 { break; }
+            resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp2.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(resp2.contains("origin not allowed"));
+        assert!(!resp2.to_lowercase().contains("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn test_conformance_model_routing_and_concurrency_http_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mut servers = BTreeMap::new();
+        let mut s_a = live_server("srv-a", "Qwen/Qwen2.5-7B", Some("qwen2.5-7b"), 8010, "instruct", ServerStatus::Running);
+        s_a.def.max_model_len = Some(4096);
+        let mut s_b = live_server("srv-b", "Qwen/Qwen2.5-14B", Some("qwen2.5-14b"), 8011, "instruct", ServerStatus::Running);
+        s_b.def.max_model_len = Some(4096);
+        let mut s_starting = live_server("srv-starting", "meta-llama/Llama-3-8B", Some("llama-3-8b"), 8012, "instruct", ServerStatus::Starting);
+        s_starting.def.max_model_len = Some(4096);
+
+        servers.insert("srv-a".into(), s_a);
+        servers.insert("srv-b".into(), s_b);
+        servers.insert("srv-starting".into(), s_starting);
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = gateway_listener.accept().await {
+                    let st = Arc::clone(&state_clone);
+                    tokio::spawn(handle_connection(stream, st));
+                }
+            }
+        });
+
+        // 1. Ambiguous fuzzy model request returns HTTP 400 Bad Request with candidate list
+        let req_ambiguous = serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hi"}]
+        }).to_string();
+        let req1 = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_ambiguous.len(),
+            req_ambiguous
+        );
+        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client1.write_all(req1.as_bytes()).await.unwrap();
+        let mut resp1 = String::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = client1.read(&mut buf).await {
+            if n == 0 { break; }
+            resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp1.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(resp1.contains("ambiguous_model"));
+        assert!(resp1.contains("qwen2.5-7b"));
+        assert!(resp1.contains("qwen2.5-14b"));
+
+        // 2. Starting server returns HTTP 503 Service Unavailable
+        let req_starting = serde_json::json!({
+            "model": "llama-3-8b",
+            "messages": [{"role": "user", "content": "hi"}]
+        }).to_string();
+        let req2 = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            req_starting.len(),
+            req_starting
+        );
+        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        client2.write_all(req2.as_bytes()).await.unwrap();
+        let mut resp2 = String::new();
+        while let Ok(n) = client2.read(&mut buf).await {
+            if n == 0 { break; }
+            resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp2.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(resp2.contains("is still starting"));
     }
 }
