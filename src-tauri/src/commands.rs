@@ -786,11 +786,7 @@ fn hardware_profile(state: &AppState) -> Option<HardwareProfile> {
     } else {
         state.resolve_distro()
     };
-    let (ram_total_mb, ram_avail_mb) = if crate::wsl::is_running(&distro) {
-        crate::wsl::detect_wsl_memory(&distro)
-    } else {
-        (16_384, 12_288)
-    };
+    let (ram_total_mb, ram_avail_mb) = crate::wsl::detect_wsl_memory(&distro).unwrap_or((0, 0));
     let potential_ram = if let Some(manual) = mem.manual_ram_limit_mb {
         manual
     } else {
@@ -3520,11 +3516,7 @@ pub fn get_system_memory_impl(st: &AppState) -> SystemMemoryInfo {
     } else {
         st.resolve_distro()
     };
-    let (wsl_total_mb, wsl_available_mb) = if crate::wsl::is_running(&distro) {
-        crate::wsl::detect_wsl_memory(&distro)
-    } else {
-        (16_384, 12_288)
-    };
+    let (wsl_total_mb, wsl_available_mb) = crate::wsl::detect_wsl_memory(&distro).unwrap_or((0, 0));
     let mem = &cfg.memory_settings;
     let usable_budget_mb = if !mem.enable_ram_overflow {
         0

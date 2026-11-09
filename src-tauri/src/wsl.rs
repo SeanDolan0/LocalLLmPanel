@@ -486,9 +486,26 @@ pub fn try_detect_wsl_memory(distro: &str) -> Option<(u64, u64)> {
 }
 
 /// Detect total and available memory in WSL2 (in MB).
-/// Falls back to 16GB total / 12GB available on failure. Never panics.
-pub fn detect_wsl_memory(distro: &str) -> (u64, u64) {
-    try_detect_wsl_memory(distro).unwrap_or((16_384, 12_288))
+/// Preserves Option<(u64, u64)>: returns measured memory if WSL is running,
+/// or falls back to host estimation (Windows physical RAM and .wslconfig) if WSL is stopped.
+/// Returns None when memory is genuinely unknown so caller (and fit.rs) know RAM overflow is disabled.
+pub fn detect_wsl_memory(distro: &str) -> Option<(u64, u64)> {
+    if let Some(mem) = try_detect_wsl_memory(distro) {
+        return Some(mem);
+    }
+    // WSL is stopped or meminfo query failed; fall back to host-derived estimation
+    let windows_ram_mb = {
+        let specs = crate::llmfit_adapter::get_system_specs();
+        if specs.total_ram_gb > 0.0 {
+            Some((specs.total_ram_gb * 1024.0).round() as u64)
+        } else {
+            None
+        }
+    };
+    let wslconfig_content = dirs::home_dir()
+        .map(|h| h.join(".wslconfig"))
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    crate::estimate::estimate_wsl_memory_from_host(windows_ram_mb, wslconfig_content.as_deref())
 }
 
 /// Result of a synchronous WSL script run.
@@ -1031,28 +1048,51 @@ impl Drop for WslChild {
     }
 }
 
-/// Query the primary GPU's name, total VRAM (MB), free VRAM (MB), and utilization (%) via nvidia-smi inside WSL.
-pub fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
+/// Parse CSV output from `nvidia-smi --query-gpu=name,memory.total,memory.free,utilization.gpu`
+/// into a list of GpuSnapshot items, one per line.
+pub fn parse_gpu_snapshots(text: &str) -> Vec<GpuSnapshot> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let mut it = line.split(',');
+            let name = it.next()?.trim().to_string();
+            let total = it.next()?.trim().parse::<u64>().ok()?;
+            let free = it.next()?.trim().parse::<u64>().ok()?;
+            let util = it.next()?.trim().parse::<u32>().ok().unwrap_or(0);
+            Some(GpuSnapshot {
+                name,
+                vram_total_mb: total,
+                vram_free_mb: free,
+                util_percent: util,
+            })
+        })
+        .collect()
+}
+
+/// Query all GPUs in WSL via nvidia-smi without truncating to the first GPU (XREQ-02).
+pub fn gpu_snapshots(distro: &str) -> Vec<GpuSnapshot> {
     let out = run_script(
         distro,
-        "nvidia-smi --query-gpu=name,memory.total,memory.free,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1",
+        "nvidia-smi --query-gpu=name,memory.total,memory.free,utilization.gpu --format=csv,noheader,nounits 2>/dev/null",
     );
-    let line = out.stdout.trim();
-    if line.is_empty() {
-        return None;
-    }
-    // "NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12227, 8456, 12"
-    let mut it = line.split(',');
-    let name = it.next()?.trim().to_string();
-    let total = it.next()?.trim().parse::<u64>().ok()?;
-    let free = it.next()?.trim().parse::<u64>().ok()?;
-    let util = it.next()?.trim().parse::<u32>().ok().unwrap_or(0);
-    Some(GpuSnapshot {
-        name,
-        vram_total_mb: total,
-        vram_free_mb: free,
-        util_percent: util,
-    })
+    parse_gpu_snapshots(&out.stdout)
+}
+
+/// Query the primary GPU's name, total VRAM (MB), free VRAM (MB), and utilization (%) via nvidia-smi inside WSL.
+pub fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
+    gpu_snapshots(distro).into_iter().next()
+}
+
+/// Query all enumerated NVIDIA GPU devices inside WSL with compute capability and index (XREQ-02).
+pub fn wsl_gpu_devices(distro: &str) -> Vec<crate::llamacpp_install::NvidiaGpuDevice> {
+    let out = run_script(
+        distro,
+        "nvidia-smi --query-gpu=index,name,memory.total,memory.free,compute_cap,utilization.gpu --format=csv,noheader,nounits 2>/dev/null",
+    );
+    crate::llamacpp_install::parse_nvidia_gpus(&out.stdout)
 }
 
 #[cfg(test)]
@@ -1116,17 +1156,37 @@ mod tests {
 
     #[test]
     fn test_detect_wsl_memory_nonexistent_distro_fallback() {
-        let (total_mb, avail_mb) = detect_wsl_memory("__nonexistent_distro_test_xyz__");
-        assert_eq!(total_mb, 16384);
-        assert_eq!(avail_mb, 12288);
+        let res = detect_wsl_memory("__nonexistent_distro_test_xyz__");
+        // On a machine with physical RAM, it should estimate from host
+        if let Some((total_mb, avail_mb)) = res {
+            assert!(total_mb > 0);
+            assert!(avail_mb > 0);
+        }
     }
 
     #[test]
     fn test_detect_wsl_memory_empty_distro() {
-        // Empty distro queries default distro or returns fallback; must never panic
-        let (total_mb, avail_mb) = detect_wsl_memory("");
-        assert!(total_mb > 0);
-        assert!(avail_mb > 0);
+        let res = detect_wsl_memory("");
+        if let Some((total_mb, avail_mb)) = res {
+            assert!(total_mb > 0);
+            assert!(avail_mb > 0);
+        }
+    }
+
+    #[test]
+    fn test_parse_gpu_snapshots_multi_gpu() {
+        let sample = "NVIDIA GeForce RTX 4090, 24576, 20480, 15\nNVIDIA GeForce RTX 4080, 16384, 14000, 5\n";
+        let snaps = parse_gpu_snapshots(sample);
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(snaps[0].vram_total_mb, 24576);
+        assert_eq!(snaps[0].vram_free_mb, 20480);
+        assert_eq!(snaps[0].util_percent, 15);
+
+        assert_eq!(snaps[1].name, "NVIDIA GeForce RTX 4080");
+        assert_eq!(snaps[1].vram_total_mb, 16384);
+        assert_eq!(snaps[1].vram_free_mb, 14000);
+        assert_eq!(snaps[1].util_percent, 5);
     }
 
     #[test]
