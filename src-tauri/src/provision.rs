@@ -243,25 +243,29 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
         on_log("sudo", "passwordless sudo already configured (skipping).");
         return Ok("sudo".into());
     }
-    on_log("sudo", "configuring passwordless sudo via root…");
+    on_log("sudo", "configuring scoped passwordless sudo via root…");
     let script = r#"
         u="$(id -un)"
-        echo "$u ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-llm-lp
-        chmod 0440 /etc/sudoers.d/99-llm-lp
+        echo "$u ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt" > /etc/sudoers.d/llm-panel-sudoers
+        chmod 0440 /etc/sudoers.d/llm-panel-sudoers
+        rm -f /etc/sudoers.d/99-llm-lp
     "#;
     let out = wsl::run_script_root(distro, script);
     if !out.ok {
-        bail!("failed to configure passwordless sudo via root: {}", out.combined());
+        bail!("failed to configure scoped passwordless sudo via root: {}", out.combined());
     }
     if !sudo_nopasswd_ok(distro) {
-        bail!("passwordless sudo configured, but verify failed");
+        bail!("scoped passwordless sudo configured, but verify failed");
     }
-    on_log("sudo", "passwordless sudo active.");
+    on_log("sudo", "scoped passwordless sudo active.");
     Ok("sudo".into())
 }
 
 fn sudo_nopasswd_ok(distro: &str) -> bool {
-    let out = wsl::run_script(distro, "sudo -n true 2>/dev/null && echo ok || echo fail");
+    let out = wsl::run_script(
+        distro,
+        "sudo -n apt-get -v 2>/dev/null && echo ok || (sudo -n true 2>/dev/null && echo ok || echo fail)",
+    );
     out.stdout.trim() == "ok"
 }
 

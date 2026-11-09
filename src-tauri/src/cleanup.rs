@@ -205,7 +205,7 @@ pub fn inspect_cleanup(state: &AppState) -> CleanupPlan {
     // 6. Sudoers Rule inside WSL (/etc/sudoers.d/llm-panel-*)
     let mut sudoers_exists = false;
     if distro_exists {
-        let check = wsl::run_script_root(&distro, "ls /etc/sudoers.d/llm-panel-* 2>/dev/null && echo found");
+        let check = wsl::run_script_root(&distro, "ls /etc/sudoers.d/llm-panel-* /etc/sudoers.d/99-llm-lp 2>/dev/null && echo found");
         if check.ok && check.stdout.contains("found") {
             sudoers_exists = true;
         }
@@ -312,7 +312,7 @@ pub fn execute_cleanup(
         let mut ok = true;
         let mut msg = "Sudoers rule removed".to_string();
         if distro_exists {
-            let out = wsl::run_script_root(&distro, "rm -f /etc/sudoers.d/llm-panel-* && echo ok");
+            let out = wsl::run_script_root(&distro, "rm -f /etc/sudoers.d/llm-panel-* /etc/sudoers.d/99-llm-lp && echo ok");
             if !out.ok || !out.stdout.contains("ok") {
                 ok = false;
                 msg = format!("Failed to remove sudoers rule: {}", out.combined());
