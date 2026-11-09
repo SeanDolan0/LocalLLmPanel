@@ -1,3 +1,5 @@
+import { StoragePlanner } from "../components/StoragePlanner";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -297,25 +299,24 @@ interface ErrorBannerProps {
   onSettingsClick?: () => void;
 }
 
-function ErrorBanner({ message, color, onSettingsClick }: ErrorBannerProps) {
+function ErrorBanner({ message, color: _color, onSettingsClick }: ErrorBannerProps) {
   const isRateLimit = message.includes("429") || message.toLowerCase().includes("rate limit");
-  const bgColor = color === "red" ? "bg-red-500/10" : "bg-amber-500/10";
-  const borderColor = color === "red" ? "border-red-500/40" : "border-amber-500/40";
-  const textColor = color === "red" ? "text-red-300" : "text-amber-300";
-  const btnBgColor = color === "red" ? "bg-red-500/20" : "bg-amber-500/20";
-  const btnTextColor = color === "red" ? "text-red-200" : "text-amber-200";
-  const btnHoverBgColor = color === "red" ? "bg-red-500/30" : "bg-amber-500/30";
-
   return (
-    <div className={`flex items-center justify-between rounded-lg border ${borderColor} ${bgColor} p-3 text-sm ${textColor}`}>
-      <span>{message}</span>
+    <div className="space-y-2">
+      <ErrorAlert
+        source="download"
+        error={message}
+        title={isRateLimit ? "Hugging Face Rate Limit Exceeded" : "Model Catalog & Download Error"}
+      />
       {isRateLimit && onSettingsClick && (
-        <button
-          onClick={onSettingsClick}
-          className={`ml-3 shrink-0 rounded ${btnBgColor} px-2.5 py-1 text-xs font-medium ${btnTextColor} hover:${btnHoverBgColor}`}
-        >
-          Open Settings
-        </button>
+        <div className="flex justify-end">
+          <button
+            onClick={onSettingsClick}
+            className="rounded bg-indigo-500/20 px-2.5 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/30 transition-colors"
+          >
+            Open Settings to add HF Token
+          </button>
+        </div>
       )}
     </div>
   );
@@ -1823,6 +1824,14 @@ function ModelDetailModal({
             ✕
           </button>
         </div>
+
+        {/* Storage Planning Preflight */}
+        <StoragePlanner
+          modelWeightGb={
+            allVariants[0]?.fit?.weight_gb ||
+            (model.params_b ? model.params_b * 0.75 : 6.0)
+          }
+        />
 
         {/* Model Meta Overview */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">

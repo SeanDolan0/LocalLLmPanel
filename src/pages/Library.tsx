@@ -1,3 +1,5 @@
+import { StoragePlanner } from "../components/StoragePlanner";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -159,8 +161,10 @@ export default function Library() {
                 Local cache: <span className="text-indigo-300 font-bold">{totalGb} GB</span> used across{" "}
                 <span className="text-slate-100 font-bold">{entries.length}</span> {entries.length === 1 ? "model" : "models"}
               </div>
-              <div className="text-xs text-slate-400 mt-0.5">
-                vLLM uses this cache directly when spinning up servers.
+              <div className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-2">
+                <span>vLLM uses this cache directly when spinning up servers.</span>
+                <span>·</span>
+                <StoragePlanner modelWeightGb={0} compact />
               </div>
             </div>
           </div>
@@ -414,9 +418,12 @@ export default function Library() {
                 </p>
               </div>
               {importError && (
-                <div className="rounded-md bg-red-950/50 border border-red-500/30 p-2.5 text-xs text-red-300">
-                  {importError}
-                </div>
+                <ErrorAlert
+                  source="download"
+                  error={importError}
+                  title="Local Model Import Error"
+                  onDismiss={() => setImportError(null)}
+                />
               )}
             </div>
 
@@ -480,9 +487,12 @@ export default function Library() {
             </div>
 
             {errorMsg && (
-              <div className="rounded-md bg-red-950/50 border border-red-500/30 p-2.5 text-xs text-red-300">
-                {errorMsg}
-              </div>
+              <ErrorAlert
+                source="server"
+                error={errorMsg}
+                title="Model Removal Error"
+                onDismiss={() => setErrorMsg(null)}
+              />
             )}
 
             <div className="flex items-center justify-end gap-3 pt-2">
