@@ -45,6 +45,9 @@ pub struct HardwareProfile {
 }
 
 impl HardwareProfile {
+    pub fn is_ram_known(&self) -> bool {
+        self.ram_total_mb > 0
+    }
     pub fn potential_ram_mb(&self) -> f64 {
         if self.ram_potential_mb > 0 {
             self.ram_potential_mb as f64
@@ -166,8 +169,9 @@ pub fn score_variant(
         _ => estimate::estimate_kv_bytes_per_token(params_b),
     };
     let target_context = max_context_cap.unwrap_or(arch.context).min(arch.context);
-    let active_ram = hw.ram_usable_mb as f64;
-    let potential_ram = hw.potential_ram_mb();
+    let ram_known = hw.is_ram_known();
+    let active_ram = if ram_known { hw.ram_usable_mb as f64 } else { 0.0 };
+    let potential_ram = if ram_known { hw.potential_ram_mb() } else { 0.0 };
 
     let tiered = estimate::context_fit_tiered(
         usable_vram_mb,
@@ -332,33 +336,51 @@ pub fn score_variant(
     };
 
     let reason = match run_mode {
-        RunMode::DoesNotFit => format!(
-            "Does not fit — needs ~{:.1} GB but GPU has {:.1} GB VRAM.",
-            weight_gb + vram_overhead_mb / 1024.0,
-            hw.vram_total_mb as f64 / 1024.0
-        ),
+        RunMode::DoesNotFit => {
+            if !ram_known && weight_gb * 1024.0 + vram_overhead_mb > usable_vram_mb {
+                format!(
+                    "Does not fit — estimated requirement ~{:.1} GB exceeds GPU VRAM of {:.1} GB (single-GPU estimate; RAM-overflow disabled because system RAM is unknown).",
+                    weight_gb + vram_overhead_mb / 1024.0,
+                    hw.vram_total_mb as f64 / 1024.0
+                )
+            } else {
+                format!(
+                    "Does not fit — estimated requirement ~{:.1} GB exceeds GPU VRAM of {:.1} GB (single-GPU estimate).",
+                    weight_gb + vram_overhead_mb / 1024.0,
+                    hw.vram_total_mb as f64 / 1024.0
+                )
+            }
+        }
         RunMode::GpuRamSwap => format!(
-            "GPU + RAM Swap ({vram_pct}% VRAM, {ram_pct}% RAM). {vram_room} context in VRAM extended to ~{ext_limit} via {} GB RAM swap.",
+            "GPU + RAM Swap ({vram_pct}% VRAM, {ram_pct}% RAM, single-GPU estimate). Estimated {vram_room} context in VRAM extended to ~{ext_limit} via ~{} GB estimated RAM swap buffer.",
             tiered.swap_space_gb
         ),
-        RunMode::CpuOffload => format!(
-            "CPU Offload ({vram_pct}% VRAM, {ram_pct}% RAM). Offloading {} GB weights to RAM; usable context ~{ext_limit}.",
+        RunMode::CpuOffload => format!( 
+            "CPU Offload ({vram_pct}% VRAM, {ram_pct}% RAM, single-GPU estimate). Offloading ~{} GB estimated weights to RAM; usable context estimated at ~{ext_limit}.",
             tiered.cpu_offload_gb
         ),
         RunMode::Gpu => match verdict {
             FitVerdict::Comfortable => format!(
-                "Comfortable fit ({vram_pct}% VRAM). Room for {vram_room} context and fast generation."
+                "Comfortable fit ({vram_pct}% VRAM, single-GPU estimate). Estimated room for {vram_room} context and fast generation."
             ),
             FitVerdict::Constrained => format!(
-                "Constrained fit ({vram_pct}% VRAM). Usable context limited to ~{vram_limit}."
+                "Constrained fit ({vram_pct}% VRAM, single-GPU estimate). Usable context estimated at ~{vram_limit}."
             ),
             FitVerdict::DoesNotFit => format!(
-                "Does not fit — needs ~{:.1} GB but GPU has {:.1} GB VRAM.",
+                "Does not fit — estimated requirement ~{:.1} GB exceeds GPU VRAM of {:.1} GB (single-GPU estimate).",
                 weight_gb + vram_overhead_mb / 1024.0,
                 hw.vram_total_mb as f64 / 1024.0
             ),
         },
     };
+
+    let mut notes = vec![reason.clone()];
+    notes.push(
+        "Note: Capacity and context figures are heuristic estimates (single-GPU estimate); actual runtime fit depends on framework overhead and dynamic allocation.".into(),
+    );
+    if !ram_known {
+        notes.push("System RAM is unknown: RAM-overflow fit is marked uncertain and disabled until memory capacity is detected.".into());
+    }
 
     FitResult {
         verdict,
@@ -383,7 +405,7 @@ pub fn score_variant(
         } else {
             "vLLM".into()
         }),
-        notes: vec![reason],
+        notes,
     }
 }
 
@@ -968,4 +990,41 @@ mod tests {
         let r = score_variant(&hw, &v, &arch, None, 0.92, 2500.0, true, None, None);
         assert_eq!(r.format_support, FormatSupport::Experimental);
     }
+
+    #[test]
+    fn test_fit_labels_estimates_and_single_gpu() {
+        let hw = hw_12gb();
+        let arch = arch_0_5b();
+        let var = variant("fp16", false);
+        let res = score_variant(&hw, &var, &arch, None, 0.92, 2500.0, true, None, None);
+
+        assert!(res.reason.contains("single-GPU estimate"));
+        assert!(res.reason.contains("Estimated room for"));
+        assert!(res.notes.iter().any(|n| n.contains("heuristic estimates (single-GPU estimate)")));
+    }
+
+    #[test]
+    fn test_fit_ram_unknown_disables_ram_overflow() {
+        let hw_unknown_ram = HardwareProfile {
+            gpu_name: "RTX 4060".into(),
+            vram_total_mb: 8192,
+            bandwidth_gbs: 272.0,
+            bandwidth_known: true,
+            ram_total_mb: 0,
+            ram_usable_mb: 0,
+            ram_potential_mb: 0,
+            ram_bandwidth_gbs: 65.0,
+        };
+        let mut arch = arch_14b();
+        arch.params_b = Some(70.0);
+        let var = variant("q4_k_m", true);
+        let res = score_variant(&hw_unknown_ram, &var, &arch, None, 0.92, 2500.0, true, None, None);
+
+        assert_eq!(res.run_mode, RunMode::DoesNotFit);
+        assert_eq!(res.swap_space_gb, 0);
+        assert_eq!(res.cpu_offload_gb, 0);
+        assert!(res.reason.contains("RAM-overflow disabled because system RAM is unknown"));
+        assert!(res.notes.iter().any(|n| n.contains("System RAM is unknown")));
+    }
+
 }
