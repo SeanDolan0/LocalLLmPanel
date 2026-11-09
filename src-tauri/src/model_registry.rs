@@ -31,7 +31,7 @@ pub struct ModelRegistryData {
 }
 
 pub struct ModelRegistry {
-    data: Mutex<ModelRegistryData>,
+    pub data: Mutex<ModelRegistryData>,
 }
 
 impl Default for ModelRegistry {
@@ -87,19 +87,32 @@ impl ModelRegistry {
             Err(_) => return false,
         };
         let lower = repo_or_model_id.to_ascii_lowercase();
+        let lower_norm = lower.replace("__", "/");
 
         for entry in guard.models.values() {
             let entry_id = entry.model_id.to_ascii_lowercase();
             let entry_repo = entry.repo_id.to_ascii_lowercase();
+            let entry_id_norm = entry_id.replace("__", "/");
+            let entry_repo_norm = entry_repo.replace("__", "/");
 
             let id_matches = entry_id == lower
                 || entry_repo == lower
+                || entry_id_norm == lower_norm
+                || entry_repo_norm == lower_norm
                 || entry_id.ends_with(&format!("/{lower}"))
-                || entry_repo.ends_with(&format!("/{lower}"));
+                || entry_repo.ends_with(&format!("/{lower}"))
+                || entry_id_norm.ends_with(&format!("/{lower_norm}"))
+                || entry_repo_norm.ends_with(&format!("/{lower_norm}"));
 
             if id_matches {
+                let entry_quant_lower = entry.quant.to_ascii_lowercase();
+                let entry_is_generic = entry_quant_lower.is_empty() || entry_quant_lower == "gguf";
+
                 if let Some(q) = quant {
-                    if entry.quant.eq_ignore_ascii_case(q) {
+                    let q_lower = q.to_ascii_lowercase();
+                    let q_is_generic = q_lower.is_empty() || q_lower == "gguf";
+
+                    if q_is_generic || entry_is_generic || entry_quant_lower == q_lower {
                         return true;
                     }
                 } else {
@@ -119,11 +132,36 @@ impl ModelRegistry {
         self.save_to_disk()
     }
 
-    pub fn unregister(&self, repo_id: &str, quant: &str) -> Result<(), String> {
-        let key = format!("{}:{}", repo_id, quant).to_ascii_lowercase();
+    pub fn unregister(&self, repo_or_model_id: &str, quant: &str) -> Result<(), String> {
+        let direct_key = format!("{}:{}", repo_or_model_id, quant).to_ascii_lowercase();
+        let target_quant = quant.to_ascii_lowercase();
+        let target_id = repo_or_model_id.to_ascii_lowercase();
+        let target_norm = target_id.replace("__", "/");
         {
             let mut guard = self.data.lock().map_err(|e| e.to_string())?;
-            guard.models.remove(&key);
+            guard.models.remove(&direct_key);
+            guard.models.retain(|_, entry| {
+                let e_quant = entry.quant.to_ascii_lowercase();
+                let e_repo = entry.repo_id.to_ascii_lowercase();
+                let e_model = entry.model_id.to_ascii_lowercase();
+                let e_repo_norm = e_repo.replace("__", "/");
+                let e_model_norm = e_model.replace("__", "/");
+
+                let quant_matches = if target_quant.is_empty() || target_quant == "gguf" {
+                    e_quant.is_empty() || e_quant == "gguf"
+                } else {
+                    e_quant == target_quant
+                };
+
+                let id_matches = e_repo == target_id
+                    || e_model == target_id
+                    || e_repo_norm == target_norm
+                    || e_model_norm == target_norm
+                    || e_repo_norm.ends_with(&format!("/{target_norm}"))
+                    || e_model_norm.ends_with(&format!("/{target_norm}"));
+
+                !(id_matches && quant_matches)
+            });
         }
         self.save_to_disk()
     }
@@ -161,8 +199,91 @@ mod tests {
 
         reg.register(entry).unwrap();
 
+        // Q4_K_M installed => another Q4_K_M pull is blocked as a duplicate (is_installed == true)
         assert!(reg.is_installed("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF", Some("Q4_K_M")));
         assert!(reg.is_installed("Qwen/Qwen2.5-Coder-7B-Instruct", Some("Q4_K_M")));
+
+        // Q4_K_M installed => Q8_0 is still downloadable (is_installed == false)
         assert!(!reg.is_installed("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF", Some("Q8_0")));
+        assert!(!reg.is_installed("Qwen/Qwen2.5-Coder-7B-Instruct", Some("Q8_0")));
+    }
+
+    #[test]
+    fn test_two_quantizations_coexist_and_isolated_deletion() {
+        let reg = ModelRegistry {
+            data: Mutex::new(ModelRegistryData::default()),
+        };
+
+        let repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF";
+        let model = "Qwen/Qwen2.5-Coder-7B-Instruct";
+
+        let entry_q4 = RegistryModelEntry {
+            model_id: model.into(),
+            repo_id: repo.into(),
+            backend: "llamacpp".into(),
+            quant: "Q4_K_M".into(),
+            files: vec!["Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf".into()],
+            size_bytes: 4_500_000_000,
+            installed_at: 1000,
+            local_path: "C:/gguf/Q4_K_M.gguf".into(),
+            is_split: false,
+            companion_mmproj: None,
+        };
+
+        let entry_q8 = RegistryModelEntry {
+            model_id: model.into(),
+            repo_id: repo.into(),
+            backend: "llamacpp".into(),
+            quant: "Q8_0".into(),
+            files: vec!["Qwen2.5-Coder-7B-Instruct-Q8_0.gguf".into()],
+            size_bytes: 8_000_000_000,
+            installed_at: 2000,
+            local_path: "C:/gguf/Q8_0.gguf".into(),
+            is_split: false,
+            companion_mmproj: None,
+        };
+
+        // Two quantizations of the same repo coexist in the registry
+        reg.register(entry_q4).unwrap();
+        reg.register(entry_q8).unwrap();
+
+        assert_eq!(reg.list().len(), 2);
+        assert!(reg.is_installed(repo, Some("Q4_K_M")));
+        assert!(reg.is_installed(repo, Some("Q8_0")));
+        assert!(!reg.is_installed(repo, Some("Q6_K")));
+
+        // Deleting one quant leaves the other installed
+        reg.unregister(repo, "Q4_K_M").unwrap();
+
+        assert_eq!(reg.list().len(), 1);
+        assert!(!reg.is_installed(repo, Some("Q4_K_M")));
+        assert!(reg.is_installed(repo, Some("Q8_0")));
+    }
+
+    #[test]
+    fn test_generic_quant_compatibility() {
+        let reg = ModelRegistry {
+            data: Mutex::new(ModelRegistryData::default()),
+        };
+
+        let entry_generic = RegistryModelEntry {
+            model_id: "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".into(),
+            repo_id: "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".into(),
+            backend: "llamacpp".into(),
+            quant: "GGUF".into(),
+            files: vec!["tinyllama.gguf".into()],
+            size_bytes: 1_000_000_000,
+            installed_at: 1000,
+            local_path: "C:/gguf/tinyllama.gguf".into(),
+            is_split: false,
+            companion_mmproj: None,
+        };
+
+        reg.register(entry_generic).unwrap();
+
+        // Generic quant should be recognized for generic query or specific query fallback
+        assert!(reg.is_installed("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", None));
+        assert!(reg.is_installed("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", Some("GGUF")));
+        assert!(reg.is_installed("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", Some("Q4_K_M")));
     }
 }

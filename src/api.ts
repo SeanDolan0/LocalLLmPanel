@@ -154,8 +154,8 @@ export const api = {
   libraryList: () => invoke<import("./types").LibraryEntry[]>("library_list"),
   libraryImportLocal: (path: string) =>
     invoke<import("./types").LibraryEntry>("library_import_local", { path }),
-  libraryRemove: (modelId: string, modelPath?: string | null) =>
-    invoke<void>("library_remove", { modelId, modelPath: modelPath ?? null }),
+  libraryRemove: (modelId: string, modelPath?: string | null, quant?: string | null) =>
+    invoke<void>("library_remove", { modelId, modelPath: modelPath ?? null, quant: quant ?? null }),
   libraryDiskUsage: () => invoke<number>("library_disk_usage"),
   settingsGet: () => invoke<Settings>("settings_get"),
   gatewayStatus: () => invoke<import("./types").GatewayStatus>("gateway_status"),

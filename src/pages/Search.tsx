@@ -18,6 +18,7 @@ import type {
   EnvStatus,
   FitResultBackend,
   FitVerdict,
+  LibraryEntry,
   LlamaCppChannel,
   LogicalGgufArtifact,
   ModelWithFit,
@@ -25,6 +26,10 @@ import type {
   QuantVariantWithFit,
   RunMode,
 } from "../types";
+
+function getPullKey(repoOrModelId: string, quant?: string | null): string {
+  return quant ? `${repoOrModelId.toLowerCase()}:${quant.toLowerCase()}` : repoOrModelId.toLowerCase();
+}
 
 interface DeployOptions {
   modelPath?: string;
@@ -185,7 +190,7 @@ interface PullStateButtonProps {
   targetId: string;
   isInstalled?: boolean;
   onPull: (id: string, quant?: string) => void;
-  onCancelPull?: (id: string) => void;
+  onCancelPull?: (id: string, quant?: string) => void;
   showDownloadProgress?: boolean;
   quant?: string;
   pullButtonClassName?: string;
@@ -221,7 +226,7 @@ function PullStateButton({
           <span className="font-mono text-xs text-indigo-300 shrink-0">{percent.toFixed(0)}%</span>
           {onCancelPull && (
             <button
-              onClick={() => onCancelPull(targetId)}
+              onClick={() => onCancelPull(targetId, quant)}
               className="text-xs text-rose-400 hover:text-rose-300 ml-1 shrink-0"
               title="Cancel download"
             >
@@ -245,7 +250,7 @@ function PullStateButton({
           <Button
             variant="danger"
             className={cancelButtonClassName}
-            onClick={() => onCancelPull(targetId)}
+            onClick={() => onCancelPull(targetId, quant)}
             title="Cancel download"
           >
             Cancel
@@ -519,36 +524,73 @@ export default function Search() {
   const seq = useRef(0);
   const lastSearchedQuery = useRef<string>("");
 
-  const [installedModels, setInstalledModels] = useState<Set<string>>(new Set());
+  const [libraryEntries, setLibraryEntries] = useState<LibraryEntry[]>([]);
 
   const refreshLibrary = useCallback(() => {
     api
       .libraryList()
       .then((list) => {
-        const set = new Set<string>();
-        for (const entry of list) {
-          set.add(entry.model_id.toLowerCase());
-          if (entry.model_id.includes("/")) {
-            set.add(entry.model_id.split("/")[1].toLowerCase());
-          }
-        }
-        setInstalledModels(set);
+        setLibraryEntries(list);
       })
       .catch(() => {});
   }, []);
 
   const isModelInstalled = useCallback(
-    (modelId?: string | null) => {
-      if (!modelId) return false;
-      const lower = modelId.toLowerCase();
-      if (installedModels.has(lower)) return true;
-      if (lower.includes("/")) {
-        const nameOnly = lower.split("/")[1];
-        if (installedModels.has(nameOnly)) return true;
+    (modelOrRepoId?: string | null, quant?: string | null) => {
+      if (!modelOrRepoId) return false;
+      const idLower = modelOrRepoId.toLowerCase().trim();
+      const qLower = quant?.toLowerCase().trim() || null;
+      const isGenericQuant = !qLower || qLower === "gguf";
+
+      const nameOnly = idLower.includes("/")
+        ? idLower.split("/")[1]
+        : idLower.includes("__")
+        ? idLower.split("__")[1]
+        : idLower;
+      const normalizedSlash = idLower.replace(/__/g, "/");
+
+      for (const entry of libraryEntries) {
+        const entryModel = entry.model_id.toLowerCase().trim();
+        const entryRepo = (entry.repo_id || "").toLowerCase().trim();
+        const entryModelNormalized = entryModel.replace(/__/g, "/");
+        const entryRepoNormalized = entryRepo.replace(/__/g, "/");
+
+        const idMatches =
+          entryModel === idLower ||
+          entryRepo === idLower ||
+          entryModelNormalized === normalizedSlash ||
+          entryRepoNormalized === normalizedSlash ||
+          entryModel.endsWith("/" + idLower) ||
+          entryRepo.endsWith("/" + idLower) ||
+          entryModelNormalized.endsWith("/" + normalizedSlash) ||
+          entryRepoNormalized.endsWith("/" + normalizedSlash) ||
+          idLower.endsWith("/" + entryModel) ||
+          normalizedSlash.endsWith("/" + entryModelNormalized) ||
+          (nameOnly &&
+            (entryModel === nameOnly ||
+              entryRepo === nameOnly ||
+              entryModel.endsWith("/" + nameOnly) ||
+              entryRepo.endsWith("/" + nameOnly) ||
+              entryModelNormalized.endsWith("/" + nameOnly) ||
+              entryRepoNormalized.endsWith("/" + nameOnly)));
+
+        if (!idMatches) continue;
+
+        const entryQLower = (entry.quant || "").toLowerCase().trim();
+        const entryIsGeneric = !entryQLower || entryQLower === "gguf";
+
+        if (isGenericQuant || entryIsGeneric) {
+          return true;
+        }
+
+        if (entryQLower === qLower) {
+          return true;
+        }
       }
+
       return false;
     },
-    [installedModels]
+    [libraryEntries]
   );
 
   useEffect(() => {
@@ -565,7 +607,25 @@ export default function Search() {
     }).catch(() => {});
 
     const unsubPull = events.pullProgress((p) => {
-      setPulls((prev) => ({ ...prev, [p.model]: p }));
+      const entry: PullStatus = {
+        model: p.model,
+        quant: p.quant,
+        state: p.state,
+        file: p.file,
+        percent: p.percent,
+        speed_bps: p.speed_bps,
+        eta_seconds: p.eta_seconds,
+        bytes_downloaded: p.bytes_downloaded,
+        bytes_total: p.bytes_total,
+        error: p.error,
+      };
+      setPulls((prev) => {
+        const next = { ...prev, [p.model]: entry };
+        if (p.quant) {
+          next[getPullKey(p.model, p.quant)] = entry;
+        }
+        return next;
+      });
       if (p.state === "complete") {
         refreshLibrary();
       }
@@ -575,6 +635,7 @@ export default function Search() {
       const rawStatus = (p.status || p.state || "").toLowerCase();
       const entry: PullStatus = {
         model: p.model_id,
+        quant: p.quant,
         state: rawStatus === "completed" ? "complete" : rawStatus,
         file: p.current_file,
         percent: p.percent,
@@ -586,8 +647,14 @@ export default function Search() {
       };
       setPulls((prev) => {
         const next = { ...prev, [p.model_id]: entry };
+        if (p.quant) {
+          next[getPullKey(p.model_id, p.quant)] = entry;
+        }
         if (p.repo_id && p.repo_id !== p.model_id) {
           next[p.repo_id] = entry;
+          if (p.quant) {
+            next[getPullKey(p.repo_id, p.quant)] = entry;
+          }
         }
         return next;
       });
@@ -696,7 +763,7 @@ export default function Search() {
   );
 
   const pull = async (repoId: string, quant?: string) => {
-    if (isModelInstalled(repoId)) return;
+    if (isModelInstalled(repoId, quant)) return;
     try {
       if (isGgufRepoId(repoId)) {
         const artifacts = await api.inspectModelArtifacts(repoId).catch(() => []);
@@ -736,10 +803,12 @@ export default function Search() {
     }
   };
 
-  const cancelPull = (repoId: string) => {
-    cancelDownload(repoId);
+  const cancelPull = (repoId: string, quant?: string) => {
+    cancelDownload(repoId, quant);
+    const key = getPullKey(repoId, quant);
     setPulls((prev) => {
       const next = { ...prev };
+      delete next[key];
       delete next[repoId];
       return next;
     });
@@ -987,7 +1056,10 @@ export default function Search() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {filteredRecommendations.map((m) => {
-                const bestRepoId = getBestVariant(m)?.variant.repo_id || m.id;
+                const best = getBestVariant(m);
+                const bestVariant = best?.variant;
+                const bestRepoId = bestVariant?.repo_id || m.id;
+                const bestQuant = bestVariant?.format === "GGUF" ? (bestVariant.label || "GGUF") : (bestVariant?.label || bestVariant?.format || "FP16");
                 return (
                   <ModelCard
                     key={m.id}
@@ -996,8 +1068,8 @@ export default function Search() {
                     onDeploy={deploy}
                     onPull={pull}
                     onCancelPull={cancelPull}
-                    pullState={pulls[bestRepoId] || pulls[m.id]}
-                    isInstalled={isModelInstalled(bestRepoId) || isModelInstalled(m.id)}
+                    pullState={pulls[getPullKey(bestRepoId, bestQuant)] || pulls[getPullKey(m.id, bestQuant)] || pulls[bestRepoId] || pulls[m.id]}
+                    isInstalled={isModelInstalled(bestRepoId, bestQuant) || isModelInstalled(m.id, bestQuant)}
                   />
                 );
               })}
@@ -1033,7 +1105,10 @@ export default function Search() {
           ) : viewMode === "grid" ? (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {filteredResults?.map((m) => {
-                const bestRepoId = getBestVariant(m)?.variant.repo_id || m.id;
+                const best = getBestVariant(m);
+                const bestVariant = best?.variant;
+                const bestRepoId = bestVariant?.repo_id || m.id;
+                const bestQuant = bestVariant?.format === "GGUF" ? (bestVariant.label || "GGUF") : (bestVariant?.label || bestVariant?.format || "FP16");
                 return (
                   <ModelCard
                     key={m.id}
@@ -1042,8 +1117,8 @@ export default function Search() {
                     onDeploy={deploy}
                     onPull={pull}
                     onCancelPull={cancelPull}
-                    pullState={pulls[bestRepoId] || pulls[m.id]}
-                    isInstalled={isModelInstalled(bestRepoId) || isModelInstalled(m.id)}
+                    pullState={pulls[getPullKey(bestRepoId, bestQuant)] || pulls[getPullKey(m.id, bestQuant)] || pulls[bestRepoId] || pulls[m.id]}
+                    isInstalled={isModelInstalled(bestRepoId, bestQuant) || isModelInstalled(m.id, bestQuant)}
                   />
                 );
               })}
@@ -1067,7 +1142,9 @@ export default function Search() {
                     const best = getBestVariant(m);
                     const fit = best?.fit;
                     const variant = best?.variant;
-                    const pullState = pulls[variant?.repo_id || m.id] || pulls[m.id];
+                    const quant = variant?.format === "GGUF" ? (variant.label || "GGUF") : (variant?.label || variant?.format || "FP16");
+                    const targetId = variant?.repo_id || m.id;
+                    const pullState = pulls[getPullKey(targetId, quant)] || pulls[getPullKey(m.id, quant)] || pulls[targetId] || pulls[m.id];
                     const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
                     return (
                       <tr
@@ -1194,9 +1271,9 @@ export default function Search() {
                             </Button>
                             <PullStateButton
                               pullState={pullState}
-                              targetId={variant?.repo_id || m.id}
-                              quant={variant?.format === "GGUF" ? variant.label : undefined}
-                              isInstalled={isModelInstalled(variant?.repo_id || m.id) || isModelInstalled(m.id)}
+                              targetId={targetId}
+                              quant={quant}
+                              isInstalled={isModelInstalled(targetId, quant) || isModelInstalled(m.id, quant)}
                               onPull={pull}
                               onCancelPull={cancelPull}
                               pullButtonClassName="text-xs px-2.5 py-1"
@@ -1260,7 +1337,7 @@ function ModelCard({
     options?: DeployOptions,
   ) => void;
   onPull: (repoId: string, quant?: string) => void;
-  onCancelPull?: (repoId: string) => void;
+  onCancelPull?: (repoId: string, quant?: string) => void;
   pullState?: PullStatus;
   isInstalled?: boolean;
 }) {
@@ -1558,10 +1635,10 @@ function ModelCard({
           <PullStateButton
             pullState={pullState}
             targetId={variant?.repo_id || model.id}
-            quant={variant?.format === "GGUF" ? variant.label : undefined}
+            quant={variant?.format === "GGUF" ? (variant.label || "GGUF") : (variant?.label || variant?.format || "FP16")}
             isInstalled={isInstalled ?? false}
             onPull={onPull}
-            onCancelPull={onCancelPull}
+            onCancelPull={(id) => onCancelPull ? onCancelPull(id, variant?.format === "GGUF" ? (variant.label || "GGUF") : (variant?.label || variant?.format || "FP16")) : undefined}
             showDownloadProgress
             pullButtonClassName="text-xs px-2.5 py-1"
             cancelButtonClassName="text-xs px-2 py-0.5"
@@ -1590,7 +1667,7 @@ function ModelDetailModal({
   onClose: () => void;
   pulls: Record<string, PullStatus>;
   onPull: (repoId: string, quant?: string) => void;
-  onCancelPull?: (repoId: string) => void;
+  onCancelPull?: (repoId: string, quant?: string) => void;
   onDeploy: (
     repoId: string,
     quant: string,
@@ -1598,7 +1675,7 @@ function ModelDetailModal({
     options?: DeployOptions,
   ) => void;
   totalVramMb: number | null;
-  isModelInstalled?: (modelId?: string | null) => boolean;
+  isModelInstalled?: (modelId?: string | null, quant?: string | null) => boolean;
 }) {
   const [repoArtifactsMap, setRepoArtifactsMap] = useState<Record<string, LogicalGgufArtifact[]>>({});
 
@@ -1910,8 +1987,6 @@ function ModelDetailModal({
                 const repoIdLower = (variant.repo_id ?? "").toLowerCase();
                 const isGguf = variant.format === "GGUF" || fit?.format_support === "Experimental";
                 const requiredFork = variant.required_channel && variant.required_channel !== "upstream" ? variant.required_channel : null;
-                const pullState = pulls[variant.repo_id] || (isBest ? pulls[model.id] : undefined);
-                const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
 
                 const repoArtifacts = repoArtifactsMap[repoIdLower] || [];
                 const matchingArtifact = repoArtifacts.find((a) => {
@@ -1923,8 +1998,20 @@ function ModelDetailModal({
                 const isExternalQuantizer = repoIdLower !== (model.id ?? "").toLowerCase();
                 const matchingFiles = matchingArtifact?.files || matchingArtifact?.shard_files || (variant.gguf_file ? [variant.gguf_file] : []);
                 const matchingQuant = matchingArtifact?.quant || matchingArtifact?.quant_label || variant.label || "GGUF";
+                const targetQuant = variant.format === "GGUF" ? matchingQuant : (variant.label || variant.format || "FP16");
                 const shardCount = matchingArtifact?.shard_count ?? matchingFiles.length;
                 const hasMmproj = matchingArtifact?.has_mmproj ?? !!matchingArtifact?.companion_mmproj;
+
+                const pullKey = getPullKey(variant.repo_id, targetQuant);
+                const pullState =
+                  pulls[pullKey] ||
+                  (isBest ? pulls[getPullKey(model.id, targetQuant)] : undefined) ||
+                  pulls[variant.repo_id] ||
+                  (isBest ? pulls[model.id] : undefined);
+                const isInstalled = isModelInstalled
+                  ? isModelInstalled(variant.repo_id, targetQuant) || isModelInstalled(model.id, targetQuant)
+                  : false;
+                const tokS = fit?.measured_tok_s ?? fit?.est_tok_s;
 
                 return (
                   <div
@@ -2077,12 +2164,12 @@ function ModelDetailModal({
                           <PullStateButton
                             pullState={pullState}
                             targetId={variant.repo_id}
-                            quant={variant.format === "GGUF" ? matchingQuant : undefined}
-                            isInstalled={isModelInstalled ? isModelInstalled(variant.repo_id) || isModelInstalled(model.id) : false}
+                            quant={targetQuant}
+                            isInstalled={isInstalled}
                             onPull={(_id, _q) => {
-                              onPull(variant.repo_id || model.id, matchingQuant);
+                              onPull(variant.repo_id || model.id, targetQuant);
                             }}
-                            onCancelPull={onCancelPull}
+                            onCancelPull={(id) => onCancelPull ? onCancelPull(id, targetQuant) : undefined}
                             pullButtonClassName="text-xs px-2.5 py-1"
                             cancelButtonClassName="text-xs px-2 py-1"
                             retryButtonClassName="text-xs px-2 py-1"

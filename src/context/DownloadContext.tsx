@@ -50,12 +50,12 @@ interface DownloadContextValue {
   activeDownloads: UnifiedDownloadItem[];
   activeCount: number;
   overallPercent: number;
-  cancelDownload: (idOrModel: string) => Promise<void>;
+  cancelDownload: (idOrModel: string, quant?: string | null) => Promise<void>;
   pauseDownload: (id: string) => Promise<void>;
   resumeDownload: (id: string) => Promise<void>;
   clearCompleted: () => Promise<void>;
   dismissDownload: (id: string) => void;
-  getDownload: (idOrModelOrRepo: string) => UnifiedDownloadItem | undefined;
+  getDownload: (idOrModelOrRepo: string, quant?: string | null) => UnifiedDownloadItem | undefined;
   refreshDownloads: () => Promise<void>;
 }
 
@@ -212,7 +212,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           modelId: p.model_id || existing?.modelId || "",
           repoId: p.repo_id || existing?.repoId || p.model_id || "",
           backend: existing?.backend || "llamacpp",
-          quant: existing?.quant,
+          quant: p.quant || existing?.quant,
           files: existing?.files || [],
           currentFile: p.current_file || existing?.currentFile,
           currentShard: p.current_shard || (p.file_index != null ? p.file_index + 1 : existing?.currentShard || 1),
@@ -245,14 +245,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       setItemsMap((prev) => {
         const next = { ...prev };
 
-        // Match against existing item by model or repoId
+        // Match against existing item by model or repoId, respecting quant if present
         const matchEntry = Object.entries(next).find(
-          ([, item]) =>
-            item.repoId.toLowerCase() === p.model.toLowerCase() ||
-            item.modelId.toLowerCase() === p.model.toLowerCase()
+          ([, item]) => {
+            const idMatches =
+              item.repoId.toLowerCase() === p.model.toLowerCase() ||
+              item.modelId.toLowerCase() === p.model.toLowerCase();
+            if (!idMatches) return false;
+            if (!p.quant || !item.quant) return true;
+            return item.quant.toLowerCase() === p.quant.toLowerCase();
+          }
         );
 
-        const key = matchEntry ? matchEntry[0] : `pull-${p.model}`;
+        const key = matchEntry ? matchEntry[0] : (p.quant ? `pull-${p.model}:${p.quant}` : `pull-${p.model}`);
         const existing = matchEntry ? matchEntry[1] : undefined;
 
         const totalBytes = p.bytes_total || existing?.totalBytes || 0;
@@ -273,7 +278,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           modelId: existing?.modelId || p.model,
           repoId: existing?.repoId || p.model,
           backend: existing?.backend || "vllm",
-          quant: existing?.quant,
+          quant: p.quant || existing?.quant,
           files: existing?.files || [],
           currentFile: p.file || existing?.currentFile,
           currentShard: existing?.currentShard || 1,
@@ -335,13 +340,17 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
 
   // Actions
   const cancelDownload = useCallback(
-    async (idOrModel: string) => {
-      const item = Object.values(itemsMapRef.current).find(
-        (d) =>
-          d.id === idOrModel ||
+    async (idOrModel: string, quant?: string | null) => {
+      const qQuant = quant?.toLowerCase();
+      const item = Object.values(itemsMapRef.current).find((d) => {
+        if (d.id === idOrModel) return true;
+        const idMatches =
           d.modelId.toLowerCase() === idOrModel.toLowerCase() ||
-          d.repoId.toLowerCase() === idOrModel.toLowerCase()
-      );
+          d.repoId.toLowerCase() === idOrModel.toLowerCase();
+        if (!idMatches) return false;
+        if (!qQuant || !d.quant) return true;
+        return d.quant.toLowerCase() === qQuant;
+      });
 
       if (item && item.isGguf && item.id.startsWith("job-")) {
         await api.downloadCancel(item.id).catch(() => {});
@@ -353,11 +362,12 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       setItemsMap((prev) => {
         const next = { ...prev };
         for (const [key, d] of Object.entries(next)) {
-          if (
+          const isTarget =
             d.id === idOrModel ||
-            d.modelId.toLowerCase() === idOrModel.toLowerCase() ||
-            d.repoId.toLowerCase() === idOrModel.toLowerCase()
-          ) {
+            ((d.modelId.toLowerCase() === idOrModel.toLowerCase() ||
+              d.repoId.toLowerCase() === idOrModel.toLowerCase()) &&
+              (!qQuant || !d.quant || d.quant.toLowerCase() === qQuant));
+          if (isTarget) {
             next[key] = {
               ...d,
               status: "Cancelled",
@@ -443,15 +453,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const getDownload = useCallback((idOrModelOrRepo: string): UnifiedDownloadItem | undefined => {
+  const getDownload = useCallback((idOrModelOrRepo: string, quant?: string | null): UnifiedDownloadItem | undefined => {
     const q = idOrModelOrRepo.toLowerCase();
-    return Object.values(itemsMapRef.current).find(
-      (d) =>
+    const qQuant = quant?.toLowerCase();
+    return Object.values(itemsMapRef.current).find((d) => {
+      const idMatches =
         d.id.toLowerCase() === q ||
         d.modelId.toLowerCase() === q ||
         d.repoId.toLowerCase() === q ||
-        (d.modelId.includes("/") && d.modelId.split("/")[1].toLowerCase() === q)
-    );
+        (d.modelId.includes("/") && d.modelId.split("/")[1].toLowerCase() === q);
+      if (!idMatches) return false;
+      if (!qQuant || !d.quant) return true;
+      return d.quant.toLowerCase() === qQuant;
+    });
   }, []);
 
   const value = useMemo(

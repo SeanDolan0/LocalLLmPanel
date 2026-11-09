@@ -61,12 +61,15 @@ export default function Library() {
     }).catch(() => {});
   }, []);
 
-  const handleCancelPull = async (modelId: string) => {
+  const handleCancelPull = async (modelId: string, quant?: string | null) => {
     try {
-      await cancelDownload(modelId);
+      await cancelDownload(modelId, quant);
       setPulls((prev) => {
         const next = { ...prev };
         delete next[modelId];
+        if (quant) {
+          delete next[`${modelId.toLowerCase()}:${quant.toLowerCase()}`];
+        }
         return next;
       });
       refresh();
@@ -104,7 +107,7 @@ export default function Library() {
     setIsDeleting(true);
     setErrorMsg(null);
     try {
-      await api.libraryRemove(deleteTarget.model_id, deleteTarget.model_path);
+      await api.libraryRemove(deleteTarget.model_id, deleteTarget.model_path, deleteTarget.quant);
       setDeleteTarget(null);
       refresh();
     } catch (err) {
@@ -239,15 +242,17 @@ export default function Library() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filteredEntries.map((e) => {
-            const pull = pulls[e.model_id];
-            const activeJob = getDownload(e.model_id);
+            const pullKey = e.quant ? `${e.model_id.toLowerCase()}:${e.quant.toLowerCase()}` : e.model_id.toLowerCase();
+            const pull = pulls[pullKey] || pulls[e.model_id];
+            const activeJob = getDownload(e.model_id, e.quant) || (e.repo_id ? getDownload(e.repo_id, e.quant) : undefined);
             const isDownloading =
               activeJob?.status === "Downloading" ||
               activeJob?.status === "Resolving" ||
               pull?.state === "downloading";
             const sizeGb = (e.size_mb / 1024).toFixed(1);
+            const stableKey = `${e.model_id}:${e.quant || "default"}:${e.model_path || ""}`;
             return (
-              <Card key={e.model_id} className="flex flex-col justify-between hover:border-edge/90 transition-colors">
+              <Card key={stableKey} className="flex flex-col justify-between hover:border-edge/90 transition-colors">
                 <div>
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
@@ -313,7 +318,7 @@ export default function Library() {
                   ) : isDownloading ? (
                     <Button
                       variant="danger"
-                      onClick={() => handleCancelPull(e.model_id)}
+                      onClick={() => handleCancelPull(activeJob?.id || e.model_id, e.quant)}
                       className="text-xs"
                     >
                       Cancel
@@ -453,7 +458,7 @@ export default function Library() {
 
             <div className="text-sm text-slate-300 space-y-2">
               <p>
-                Are you sure you want to delete <strong className="text-slate-100">{deleteTarget.model_id}</strong>?
+                Are you sure you want to delete <strong className="text-slate-100">{deleteTarget.model_id}{deleteTarget.quant ? ` (${deleteTarget.quant})` : ""}</strong>?
               </p>
               <div className="rounded-lg bg-surface-3 p-3 border border-edge text-xs space-y-1">
                 <div className="flex justify-between text-slate-300">

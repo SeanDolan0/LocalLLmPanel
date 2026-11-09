@@ -3584,6 +3584,8 @@ pub fn wslconfig_get() -> WslConfigInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LibraryEntry {
     pub model_id: String,
+    #[serde(default)]
+    pub repo_id: Option<String>,
     pub size_mb: u64,
     pub files: usize,
     pub quant: Option<String>,
@@ -3713,7 +3715,8 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
                     };
 
                     out_v.push(LibraryEntry {
-                        model_id: model_id_str,
+                        model_id: model_id_str.clone(),
+                        repo_id: Some(model_id_str),
                         size_mb,
                         files: files_cnt,
                         quant,
@@ -3757,6 +3760,7 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
         local.extend(scan_native_gguf_library(
             &st.config().gguf_dir,
             &running_servers,
+            &st.model_registry,
         ));
         out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
         local.append(&mut out_v);
@@ -3766,48 +3770,122 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
     .map_err(|e| e.to_string())
 }
 
-fn scan_native_gguf_library(root: &str, running_servers: &[(String, String)]) -> Vec<LibraryEntry> {
+fn scan_native_gguf_library(
+    root: &str,
+    running_servers: &[(String, String)],
+    registry: &crate::model_registry::ModelRegistry,
+) -> Vec<LibraryEntry> {
     let mut entries = Vec::new();
-    let Ok(repos) = std::fs::read_dir(root) else {
-        return entries;
-    };
-    for repo in repos.flatten().filter(|e| e.path().is_dir()) {
-        // Recursive: GGUF downloads preserve the repo's subdirectories.
-        let files = crate::server::collect_ggufs_recursive(&repo.path());
-        if files.is_empty() {
+    let mut catalogued_paths = std::collections::HashSet::new();
+
+    // 1. Add entries tracked by the durable ModelRegistry
+    for reg in registry.list() {
+        if !reg.backend.eq_ignore_ascii_case("llamacpp") {
             continue;
         }
-        let main_file = files.first().map(|p| p.to_string_lossy().into_owned());
-        let size_mb = files
-            .iter()
-            .filter_map(|p| p.metadata().ok())
-            .map(|m| m.len())
-            .sum::<u64>()
-            / (1024 * 1024);
-        let file_name = files
-            .first()
-            .and_then(|path| path.file_name())
-            .unwrap_or_default();
-        let model_id = repo.file_name().to_string_lossy().into_owned();
-        let params_b = crate::estimate::parse_params_from_name(&model_id);
+        let local_path = PathBuf::from(&reg.local_path);
+        if !local_path.exists() {
+            continue;
+        }
+        let canonical = local_path.canonicalize().unwrap_or_else(|_| local_path.clone());
+        catalogued_paths.insert(canonical);
+
         let in_use_server = running_servers
             .iter()
-            .find(|(_, model)| model == &model_id)
+            .find(|(_, model)| {
+                model == &reg.model_id
+                    || model == &reg.repo_id
+                    || reg.model_id.contains(model)
+                    || reg.repo_id.contains(model)
+            })
             .map(|(name, _)| name.clone());
+
+        let params_b = crate::estimate::parse_params_from_name(&reg.model_id)
+            .or_else(|| crate::estimate::parse_params_from_name(&reg.repo_id));
+
+        let size_mb = if reg.size_bytes > 0 {
+            reg.size_bytes / (1024 * 1024)
+        } else {
+            local_path.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0)
+        };
+
         entries.push(LibraryEntry {
-            model_id,
+            model_id: if !reg.repo_id.is_empty() {
+                reg.repo_id.clone()
+            } else {
+                reg.model_id.clone()
+            },
+            repo_id: Some(reg.repo_id.clone()),
             size_mb,
-            files: files.len(),
-            quant: crate::hf::parse_gguf_quant_label(&file_name.to_string_lossy())
-                .or_else(|| Some("GGUF".into())),
+            files: reg.files.len().max(1),
+            quant: Some(reg.quant.clone()),
             params_b,
             installed: true,
             in_use: in_use_server.is_some(),
             in_use_server,
             task: Some("instruct".into()),
             is_local: true,
-            model_path: main_file,
+            model_path: Some(reg.local_path.clone()),
         });
+    }
+
+    // 2. Discover untracked or manually dropped files in gguf_dir, grouping by quant
+    let Ok(repos) = std::fs::read_dir(root) else {
+        return entries;
+    };
+    for repo in repos.flatten().filter(|e| e.path().is_dir()) {
+        let all_files = crate::server::collect_ggufs_recursive(&repo.path());
+        if all_files.is_empty() {
+            continue;
+        }
+
+        let mut quant_groups: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+        for file in all_files {
+            let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
+            if catalogued_paths.contains(&canonical) {
+                continue;
+            }
+            let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let quant = crate::hf::parse_gguf_quant_label(file_name).unwrap_or_else(|| "GGUF".to_string());
+            quant_groups.entry(quant).or_default().push(file);
+        }
+
+        let repo_folder_name = repo.file_name().to_string_lossy().into_owned();
+        let repo_id = repo_folder_name.replace("__", "/");
+        let params_b = crate::estimate::parse_params_from_name(&repo_folder_name);
+
+        for (quant, q_files) in quant_groups {
+            if q_files.is_empty() {
+                continue;
+            }
+            let main_file = q_files.first().map(|p| p.to_string_lossy().into_owned());
+            let size_mb = q_files
+                .iter()
+                .filter_map(|p| p.metadata().ok())
+                .map(|m| m.len())
+                .sum::<u64>()
+                / (1024 * 1024);
+
+            let in_use_server = running_servers
+                .iter()
+                .find(|(_, model)| model == &repo_folder_name || model == &repo_id)
+                .map(|(name, _)| name.clone());
+
+            entries.push(LibraryEntry {
+                model_id: repo_id.clone(),
+                repo_id: Some(repo_id.clone()),
+                size_mb,
+                files: q_files.len(),
+                quant: Some(quant),
+                params_b,
+                installed: true,
+                in_use: in_use_server.is_some(),
+                in_use_server,
+                task: Some("instruct".into()),
+                is_local: true,
+                model_path: main_file,
+            });
+        }
     }
     entries
 }
@@ -4038,7 +4116,8 @@ fn scan_hf_cache_fs(
             Some("instruct".to_string())
         };
         entries.push(LibraryEntry {
-            model_id: model_id_str,
+            model_id: model_id_str.clone(),
+            repo_id: Some(model_id_str),
             size_mb,
             files: files_cnt,
             quant,
@@ -4100,6 +4179,7 @@ done
         }
         entries.push(LibraryEntry {
             model_id: model_id_str,
+            repo_id: None,
             size_mb,
             files: files_cnt,
             quant: Some("native".into()),
@@ -4159,6 +4239,7 @@ pub async fn library_import_local(
             let model_id = file_name.to_string_lossy().trim_end_matches(".gguf").to_string();
             return Ok(LibraryEntry {
                 model_id,
+                repo_id: None,
                 size_mb,
                 files: 1,
                 quant: Some("GGUF".into()),
@@ -4233,6 +4314,7 @@ pub async fn library_import_local(
 
         Ok(LibraryEntry {
             model_id: wsl_path,
+            repo_id: None,
             size_mb,
             files,
             quant: Some("native".into()),
@@ -4287,11 +4369,12 @@ pub async fn library_remove(
     state: State<'_, Arc<AppState>>,
     model_id: String,
     model_path: Option<String>,
+    quant: Option<String>,
 ) -> Result<(), String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         // Native Windows GGUF: the entry's model_path points at the .gguf
-        // inside gguf_dir; delete its containing repo folder.
+        // inside gguf_dir; delete its containing quant files, or repo folder if empty.
         if let Some(ref path) = model_path {
             let file = PathBuf::from(path);
             if let (Some(parent), true) = (file.parent(), file.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false)) {
@@ -4319,31 +4402,94 @@ pub async fn library_remove(
                 else {
                     return Err("Refusing to delete: path is outside the GGUF directory".into());
                 };
-                let pending_parent = repo_dir.to_string_lossy().into_owned();
+                let _pending_parent = repo_dir.to_string_lossy().into_owned();
                 let srvs = st.servers.lock().unwrap();
                 for ls in srvs.values() {
                     let running = ls.status == crate::state::ServerStatus::Running
                         || ls.status == crate::state::ServerStatus::Starting;
-                    let model_matches = ls.def.model_id == model_id
-                        || ls.def.model_id.contains(&model_id)
-                        || model_id.contains(&ls.def.model_id);
                     let path_matches = ls
                         .def
                         .model_path
                         .as_deref()
-                        .map(|mp| mp.starts_with(&pending_parent))
+                        .map(|mp| mp.eq_ignore_ascii_case(path))
                         .unwrap_or(false);
-                    if running && (model_matches || path_matches) {
+                    let model_and_quant_matches = (ls.def.model_id == model_id || ls.def.model_id.contains(&model_id))
+                        && quant.as_deref().map(|q| ls.def.quant.eq_ignore_ascii_case(q)).unwrap_or(false);
+                    if running && (path_matches || model_and_quant_matches) {
                         return Err(format!(
-                            "Model \"{}\" is currently in use by active server \"{}\" — stop server first",
-                            model_id, ls.def.name
+                            "Model \"{}\" ({}) is currently in use by active server \"{}\" — stop server first",
+                            model_id, quant.as_deref().unwrap_or(""), ls.def.name
                         ));
                     }
                 }
                 drop(srvs);
-                std::fs::remove_dir_all(&repo_dir).map_err(|e| {
-                    format!("Failed to delete {}: {e}", repo_dir.display())
-                })?;
+
+                // Collect files to delete for this quant
+                let target_quant = quant.as_deref().unwrap_or("");
+                let mut files_to_delete: Vec<PathBuf> = Vec::new();
+                files_to_delete.push(file.clone());
+
+                let part_file = PathBuf::from(format!("{}.part", file.display()));
+                if part_file.exists() {
+                    files_to_delete.push(part_file);
+                }
+
+                // If in registry, gather registered files
+                let reg_list = st.model_registry.list();
+                for r in &reg_list {
+                    let quant_match = target_quant.is_empty() || r.quant.eq_ignore_ascii_case(target_quant);
+                    let id_match = r.model_id.eq_ignore_ascii_case(&model_id)
+                        || r.repo_id.eq_ignore_ascii_case(&model_id)
+                        || r.local_path.eq_ignore_ascii_case(path);
+                    if id_match && quant_match {
+                        for rel in &r.files {
+                            let f = repo_dir.join(rel);
+                            files_to_delete.push(f.clone());
+                            let f_part = PathBuf::from(format!("{}.part", f.display()));
+                            if f_part.exists() {
+                                files_to_delete.push(f_part);
+                            }
+                        }
+                    }
+                }
+
+                // If file is part of a split or has same quant label, find sister shards in repo_dir
+                if !target_quant.is_empty() {
+                    for other_file in crate::server::collect_ggufs_recursive(&repo_dir) {
+                        if let Some(other_name) = other_file.file_name().and_then(|n| n.to_str()) {
+                            if let Some(other_quant) = crate::hf::parse_gguf_quant_label(other_name) {
+                                if other_quant.eq_ignore_ascii_case(target_quant) {
+                                    files_to_delete.push(other_file.clone());
+                                    let other_part = PathBuf::from(format!("{}.part", other_file.display()));
+                                    if other_part.exists() {
+                                        files_to_delete.push(other_part);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Delete the specific files
+                for f in files_to_delete {
+                    if f.exists() {
+                        let _ = std::fs::remove_file(&f);
+                    }
+                }
+
+                // Unregister from registry
+                let _ = st.model_registry.unregister(&model_id, target_quant);
+                let repo_name = repo_dir.file_name().map(|n| n.to_string_lossy().replace("__", "/")).unwrap_or_default();
+                if !repo_name.is_empty() && repo_name != model_id {
+                    let _ = st.model_registry.unregister(&repo_name, target_quant);
+                }
+
+                // Check if any .gguf files remain in repo_dir
+                let remaining_ggufs = crate::server::collect_ggufs_recursive(&repo_dir);
+                if remaining_ggufs.is_empty() {
+                    let _ = std::fs::remove_dir_all(&repo_dir);
+                }
+
                 return Ok(());
             }
         }
@@ -4410,6 +4556,7 @@ pub async fn library_remove(
         if !out.ok {
             return Err(format!("Failed to delete model directory: {}", out.stderr));
         }
+        let _ = st.model_registry.unregister(&model_id, quant.as_deref().unwrap_or(""));
         Ok(())
     })
     .await
@@ -5272,6 +5419,7 @@ mod tests {
     fn test_library_entry_and_dir_name() {
         let entry = LibraryEntry {
             model_id: "Qwen/Qwen2.5-Coder-7B-Instruct".to_string(),
+            repo_id: Some("Qwen/Qwen2.5-Coder-7B-Instruct".to_string()),
             size_mb: 14500,
             files: 8,
             quant: Some("AWQ".to_string()),
@@ -5372,6 +5520,7 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
 
         let entry = LibraryEntry {
             model_id: "Qwen/Qwen2.5-0.5B-Instruct".to_string(),
+            repo_id: Some("Qwen/Qwen2.5-0.5B-Instruct".to_string()),
             size_mb: 512,
             files: 2,
             quant: Some("FP16".to_string()),
@@ -5619,5 +5768,39 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
             clean_server_name("custom-server-name"),
             "custom-server-name"
         );
+    }
+
+    #[test]
+    fn test_scan_native_gguf_library_multi_quant() {
+        let temp_dir = std::env::temp_dir().join(format!("test-gguf-lib-{}", crate::state::now_ms()));
+        let repo_dir = temp_dir.join("bartowski__Qwen2.5-Coder-7B-Instruct-GGUF");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let q4_file = repo_dir.join("Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf");
+        let q8_file = repo_dir.join("Qwen2.5-Coder-7B-Instruct-Q8_0.gguf");
+        std::fs::write(&q4_file, b"dummy q4 data").unwrap();
+        std::fs::write(&q8_file, b"dummy q8 data").unwrap();
+
+        let reg = crate::model_registry::ModelRegistry {
+            data: std::sync::Mutex::new(crate::model_registry::ModelRegistryData::default()),
+        };
+
+        let entries = scan_native_gguf_library(
+            &temp_dir.to_string_lossy(),
+            &[],
+            &reg,
+        );
+
+        assert_eq!(entries.len(), 2);
+        let quants: Vec<String> = entries.iter().filter_map(|e| e.quant.clone()).collect();
+        assert!(quants.contains(&"Q4_K_M".to_string()));
+        assert!(quants.contains(&"Q8_0".to_string()));
+
+        assert_eq!(
+            entries[0].repo_id.as_deref(),
+            Some("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

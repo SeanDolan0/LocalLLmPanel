@@ -57,6 +57,7 @@ pub struct DownloadProgressEvent {
     pub job_id: String,
     pub model_id: String,
     pub repo_id: String,
+    pub quant: String,
     pub status: String,
     pub state: String,
     pub percent: f64,
@@ -116,6 +117,17 @@ impl DownloadManager {
             .cloned()
     }
 
+    pub fn get_job_by_repo_and_quant(&self, repo_id: &str, quant: &str) -> Option<DownloadJob> {
+        let guard = self.jobs.lock().ok()?;
+        guard
+            .values()
+            .find(|j| {
+                (j.repo_id.eq_ignore_ascii_case(repo_id) || j.model_id.eq_ignore_ascii_case(repo_id))
+                    && j.quant.eq_ignore_ascii_case(quant)
+            })
+            .cloned()
+    }
+
     pub fn list_jobs(&self) -> Vec<DownloadJob> {
         self.jobs
             .lock()
@@ -172,6 +184,54 @@ impl DownloadManager {
         } else {
             false
         }
+    }
+
+    pub fn cancel_by_repo_and_quant(&self, repo_id: &str, quant: &str) -> bool {
+        let id_to_cancel = {
+            let guard = match self.jobs.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            guard
+                .values()
+                .find(|j| {
+                    (j.repo_id.eq_ignore_ascii_case(repo_id)
+                        || j.model_id.eq_ignore_ascii_case(repo_id))
+                        && j.quant.eq_ignore_ascii_case(quant)
+                })
+                .map(|j| j.id.clone())
+        };
+
+        if let Some(id) = id_to_cancel {
+            self.cancel_job(&id)
+        } else {
+            false
+        }
+    }
+
+    pub fn is_job_active(&self, repo_id: &str, quant: Option<&str>) -> bool {
+        let guard = match self.jobs.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        guard.values().any(|j| {
+            let id_matches = j.repo_id.eq_ignore_ascii_case(repo_id)
+                || j.model_id.eq_ignore_ascii_case(repo_id);
+            if !id_matches {
+                return false;
+            }
+            let is_active = j.status == DownloadStatus::Downloading
+                || j.status == DownloadStatus::Resolving
+                || j.status == DownloadStatus::Queued;
+            if !is_active {
+                return false;
+            }
+            if let Some(q) = quant {
+                j.quant.eq_ignore_ascii_case(q)
+            } else {
+                true
+            }
+        })
     }
 
     pub fn pause_job(&self, job_id: &str) -> bool {
@@ -315,6 +375,7 @@ impl DownloadManager {
                 job_id: job.id.clone(),
                 model_id: job.model_id.clone(),
                 repo_id: job.repo_id.clone(),
+                quant: job.quant.clone(),
                 status: format!("{:?}", job.status).to_ascii_lowercase(),
                 state: format!("{:?}", job.status).to_ascii_lowercase(),
                 percent,
@@ -337,6 +398,7 @@ impl DownloadManager {
             };
             let legacy_payload = serde_json::json!({
                 "model": job.repo_id,
+                "quant": job.quant,
                 "state": legacy_state,
                 "file": job.current_file.clone().or_else(|| job.error.clone()),
                 "percent": percent,
@@ -688,5 +750,89 @@ mod tests {
         let resp = client.head(url).send().unwrap();
         let header_len = extract_content_length(&resp);
         assert_eq!(header_len, 668788096);
+    }
+
+    #[test]
+    fn test_multi_quant_downloads_coexist_and_cancel_isolation() {
+        let registry = Arc::new(ModelRegistry {
+            data: Mutex::new(crate::model_registry::ModelRegistryData::default()),
+        });
+        let manager = Arc::new(DownloadManager::new(registry));
+
+        let repo = "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF";
+        let model = "Qwen/Qwen2.5-Coder-7B-Instruct";
+
+        // Insert job 1: Q4_K_M
+        let job1 = DownloadJob {
+            id: "job-1".into(),
+            model_id: model.into(),
+            repo_id: repo.into(),
+            backend: "llamacpp".into(),
+            quant: "Q4_K_M".into(),
+            files: vec!["file-q4.gguf".into()],
+            destination_dir: "C:/gguf/qwen-q4".into(),
+            total_bytes: 4000,
+            downloaded_bytes: 1000,
+            speed_bps: 100.0,
+            eta_seconds: Some(30.0),
+            status: DownloadStatus::Downloading,
+            state: DownloadStatus::Downloading,
+            error: None,
+            current_file: Some("file-q4.gguf".into()),
+            current_shard: 1,
+            total_shards: 1,
+            is_split: false,
+            companion_mmproj: None,
+        };
+
+        // Insert job 2: Q8_0 (same repo, different quant)
+        let job2 = DownloadJob {
+            id: "job-2".into(),
+            model_id: model.into(),
+            repo_id: repo.into(),
+            backend: "llamacpp".into(),
+            quant: "Q8_0".into(),
+            files: vec!["file-q8.gguf".into()],
+            destination_dir: "C:/gguf/qwen-q8".into(),
+            total_bytes: 8000,
+            downloaded_bytes: 2000,
+            speed_bps: 200.0,
+            eta_seconds: Some(30.0),
+            status: DownloadStatus::Downloading,
+            state: DownloadStatus::Downloading,
+            error: None,
+            current_file: Some("file-q8.gguf".into()),
+            current_shard: 1,
+            total_shards: 1,
+            is_split: false,
+            companion_mmproj: None,
+        };
+
+        {
+            let mut guard = manager.jobs.lock().unwrap();
+            guard.insert("job-1".into(), job1);
+            guard.insert("job-2".into(), job2);
+        }
+
+        // Both jobs are active simultaneously
+        assert!(manager.is_job_active(repo, Some("Q4_K_M")));
+        assert!(manager.is_job_active(repo, Some("Q8_0")));
+        assert!(!manager.is_job_active(repo, Some("Q6_K")));
+
+        // Lookup by repo and quant works correctly
+        let q4_job = manager.get_job_by_repo_and_quant(repo, "Q4_K_M").unwrap();
+        assert_eq!(q4_job.id, "job-1");
+        let q8_job = manager.get_job_by_repo_and_quant(repo, "Q8_0").unwrap();
+        assert_eq!(q8_job.id, "job-2");
+
+        // Cancel Q4_K_M: Q8_0 must remain Downloading
+        assert!(manager.cancel_by_repo_and_quant(repo, "Q4_K_M"));
+        assert!(!manager.is_job_active(repo, Some("Q4_K_M")));
+        assert!(manager.is_job_active(repo, Some("Q8_0")));
+
+        let q4_after = manager.get_job("job-1").unwrap();
+        assert_eq!(q4_after.status, DownloadStatus::Cancelled);
+        let q8_after = manager.get_job("job-2").unwrap();
+        assert_eq!(q8_after.status, DownloadStatus::Downloading);
     }
 }

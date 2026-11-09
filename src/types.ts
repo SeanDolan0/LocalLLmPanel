@@ -392,6 +392,7 @@ export interface GgufRepoFile {
 export interface PullStatus {
   model: string;
   state: string; // downloading | complete | failed
+  quant?: string | null;
   file?: string | null;
   percent?: number | null;
   speed_bps?: number | null;
@@ -478,6 +479,7 @@ export interface LibraryEntry {
   task?: string | null;
   is_local?: boolean;
   model_path?: string | null;
+  repo_id?: string | null;
 }
 
 export type FitVerdict = "Comfortable" | "Constrained" | "DoesNotFit";
@@ -821,6 +823,7 @@ export interface DownloadProgressPayload {
   job_id: string;
   model_id: string;
   repo_id?: string;
+  quant?: string;
   current_file?: string | null;
   current_shard?: number;
   total_shards?: number;
