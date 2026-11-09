@@ -1120,6 +1120,49 @@ fn parse_progress_line(
 ///
 /// `app.state()` is NOT usable from the spawned thread, so we hand it a clone
 /// of the pulling map Arc + the AppHandle (for emitting events).
+static ACTIVE_PULL_PIDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub fn register_pull_pid(model_id: &str, pid: u32) {
+    ACTIVE_PULL_PIDS
+        .lock()
+        .unwrap()
+        .insert(model_id.to_string(), pid);
+}
+
+pub fn unregister_pull_pid(model_id: &str) {
+    ACTIVE_PULL_PIDS.lock().unwrap().remove(model_id);
+}
+
+pub fn get_pull_pid(model_id: &str) -> Option<u32> {
+    ACTIVE_PULL_PIDS.lock().unwrap().get(model_id).copied()
+}
+
+pub fn cancel_pull(model_id: &str, distro: &str) {
+    let pid = ACTIVE_PULL_PIDS.lock().unwrap().remove(model_id);
+    if let Some(pid) = pid {
+        #[cfg(windows)]
+        {
+            let mut cmd = std::process::Command::new("taskkill");
+            cmd.args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+            let _ = cmd.status();
+        }
+    }
+    let clean_id: String = model_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let kill_script = format!(
+        "if [ -f /tmp/local-llm-panel/pull_{clean_id}.pid ]; then pid=$(cat /tmp/local-llm-panel/pull_{clean_id}.pid 2>/dev/null) && kill -9 $pid 2>/dev/null && rm -f /tmp/local-llm-panel/pull_{clean_id}.pid; fi"
+    );
+    let _ = crate::wsl::run_script(distro, &kill_script);
+}
+
 pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &str) -> Result<()> {
     validate_model_id(model_id)?;
     {
@@ -1190,8 +1233,17 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
     };
 
     std::thread::spawn(move || {
+        let clean_id: String = mid
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let pid_file = format!("/tmp/local-llm-panel/pull_{clean_id}.pid");
+
         let script = format!(
             r#"{tilde_snippet}
+mkdir -p /tmp/local-llm-panel
+echo $$ > {pid_file}
+trap 'rm -f -- {pid_file}' EXIT
 venv_dir=$(__llm_panel_expand_tilde {venv_literal})
 {home_env}if [ ! -d "$venv_dir" ]; then
     echo "Python virtual environment not found at $venv_dir. Please complete WSL environment setup in Settings." >&2
@@ -1218,6 +1270,7 @@ fi
 
 {offline_env}{token_env}$DOWNLOAD_CMD {model_arg}{revision_flag} 2>&1 || echo __HF_PULL_FAILED__"#,
             tilde_snippet = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
+            pid_file = crate::wsl::shell_quote_wsl(&pid_file),
             venv_literal = venv_literal,
             home_env = home_env,
             offline_env = offline_env,
@@ -1227,15 +1280,15 @@ fi
         );
         let model_ev = model_id.clone();
         let app_ev = app.clone();
-        let on_line = move |line: &str| {
+        let on_line = move |line: String| {
             let (percent, speed_bps, eta_seconds, bytes_downloaded, bytes_total) =
-                parse_progress_line(line).unwrap_or((0.0, None, None, None, None));
+                parse_progress_line(&line).unwrap_or((0.0, None, None, None, None));
             let _ = app_ev.emit(
                 "pull-progress",
                 PullStatus {
                     model: model_ev.clone(),
                     state: "downloading".into(),
-                    file: Some(line.to_string()),
+                    file: Some(line),
                     percent: Some(percent),
                     speed_bps,
                     eta_seconds,
@@ -1244,7 +1297,37 @@ fi
                 },
             );
         };
-        let out = crate::wsl::run_script_stream(&distro, &script, on_line);
+        // C10 & C11: Spawn via stdin so HF_TOKEN is never visible in process arguments,
+        // and track exact child process handle for exact PID cancellation.
+        let server_tag = format!("pull-{}", clean_id);
+        let mut child_res = crate::wsl::spawn_script_via_stdin(&distro, &script, &server_tag, on_line);
+        let out = match child_res.as_mut() {
+            Ok(child) => {
+                register_pull_pid(&model_id, child.pid());
+                let wait_status = child.wait();
+                unregister_pull_pid(&model_id);
+                match wait_status {
+                    Ok(st) => crate::wsl::RunOutput {
+                        ok: st.success(),
+                        code: st.code().unwrap_or(-1),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                    Err(e) => crate::wsl::RunOutput {
+                        ok: false,
+                        code: -1,
+                        stdout: String::new(),
+                        stderr: format!("pull process wait error: {e}"),
+                    },
+                }
+            }
+            Err(e) => crate::wsl::RunOutput {
+                ok: false,
+                code: -1,
+                stdout: String::new(),
+                stderr: format!("failed to spawn pull process: {e}"),
+            },
+        };
 
         // If the download was cancelled via pull_cancel, model_id was already removed from pulling_arc.
         // Do not emit "failed" or overwrite the cancellation state.
@@ -1636,5 +1719,14 @@ mod tests {
         assert!(state.pulling.lock().unwrap().contains_key("test/model"));
         state.pulling.lock().unwrap().remove("test/model");
         assert!(!state.pulling.lock().unwrap().contains_key("test/model"));
+    }
+
+    #[test]
+    fn test_pull_pid_registration_and_cancellation() {
+        let model = "test/model-id";
+        register_pull_pid(model, 12345);
+        assert_eq!(get_pull_pid(model), Some(12345));
+        unregister_pull_pid(model);
+        assert_eq!(get_pull_pid(model), None);
     }
 }

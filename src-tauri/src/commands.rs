@@ -2033,14 +2033,8 @@ pub async fn pull_cancel(state: State<'_, Arc<AppState>>, model_id: String) -> R
     let st = (*state).clone();
     crate::hf::validate_model_id(&model_id).map_err(|e| e.to_string())?;
     let distro = st.resolve_distro();
-    // Keep the validated id inside a shell-quoted pattern; no user text is
-    // interpolated into the command structure itself.
-    let pattern = format!("hf download.*{model_id}([[:space:]]|$)");
-    let script = format!(
-        "pkill -f -- {} || true",
-        crate::wsl::shell_quote_wsl(&pattern)
-    );
-    let _ = crate::wsl::run_script(&distro, &script);
+    // C11: Cancel by exact tracked PID instead of wildcard pkill pattern
+    crate::hf::cancel_pull(&model_id, &distro);
     st.pulling.lock().unwrap().remove(&model_id);
     Ok(())
 }
@@ -5753,10 +5747,12 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
     }
 
     #[test]
-    fn test_pull_cancel_script_anchoring() {
+    fn test_pull_cancel_exact_pid_tracking() {
         let model_id = "meta-llama/Llama-3.1-8B";
-        let script = format!("pkill -f 'hf download.*[ /]{}(\\s|$)' || true", model_id);
-        assert!(script.contains("[ /]meta-llama/Llama-3.1-8B(\\s|$)"));
+        crate::hf::register_pull_pid(model_id, 99999);
+        assert_eq!(crate::hf::get_pull_pid(model_id), Some(99999));
+        crate::hf::unregister_pull_pid(model_id);
+        assert_eq!(crate::hf::get_pull_pid(model_id), None);
     }
 
     #[test]
