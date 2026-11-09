@@ -12,13 +12,14 @@ Running large language models locally on consumer workstations typically require
 
 | Feature | Local LLM Panel | Ollama | LM Studio | Raw CLI (vLLM / llama-server) |
 |---|---|---|---|---|
-| **Target Platform** | Windows 11 (NVIDIA CUDA) | Cross-platform | Cross-platform | Linux / Windows CLI |
+| **Target Platform** | **Windows 10 (2004+) / 11 (NVIDIA CUDA)** | Cross-platform | Cross-platform | Linux / Windows CLI |
 | **Inference Engines** | **Dual:** vLLM (WSL2) + llama.cpp (Windows) | Custom llama.cpp fork | llama.cpp (bundled) | Single engine per command |
 | **High-Throughput vLLM** | Yes (PagedAttention, FlashInfer, AWQ, FP8) | No | No | Yes (requires manual Linux/WSL setup) |
 | **GGUF / Offloading** | Yes (native CUDA `llama-server.exe`) | Yes | Yes | Yes (manual CLI flags) |
 | **Hardware Fit Estimator** | Real-time VRAM, weights + KV-cache math | Basic heuristic | Context slider estimate | None (OOM on launch if oversized) |
 | **OpenAI Gateway** | Built-in reverse proxy with bearer auth | Built-in proxy | Built-in local server | Manual port coordination |
 | **Configuration Model** | Single JSON config with DPAPI-encrypted secrets | Environment variables / CLI | Internal application DB | Scripts / shell variables |
+| **Guided Cleanup** | Built-in dry-run environment and storage cleanup | Manual directory deletion | Manual cache clearing | Manual deletion |
 | **Open Source** | 100% MIT Licensed | MIT Licensed | Proprietary | Apache 2.0 / MIT |
 
 ---
@@ -28,21 +29,25 @@ Running large language models locally on consumer workstations typically require
 1. **Hardware-Aware Discovery & Planning:**
    - Real-time catalog search via Hugging Face and GGUF repositories.
    - Exact memory accounting: weights footprint, KV cache requirements per context window, and attention head overhead.
-   - Distinguishes theoretical estimates from measured benchmark throughput.
+   - Distinguishes analytical planning estimates from empirical benchmark throughput.
 
 2. **Dual Local Inference Backends:**
    - **vLLM in WSL2:** Maximum token throughput for batched, concurrent, and high-performance Hugging Face / Safetensors models with PagedAttention and FlashInfer.
    - **llama.cpp on Windows:** Native GGUF inference, partial GPU/CPU offloading, split tensors, and vision projector support without WSL overhead.
 
 3. **Resilient Download & Model Lifecycle:**
-   - Multi-connection Hugging Face snapshots and GGUF shard downloads with pause/resume support.
-   - Disk space verification and automatic model library indexing.
+   - Multi-connection Hugging Face snapshots and GGUF shard downloads with pause/resume support staging via `.part` files.
+   - Preflight disk space verification before downloads or environment installations.
+   - Multi-file shard integrity verification for split GGUFs and multi-tensor safetensors.
 
-4. **Shared API Surface:**
+4. **Shared API Surface & LAN Security:**
    - Optional OpenAI-compatible gateway routing `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` to currently running servers.
-   - Bearer token authentication and strict CORS policy for security.
+   - Bound strictly to `127.0.0.1` by default; binding to `0.0.0.0` requires an API key, Windows Firewall inbound rule, and WSL port forwarding.
 
-5. **Operational Diagnostics & Telemetry:**
+5. **Guided Environment Cleanup & Storage Management:**
+   - Dry-run inspection tool and itemized cleanup to cleanly reclaim disk space from WSL distributions, Python venvs, Hugging Face caches, GGUF models, and stale partial downloads.
+
+6. **Operational Diagnostics & Telemetry:**
    - Real-time server process logs, health check monitoring, VRAM/GPU utilization telemetry, and reproducible benchmarks.
 
 ---
@@ -59,6 +64,7 @@ Running large language models locally on consumer workstations typically require
 │  - Process Supervisor     - Model Registry / Catalog   │
 │  - Hardware Detector      - Memory & KV Fit Calculator │
 │  - OpenAI Reverse Proxy   - DPAPI Credential Vault     │
+│  - Download Manager       - Guided Storage Cleanup     │
 └──────────────┬────────────────────────────┬────────────┘
                │ Process Control            │ Process Control
 ┌──────────────▼────────────┐  ┌────────────▼────────────┐
@@ -69,15 +75,17 @@ Running large language models locally on consumer workstations typically require
 ```
 
 1. **Measured Performance Over False Precision:**
-   Calculated fit models and token-per-second projections are starting estimates. Actual performance is measured and recorded in repeatable local benchmarks.
+   Calculated fit models and token-per-second projections are analytical starting estimates to prevent out-of-memory crashes. Actual performance is measured and recorded in repeatable local benchmarks.
 2. **Make Resource Constraints Transparent:**
    Model parameters, quantization format, KV-cache context length, and system memory overhead are surfaced prior to launching inference, preventing unexpected CUDA out-of-memory crashes.
 3. **Local by Default:**
-   All services bind strictly to `127.0.0.1`. LAN exposure is an explicit, opt-in administrative toggle.
+   All services bind strictly to `127.0.0.1`. LAN exposure (`0.0.0.0`) is an explicit, opt-in administrative toggle requiring an API key, firewall configuration, and WSL portproxy rules.
 4. **Zero Telemetry & User Privacy:**
-   No telemetry, tracking, or external analytic pings. Credentials (Hugging Face tokens, GitHub tokens) are sealed in Windows DPAPI storage.
+   No telemetry, tracking, or external analytic pings. Credentials (Hugging Face tokens, GitHub tokens, Gateway API keys) are sealed in Windows DPAPI storage.
 5. **Composability:**
    Local LLM Panel manages and monitors standard, unadulterated inference binaries rather than wrapping proprietary closed engines.
+6. **Reversible Footprint:**
+   Every environment asset (WSL distro, venv, model cache, GGUF directory, partial download) can be inspected via dry-run and safely removed with confirmation.
 
 ---
 
