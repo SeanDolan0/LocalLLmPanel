@@ -7,7 +7,7 @@ This file tracks requests from sub-agents needing modifications in files owned b
 | XREQ-01 | Stream A (A12) | `commands.rs` / `wsl.rs` | Stream C (C11) | Exact child PID tracking for WSL download cancel (`pkill` wildcard fix) | Queued for Wave 2 |
 | XREQ-02 | Stream B (B3) | `wsl.rs` | Stream C (C5) | Multi-GPU telemetry (`head -1` -> all GPUs) | Queued for Wave 2 |
 | XREQ-03 | Stream B (B5) | `wsl.rs` | Stream C (C5) | Preserve Option for WSL memory detection (remove synthetic 16/12GB default) | Queued for Wave 2 |
-| XREQ-04 | Stream D (D4) | `provision.rs` / cleanup | Stream F (F6) / Stream C | Sudoers rule scoping and removal | Queued for Wave 3 |
+| XREQ-04 | Stream D (D4) | `provision.rs` / cleanup | Stream F (F6) / Stream C | Sudoers rule scoping and removal | RESOLVED (Wave 3) |
 | XREQ-05 | Stream A (A5) / B (B8) | Frontend UI | Stream G (G6) | Disk space preflight UI presentation | Queued for Wave 3 |
 ## Detailed Request Specifications
 
