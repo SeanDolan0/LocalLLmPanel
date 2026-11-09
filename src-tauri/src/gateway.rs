@@ -38,12 +38,19 @@ pub fn check_gateway_auth(
     headers: &HashMap<String, String>,
     global_key: Option<&str>,
 ) -> Result<(), (u16, String)> {
-    let Some(expected_key) = global_key.map(str::trim).filter(|key| !key.is_empty()) else {
+    let Some(raw_key) = global_key.map(str::trim).filter(|key| !key.is_empty()) else {
         return Err((
             503,
             "Gateway API key is not configured; set one in Settings before using /v1 routes"
                 .to_string(),
         ));
+    };
+    let decrypted_storage;
+    let expected_key = if raw_key.starts_with("dpapi:") {
+        decrypted_storage = crate::security::decrypt_token(raw_key).unwrap_or_else(|_| raw_key.to_string());
+        decrypted_storage.trim()
+    } else {
+        raw_key
     };
     if let Some(h) = headers
         .get("authorization")

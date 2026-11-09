@@ -717,8 +717,17 @@ export default function Settings() {
             <p className="text-xs text-slate-300 leading-relaxed">
               Binding vLLM to <code className="bg-black/40 px-1 py-0.5 rounded text-amber-200">0.0.0.0</code> allows any computer, phone, or device on your local Wi-Fi / subnet to query your GPU model endpoints without Windows credentials.
             </p>
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200/90 leading-relaxed">
-              <strong>Security Recommendation:</strong> Only enable this on a trusted home/office network, and configure an <strong>API Key</strong> to authenticate incoming requests.
+            {!(s.api_key_configured || adv.api_key?.trim()) ? (
+              <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300 leading-relaxed">
+                <strong>API Key Required:</strong> An API key must be configured and saved before enabling 0.0.0.0 LAN binding. Starting an externally-bound server without an API key is refused for security.
+              </div>
+            ) : (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200/90 leading-relaxed">
+                <strong>Security Protection:</strong> Incoming requests must authenticate with your configured API key. Only enable on trusted networks.
+              </div>
+            )}
+            <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-200/90 leading-relaxed">
+              <strong>WSL2 Network Reachability Note:</strong> On default WSL2 NAT, binding <code>0.0.0.0</code> inside WSL does not automatically make the service LAN-reachable from other machines on the physical LAN. WSL2 mirrored mode (<code>networkingMode=mirrored</code> in <code>.wslconfig</code>) or a Windows port proxy (<code>netsh interface portproxy</code>) is required. Note that native llama.cpp binds to <code>127.0.0.1</code> only.
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button
@@ -731,11 +740,16 @@ export default function Settings() {
               </Button>
               <button
                 type="button"
+                disabled={!(s.api_key_configured || adv.api_key?.trim())}
                 onClick={() => {
                   updateAdv({ host: "0.0.0.0" });
                   setShowLanModal(false);
                 }}
-                className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500 transition-colors"
+                className={`rounded-lg px-4 py-2 text-xs font-semibold text-white transition-colors ${
+                  s.api_key_configured || adv.api_key?.trim()
+                    ? "bg-amber-600 hover:bg-amber-500 cursor-pointer"
+                    : "bg-slate-700 text-slate-400 cursor-not-allowed opacity-50"
+                }`}
               >
                 I Understand the Risks, Enable LAN
               </button>
@@ -1449,25 +1463,30 @@ export default function Settings() {
               </Field>
 
               {adv.host === "0.0.0.0" && (
-                <div className="sm:col-span-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 flex items-center justify-between">
-                  <span>⚠️ <strong>LAN Access Active:</strong> Server endpoints bind to <code>0.0.0.0</code> and accept connections from your local subnet.</span>
-                  <button
-                    type="button"
-                    onClick={() => updateAdv({ host: "127.0.0.1" })}
-                    className="ml-3 text-[11px] underline text-amber-200 hover:text-white whitespace-nowrap"
-                  >
-                    Revert to 127.0.0.1
-                  </button>
+                <div className="sm:col-span-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span>⚠️ <strong>LAN Access Active:</strong> Server endpoints bind to <code>0.0.0.0</code> (API key required for start).</span>
+                    <button
+                      type="button"
+                      onClick={() => updateAdv({ host: "127.0.0.1" })}
+                      className="ml-3 text-[11px] underline text-amber-200 hover:text-white whitespace-nowrap"
+                    >
+                      Revert to 127.0.0.1
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-amber-200/80 leading-normal">
+                    Note: Default WSL2 NAT isolates WSL from your physical LAN. Use WSL2 mirrored networking mode (<code>networkingMode=mirrored</code> in <code>.wslconfig</code>) or <code>netsh interface portproxy</code> to expose WSL ports to external LAN devices. Native llama.cpp binds to 127.0.0.1.
+                  </p>
                 </div>
               )}
 
               <Field
                 label="API Key Protection (--api-key)"
-                help="Optional key gating the server and gateway endpoints. No effect on model speed or RAM; if the gateway is enabled, a key is required to call it."
+                help="Key gating server and gateway endpoints. Applies to both vLLM and llama.cpp backends unless overridden per-server. Encrypted at rest with Windows DPAPI (CryptProtectData) and never stored in plaintext."
                 hint={
                   s.api_key_configured
-                    ? "A key is stored securely. Leave blank to keep it; enter or generate a replacement to rotate it."
-                    : "Required for the local gateway. Click 'Auto-generate Key' to create a random key."
+                    ? "Stored securely using Windows DPAPI (CryptProtectData). Leave blank to keep it; enter or generate a replacement to rotate it."
+                    : "Required for the local gateway and external LAN access (0.0.0.0). Click 'Auto-generate Key' to create a random key."
                 }
               >
                 <div className="space-y-2">
