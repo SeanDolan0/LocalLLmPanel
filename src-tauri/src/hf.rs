@@ -75,7 +75,16 @@ pub async fn list_gguf_repo_files(
     repo_id: &str,
     token: Option<&str>,
 ) -> Result<Vec<GgufRepoFile>> {
-    let mut next = Some(format!("{HF_API}/{repo_id}/tree/main?recursive=true"));
+    list_gguf_repo_files_with_revision(client, repo_id, "main", token).await
+}
+
+pub async fn list_gguf_repo_files_with_revision(
+    client: &reqwest::Client,
+    repo_id: &str,
+    revision: &str,
+    token: Option<&str>,
+) -> Result<Vec<GgufRepoFile>> {
+    let mut next = Some(format!("{HF_API}/{repo_id}/tree/{revision}?recursive=true"));
     let mut values: Vec<Value> = Vec::new();
     let mut pages = 0;
 
@@ -110,6 +119,24 @@ pub async fn list_gguf_repo_files(
             })
         })
         .collect())
+}
+
+pub async fn resolve_repo_commit(
+    client: &reqwest::Client,
+    repo_id: &str,
+    token: Option<&str>,
+) -> Result<String> {
+    let url = format!("{HF_API}/{repo_id}");
+    let mut request = client.get(url);
+    if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?.error_for_status()?;
+    let value: Value = response.json().await?;
+    if let Some(sha) = value.get("sha").and_then(Value::as_str) {
+        return Ok(sha.to_string());
+    }
+    bail!("Commit SHA not found for repository {repo_id}");
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1111,6 +1138,30 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
     let hf_token = state.config().hf_token;
     let adv = state.config().advanced_settings;
     let mid = model_id.clone();
+    // A7: Pin revision for vLLM download
+    let resolved_revision = {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok();
+        if let Some(c) = client {
+            let mut req = c.get(format!("{HF_API}/{mid}"));
+            if !hf_token.trim().is_empty() {
+                req = req.bearer_auth(hf_token.trim());
+            }
+            req.send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .and_then(|v| v.get("sha").and_then(|s| s.as_str()).map(|s| s.to_string()))
+        } else {
+            None
+        }
+    };
+    let revision_flag = if let Some(rev) = &resolved_revision {
+        format!(" --revision {}", crate::wsl::shell_quote_wsl(rev))
+    } else {
+        String::new()
+    };
     let venv_literal = crate::wsl::shell_quote_wsl(&venv);
     let token_env = if hf_token.trim().is_empty() {
         String::new()
@@ -1165,13 +1216,14 @@ else
     exit 1
 fi
 
-{offline_env}{token_env}$DOWNLOAD_CMD {model_arg} 2>&1 || echo __HF_PULL_FAILED__"#,
+{offline_env}{token_env}$DOWNLOAD_CMD {model_arg}{revision_flag} 2>&1 || echo __HF_PULL_FAILED__"#,
             tilde_snippet = crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
             venv_literal = venv_literal,
             home_env = home_env,
             offline_env = offline_env,
             token_env = token_env,
             model_arg = crate::wsl::shell_quote_wsl(&mid),
+            revision_flag = revision_flag,
         );
         let model_ev = model_id.clone();
         let app_ev = app.clone();
