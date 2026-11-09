@@ -68,6 +68,9 @@ jobs:
             throw "Release tag $env:RELEASE_TAG does not match package version $expectedTag"
           }
 
+      - name: Security audit gate
+        run: npm run audit:check
+
       - name: Validate release metadata
         run: npm run release:check
 

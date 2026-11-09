@@ -2523,30 +2523,32 @@ pub async fn servers_update_env(
     input: ServerEnvInput,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    let mut cfg = st.config.lock().unwrap();
-    let index = cfg
-        .servers
-        .iter()
-        .position(|server| server.id == input.id)
-        .ok_or_else(|| "Server not found".to_string())?;
-    let original = cfg.servers[index].clone();
-    let mut updated = original.clone();
-    updated.env = input.env;
-    crate::state::merge_server_secret_placeholders(&mut updated, Some(&original));
-    for (name, value) in &updated.env {
-        server::validate_env_name(name)?;
-        if value == crate::state::SECRET_PLACEHOLDER {
-            return Err("secret placeholders could not be restored for this server".into());
+    {
+        let mut cfg = st.config.lock().unwrap();
+        let index = cfg
+            .servers
+            .iter()
+            .position(|server| server.id == input.id)
+            .ok_or_else(|| "Server not found".to_string())?;
+        let original = cfg.servers[index].clone();
+        let mut updated = original.clone();
+        updated.env = input.env;
+        crate::state::merge_server_secret_placeholders(&mut updated, Some(&original));
+        for (name, value) in &updated.env {
+            server::validate_env_name(name)?;
+            if value == crate::state::SECRET_PLACEHOLDER {
+                return Err("secret placeholders could not be restored for this server".into());
+            }
         }
+        let mut next = cfg.clone();
+        next.servers[index] = updated;
+        next.save().map_err(|e| e.to_string())?;
+        *cfg = next;
     }
-    let mut next = cfg.clone();
-    next.servers[index] = updated;
-    next.save().map_err(|e| e.to_string())?;
-    *cfg = next;
     if input.restart.unwrap_or(false) {
-        drop(cfg);
+        let server_id = input.id.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            server::restart_server(&st, Some(&app), &input.id).map_err(|e| e.to_string())
+            server::restart_server(&st, Some(&app), &server_id).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -5802,4 +5804,23 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Guided Cleanup Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn cleanup_inspect(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::cleanup::CleanupPlan, String> {
+    Ok(crate::cleanup::inspect_cleanup(&state))
+}
+
+#[tauri::command]
+pub async fn cleanup_execute(
+    state: State<'_, Arc<AppState>>,
+    confirmed_targets: Vec<crate::cleanup::CleanupTarget>,
+) -> Result<crate::cleanup::CleanupExecutionReport, String> {
+    Ok(crate::cleanup::execute_cleanup(&state, &confirmed_targets))
 }

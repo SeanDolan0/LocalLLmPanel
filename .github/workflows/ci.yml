@@ -129,26 +129,29 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Build standalone Windows executable
-        run: npm run build:fast
+      - name: Build Windows installer packages (NSIS, MSI) and standalone executable
+        run: npm run build:all
 
       - name: Validate build artifacts and checksums
-        run: node scripts/validate-release.mjs --fast --artifacts
+        run: node scripts/validate-release.mjs --all --artifacts
 
-      - name: Upload standalone executable and checksum
+      - name: Upload Windows installer packages and standalone executable
         uses: actions/upload-artifact@v4
         with:
-          name: local-llm-panel-windows-standalone
+          name: local-llm-panel-windows-artifacts
           path: |
             dist-release/LocalLLMPanel-*.exe
             dist-release/LocalLLMPanel-*.exe.sha256
+            dist-release/Local.LLM.Panel_*_x64-setup.exe
+            dist-release/Local.LLM.Panel_*_x64-setup.exe.sha256
+            dist-release/Local.LLM.Panel_*_x64_en-US.msi
+            dist-release/Local.LLM.Panel_*_x64_en-US.msi.sha256
           if-no-files-found: error
           retention-days: 7
 
   dependency-audit:
     name: Dependency Security Audits
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -158,13 +161,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Audit npm dependencies
-        run: npm audit --audit-level=high
-        continue-on-error: true
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
 
-      - name: Audit Rust dependencies
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: src-tauri
-        continue-on-error: true
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit gate (cargo + npm with allowlist)
+        run: npm run audit:check

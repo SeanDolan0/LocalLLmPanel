@@ -15,7 +15,8 @@
     "build:fast": "node scripts/build.mjs --fast",
     "build:setup": "node scripts/build.mjs --setup",
     "build:all": "node scripts/build.mjs --all",
-    "release": "node scripts/build.mjs --setup"
+    "release": "node scripts/build.mjs --setup",
+    "audit:check": "node scripts/security-audit.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

@@ -1,5 +1,6 @@
 //! Local LLM Panel — Tauri 2 app managing vLLM inside WSL2.
 
+pub mod cleanup;
 pub mod commands;
 pub mod completion;
 pub mod context_fit;
@@ -165,6 +166,7 @@ pub fn run() {
             commands::servers_list,
             commands::servers_create,
             commands::servers_update,
+            commands::servers_update_env,
             commands::servers_delete,
             commands::servers_start,
             commands::servers_stop,
@@ -217,6 +219,8 @@ pub fn run() {
             commands::download_cancel,
             commands::download_queue_status,
             commands::download_clear_completed,
+            commands::cleanup_inspect,
+            commands::cleanup_execute,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
