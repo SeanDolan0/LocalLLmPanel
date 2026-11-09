@@ -11,7 +11,7 @@ edition = "2021"
 
 [lib]
 name = "llm_panel_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "llm-panel"
