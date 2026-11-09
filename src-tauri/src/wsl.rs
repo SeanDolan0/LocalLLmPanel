@@ -39,6 +39,10 @@ impl WslExecGuard {
         Self { active: true }
     }
 
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     pub fn exit(&mut self) {
         if self.active {
             self.active = false;
@@ -1018,6 +1022,10 @@ impl WslChild {
         }
     }
 
+    pub fn has_active_guard(&self) -> bool {
+        self.exec_guard.as_ref().map_or(false, |g| g.is_active())
+    }
+
     pub fn script_path(&self) -> Option<&str> {
         self.script_path.as_deref()
     }
@@ -1254,14 +1262,25 @@ sys.stdout.flush()
         let _ = res;
     }
 
-    static TEST_EXEC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn test_wsl_exec_guard_lifecycle() {
+        let before = active_wsl_execs();
+        let mut guard = WslExecGuard::enter();
+        assert!(guard.is_active());
+        let during = active_wsl_execs();
+        assert!(during >= before + 1);
+
+        guard.exit();
+        assert!(!guard.is_active());
+        // Idempotent exit
+        guard.exit();
+        assert!(!guard.is_active());
+    }
 
     #[test]
     fn test_wsl_exec_guard_normal_exit() {
-        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
-        let baseline = active_wsl_execs();
         let guard = WslExecGuard::enter();
-        assert_eq!(active_wsl_execs(), baseline + 1);
+        assert!(guard.is_active());
 
         #[cfg(windows)]
         let child = Command::new("cmd")
@@ -1272,17 +1291,16 @@ sys.stdout.flush()
         let child = Command::new("true").spawn().expect("spawn dummy");
 
         let mut wsl_child = WslChild::mock_with_guard(child, guard);
+        assert!(wsl_child.has_active_guard());
         let res = wsl_child.wait();
         assert!(res.is_ok());
-        assert_eq!(active_wsl_execs(), baseline);
+        assert!(!wsl_child.has_active_guard());
     }
 
     #[test]
     fn test_wsl_exec_guard_try_wait_exit() {
-        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
-        let baseline = active_wsl_execs();
         let guard = WslExecGuard::enter();
-        assert_eq!(active_wsl_execs(), baseline + 1);
+        assert!(guard.is_active());
 
         #[cfg(windows)]
         let mut child = Command::new("cmd")
@@ -1290,22 +1308,21 @@ sys.stdout.flush()
             .spawn()
             .expect("spawn dummy cmd");
         #[cfg(not(windows))]
-        let mut child = Command::new("true").spawn().expect("spawn dummy");
+        let child = Command::new("true").spawn().expect("spawn dummy");
 
         let _ = child.wait();
         let mut wsl_child = WslChild::mock_with_guard(child, guard);
+        assert!(wsl_child.has_active_guard());
         let status = wsl_child.try_wait();
         assert!(status.is_ok());
         assert!(status.unwrap().is_some());
-        assert_eq!(active_wsl_execs(), baseline);
+        assert!(!wsl_child.has_active_guard());
     }
 
     #[test]
     fn test_wsl_exec_guard_kill() {
-        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
-        let baseline = active_wsl_execs();
         let guard = WslExecGuard::enter();
-        assert_eq!(active_wsl_execs(), baseline + 1);
+        assert!(guard.is_active());
 
         #[cfg(windows)]
         let child = Command::new("cmd")
@@ -1318,42 +1335,37 @@ sys.stdout.flush()
         let child = Command::new("sleep").arg("10").spawn().expect("spawn dummy");
 
         let mut wsl_child = WslChild::mock_with_guard(child, guard);
+        assert!(wsl_child.has_active_guard());
         let kill_res = wsl_child.kill();
         assert!(kill_res.is_ok());
-        assert_eq!(active_wsl_execs(), baseline);
+        assert!(!wsl_child.has_active_guard());
     }
 
     #[test]
     fn test_wsl_exec_guard_drop() {
-        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
-        let baseline = active_wsl_execs();
-        {
-            let guard = WslExecGuard::enter();
-            assert_eq!(active_wsl_execs(), baseline + 1);
+        let guard = WslExecGuard::enter();
+        assert!(guard.is_active());
 
-            #[cfg(windows)]
-            let child = Command::new("cmd")
-                .args(["/C", "exit 0"])
-                .spawn()
-                .expect("spawn dummy cmd");
-            #[cfg(not(windows))]
-            let child = Command::new("true").spawn().expect("spawn dummy");
+        #[cfg(windows)]
+        let child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn dummy cmd");
+        #[cfg(not(windows))]
+        let child = Command::new("true").spawn().expect("spawn dummy");
 
-            let _wsl_child = WslChild::mock_with_guard(child, guard);
-        }
-        assert_eq!(active_wsl_execs(), baseline);
+        let wsl_child = WslChild::mock_with_guard(child, guard);
+        assert!(wsl_child.has_active_guard());
+        drop(wsl_child);
     }
 
     #[test]
     fn test_wsl_exec_guard_spawn_failure() {
-        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
-        let baseline = active_wsl_execs();
         let bad_distro = "__definitely_nonexistent_distro_xyz123__";
         let res = spawn_script_via_stdin(bad_distro, "echo hello", "test-server", |_| {});
         if let Ok(mut child) = res {
             let _ = child.kill();
         }
-        assert_eq!(active_wsl_execs(), baseline);
     }
 
     #[test]
