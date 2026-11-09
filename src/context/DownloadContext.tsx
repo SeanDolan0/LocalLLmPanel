@@ -15,6 +15,7 @@ export type DownloadStatusType =
   | "Resolving"
   | "Downloading"
   | "Paused"
+  | "Verifying"
   | "Completed"
   | "Failed"
   | "Cancelled";
@@ -43,6 +44,8 @@ export interface UnifiedDownloadItem {
   rawJob?: DownloadJob;
   updatedAt: number;
   finishedAt?: number;
+  revision?: string | null;
+  verificationState?: "unverified" | "verifying" | "verified" | "size_only" | "failed";
 }
 
 interface DownloadContextValue {
@@ -68,6 +71,7 @@ function normalizeStatus(statusRaw?: string | null): DownloadStatusType {
   if (s === "resolving") return "Resolving";
   if (s === "downloading") return "Downloading";
   if (s === "paused") return "Paused";
+  if (s === "verifying") return "Verifying";
   if (s === "completed" || s === "complete") return "Completed";
   if (s === "failed") return "Failed";
   if (s === "cancelled" || s === "canceled") return "Cancelled";
@@ -103,6 +107,11 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
               ? existing?.finishedAt || now
               : undefined;
 
+          const anyJob = job as any;
+          const supportsPause = anyJob.supports_pause ?? true;
+          const supportsResume = anyJob.supports_resume ?? true;
+          const supportsCancel = anyJob.supports_cancel ?? true;
+
           next[job.id] = {
             id: job.id,
             modelId: job.model_id || job.repo_id,
@@ -121,18 +130,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
             status,
             error: job.error || null,
             isGguf: true,
-            canPause: status === "Downloading",
-            canResume: status === "Paused",
-            canCancel: status === "Downloading" || status === "Resolving" || status === "Queued" || status === "Paused",
+            canPause: supportsPause && (status === "Downloading"),
+            canResume: supportsResume && (status === "Paused"),
+            canCancel: supportsCancel && (status === "Downloading" || status === "Resolving" || status === "Queued" || status === "Paused"),
             rawJob: job,
             updatedAt: now,
             finishedAt,
+            revision: anyJob.revision ?? null,
+            verificationState: anyJob.verification_state || existing?.verificationState || "unverified",
           };
         }
 
-        // Sync legacy HF pull jobs
+        // Sync legacy HF pull jobs (vLLM)
         for (const mid of pullState.pulling || []) {
-          // If already tracked as a GGUF job, don't duplicate
           const existingJob = Object.values(next).find(
             (j) => j.repoId.toLowerCase() === mid.toLowerCase() || j.modelId.toLowerCase() === mid.toLowerCase()
           );
@@ -158,12 +168,13 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
                 canResume: false,
                 canCancel: true,
                 updatedAt: now,
+                verificationState: "unverified",
               };
             }
           }
         }
 
-        // Auto-clean very old completed items (after 30 seconds)
+        // Auto-clean completed and cancelled items after 30 seconds (keep Failed items visible)
         for (const [key, item] of Object.entries(next)) {
           if (
             (item.status === "Completed" || item.status === "Cancelled") &&
@@ -207,6 +218,11 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
             ? existing?.finishedAt || now
             : undefined;
 
+        const anyP = p as any;
+        const supportsPause = anyP.supports_pause !== false;
+        const supportsResume = anyP.supports_resume !== false;
+        const supportsCancel = anyP.supports_cancel !== false;
+
         next[key] = {
           id: p.job_id || key,
           modelId: p.model_id || existing?.modelId || "",
@@ -225,12 +241,14 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           status,
           error: p.error || null,
           isGguf: true,
-          canPause: status === "Downloading",
-          canResume: status === "Paused",
-          canCancel: status === "Downloading" || status === "Resolving" || status === "Queued" || status === "Paused",
+          canPause: supportsPause && (status === "Downloading"),
+          canResume: supportsResume && (status === "Paused"),
+          canCancel: supportsCancel && (status === "Downloading" || status === "Resolving" || status === "Queued" || status === "Paused"),
           rawJob: existing?.rawJob,
           updatedAt: now,
           finishedAt,
+          revision: anyP.revision ?? existing?.revision ?? null,
+          verificationState: anyP.verification_state || existing?.verificationState || "unverified",
         };
 
         return next;
@@ -245,7 +263,6 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       setItemsMap((prev) => {
         const next = { ...prev };
 
-        // Match against existing item by model or repoId, respecting quant if present
         const matchEntry = Object.entries(next).find(
           ([, item]) => {
             const idMatches =
@@ -291,19 +308,19 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           status,
           error: p.error || (status === "Failed" ? p.file : null),
           isGguf: existing?.isGguf ?? false,
-          canPause: existing?.canPause ?? false,
-          canResume: existing?.canResume ?? false,
+          canPause: false, // vLLM CLI does not support pause
+          canResume: false, // vLLM CLI does not support resume
           canCancel: status === "Downloading" || status === "Resolving" || status === "Queued",
           rawJob: existing?.rawJob,
           updatedAt: now,
           finishedAt,
+          verificationState: "unverified",
         };
 
         return next;
       });
     });
 
-    // Adaptive polling: poll frequently (2.5s) if downloads active, less often (8s) when idle
     const pollTimer = setInterval(() => {
       syncQueue();
     }, 2500);
@@ -326,6 +343,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         d.status === "Downloading" ||
         d.status === "Resolving" ||
         d.status === "Queued" ||
+        d.status === "Verifying" ||
         d.status === "Paused"
     );
   }, [downloads]);
@@ -387,7 +405,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
   const pauseDownload = useCallback(
     async (id: string) => {
       const item = itemsMapRef.current[id];
-      if (item) {
+      if (item && item.canPause) {
         await api.downloadPause(item.id).catch(() => {});
         setItemsMap((prev) => {
           if (!prev[id]) return prev;
@@ -408,36 +426,51 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     [syncQueue]
   );
 
+  // A10: Fix resumeDownload ignoring new job ID and creating duplicate entries
   const resumeDownload = useCallback(
     async (id: string) => {
       const item = itemsMapRef.current[id];
       if (item && item.rawJob) {
         const j = item.rawJob;
-        await api.downloadStart(j.model_id, j.repo_id, j.quant, j.files, j.backend).catch(() => {});
-        setItemsMap((prev) => {
-          if (!prev[id]) return prev;
-          return {
-            ...prev,
-            [id]: {
-              ...prev[id],
-              status: "Resolving",
-              canPause: true,
-              canResume: false,
-            },
-          };
-        });
+        try {
+          const newJobId = await api.downloadStart(
+            j.model_id,
+            j.repo_id,
+            j.quant,
+            j.files,
+            j.backend
+          );
+          if (newJobId) {
+            setItemsMap((prev) => {
+              const next = { ...prev };
+              delete next[id]; // Remove old job key to prevent duplicate
+              next[newJobId] = {
+                ...item,
+                id: newJobId,
+                status: "Resolving",
+                canPause: true,
+                canResume: false,
+                updatedAt: Date.now(),
+              };
+              return next;
+            });
+          }
+        } catch (e) {
+          console.error("Failed to resume download:", e);
+        }
         setTimeout(syncQueue, 300);
       }
     },
     [syncQueue]
   );
 
+  // A10: Fix clearCompleted removing Failed jobs backend retains
   const clearCompleted = useCallback(async () => {
     await api.downloadClearCompleted().catch(() => {});
     setItemsMap((prev) => {
       const next = { ...prev };
       for (const [key, item] of Object.entries(next)) {
-        if (item.status === "Completed" || item.status === "Cancelled" || item.status === "Failed") {
+        if (item.status === "Completed" || item.status === "Cancelled") {
           delete next[key];
         }
       }
