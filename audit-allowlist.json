@@ -1,0 +1,23 @@
+{
+  "$schema": "./scripts/audit-allowlist.schema.json",
+  "version": 1,
+  "description": "Documented allowlist for accepted/reviewed security advisories in Rust and npm dependencies.",
+  "advisories": [
+    {
+      "id": "RUSTSEC-2024-0370",
+      "ecosystem": "cargo",
+      "package": "proc-macro-error",
+      "reason": "Crate is unmaintained. Pulled transitively by derive macros; no vulnerability or exploit mechanism. Safe to use until upstream dependencies migrate.",
+      "severity": "warning",
+      "status": "accepted"
+    },
+    {
+      "id": "RUSTSEC-2024-0429",
+      "ecosystem": "cargo",
+      "package": "glib",
+      "reason": "Unsoundness in VariantStrIter iterator. Not invoked directly or exposed to untrusted input in Local LLM Panel.",
+      "severity": "warning",
+      "status": "accepted"
+    }
+  ]
+}
