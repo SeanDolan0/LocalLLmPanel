@@ -129,6 +129,10 @@ pub fn run() {
                 });
             }
 
+            // Reconcile orphaned server processes on app startup (C9)
+            let state_reconcile: tauri::State<Arc<AppState>> = app.state();
+            let _reconciled = crate::server::reconcile_orphaned_servers(&state_reconcile);
+
             gateway::spawn_supervisor(app.handle().clone());
             let app_handle_reaper = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {

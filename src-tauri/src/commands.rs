@@ -2055,6 +2055,10 @@ pub struct ServerListRow {
     pub status: String,
     pub error: Option<String>,
     pub metrics: Option<server::MetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_alive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_healthy: Option<bool>,
 }
 
 #[tauri::command]
@@ -2062,11 +2066,19 @@ pub fn servers_list(state: State<'_, Arc<AppState>>) -> Vec<ServerListRow> {
     let st = (*state).clone();
     server::list_servers(&st)
         .into_iter()
-        .map(|(def, status, error, metrics)| ServerListRow {
-            def,
-            status: status.label().to_string(),
-            error,
-            metrics,
+        .map(|(def, status, error, metrics)| {
+            let (process_alive, http_healthy) = match server::get_server_health(&def.id) {
+                Some(h) => (Some(h.process_alive), Some(h.http_healthy)),
+                None => (None, None),
+            };
+            ServerListRow {
+                def,
+                status: status.label().to_string(),
+                error,
+                metrics,
+                process_alive,
+                http_healthy,
+            }
         })
         .collect()
 }
@@ -2206,7 +2218,12 @@ pub async fn servers_create(
             }
             p
         }
-        None => server::alloc_port(&existing).map_err(|e| e.to_string())?,
+        None => {
+            let mut held = server::alloc_port_held(&existing).map_err(|e| e.to_string())?;
+            let p = held.port;
+            held.release();
+            p
+        },
     };
 
     let gpu_mem_util = input

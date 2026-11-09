@@ -2,7 +2,8 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -111,27 +112,131 @@ fn acquire_start_permit(state: &Arc<AppState>, id: &str) -> Result<StartPermit> 
     })
 }
 
+// Global GPU-memory reservation tracking (C6)
+static VRAM_RESERVATIONS_MB: std::sync::LazyLock<Mutex<HashMap<String, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static VRAM_RESERVATION_MUTEX: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+
+pub fn total_reserved_vram_mb() -> u64 {
+    VRAM_RESERVATIONS_MB.lock().unwrap().values().sum()
+}
+
+pub fn reserved_vram_mb(server_id: &str) -> Option<u64> {
+    VRAM_RESERVATIONS_MB.lock().unwrap().get(server_id).copied()
+}
+
+pub fn reserve_vram(server_id: &str, amount_mb: u64) {
+    VRAM_RESERVATIONS_MB
+        .lock()
+        .unwrap()
+        .insert(server_id.to_string(), amount_mb);
+}
+
+pub fn release_vram(server_id: &str) {
+    VRAM_RESERVATIONS_MB.lock().unwrap().remove(server_id);
+}
+
+pub struct VramReservationGuard {
+    pub server_id: String,
+    pub amount_mb: u64,
+    active: bool,
+}
+
+impl VramReservationGuard {
+    pub fn new(server_id: &str, amount_mb: u64) -> Self {
+        reserve_vram(server_id, amount_mb);
+        Self {
+            server_id: server_id.to_string(),
+            amount_mb,
+            active: true,
+        }
+    }
+
+    pub fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for VramReservationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            release_vram(&self.server_id);
+        }
+    }
+}
+
+// Health vs Liveness separation (C8)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ServerHealthState {
+    pub process_alive: bool,
+    pub http_healthy: bool,
+}
+
+static SERVER_HEALTH: std::sync::LazyLock<Mutex<HashMap<String, ServerHealthState>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn get_server_health(id: &str) -> Option<ServerHealthState> {
+    SERVER_HEALTH.lock().unwrap().get(id).copied()
+}
+
+pub fn set_server_health(id: &str, state: ServerHealthState) {
+    SERVER_HEALTH.lock().unwrap().insert(id.to_string(), state);
+}
+
+pub fn remove_server_health(id: &str) {
+    SERVER_HEALTH.lock().unwrap().remove(id);
+}
+
 // ---------------------------------------------------------------------------
 // Port allocation
 // ---------------------------------------------------------------------------
 
 /// Allocate a free localhost port, starting at 8000 (or after `min`),
 /// skipping any ports already bound by existing server definitions.
-pub fn alloc_port(existing: &[u16]) -> Result<u16> {
+/// Held free port: binds a TcpListener so the port cannot be claimed by another
+/// process between allocation and process launch (bind-and-hold) (C7).
+pub struct HeldPort {
+    pub port: u16,
+    listener: Option<TcpListener>,
+}
+
+impl HeldPort {
+    pub fn release(&mut self) {
+        self.listener.take();
+    }
+}
+
+impl Drop for HeldPort {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Allocate a free localhost port and hold the listener open until released.
+pub fn alloc_port_held(existing: &[u16]) -> Result<HeldPort> {
     let mut port = DEFAULT_PORT_START;
     loop {
         if existing.contains(&port) {
             port += 1;
             continue;
         }
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return Ok(HeldPort {
+                port,
+                listener: Some(listener),
+            });
         }
         port = port.wrapping_add(1);
         if port == DEFAULT_PORT_START {
             bail!("no free port found");
         }
     }
+}
+
+/// Allocate a free localhost port, skipping any ports already in existing list.
+pub fn alloc_port(existing: &[u16]) -> Result<u16> {
+    alloc_port_held(existing).map(|h| h.port)
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1274,10 @@ pub struct ServerStatusEvent {
     pub id: String,
     pub status: String,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_alive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_healthy: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1177,20 +1286,39 @@ struct ServerLogEvent {
     line: String,
 }
 
-fn emit_status(
+pub fn emit_status_full(
+    app: Option<&tauri::AppHandle>,
+    id: &str,
+    status: ServerStatus,
+    error: Option<String>,
+    process_alive: Option<bool>,
+    http_healthy: Option<bool>,
+) {
+    if let Some(app) = app {
+        let payload = ServerStatusEvent {
+            id: id.to_string(),
+            status: status.label().to_string(),
+            error,
+            process_alive,
+            http_healthy,
+        };
+        let _ = app.emit("server-status", payload);
+    }
+}
+
+pub fn emit_status(
     app: Option<&tauri::AppHandle>,
     id: &str,
     status: ServerStatus,
     error: Option<String>,
 ) {
-    let payload = ServerStatusEvent {
-        id: id.to_string(),
-        status: status.label().to_string(),
-        error,
+    let (alive, healthy) = match status {
+        ServerStatus::Running => (Some(true), Some(true)),
+        ServerStatus::Starting => (Some(true), Some(false)),
+        ServerStatus::Stopped => (Some(false), Some(false)),
+        ServerStatus::Error => (None, Some(false)),
     };
-    if let Some(app) = app {
-        let _ = app.emit("server-status", payload);
-    }
+    emit_status_full(app, id, status, error, alive, healthy);
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,18 +1347,36 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         }
     }
 
-    // Dynamically clamp GPU memory utilization based on currently available VRAM
-    // to prevent vLLM startup ValueError when Windows/desktop processes occupy VRAM.
-    // When vLLM starts inside WSL2, PyTorch CUDA runtime context, primary context allocations,
-    // and NCCL distributed environment buffers take ~1,300-1,400 MB of VRAM BEFORE vLLM checks
-    // free memory against requested utilization (init_snapshot.free_memory >= total * util).
+    // Verify port is free before starting server process (C7)
+    if TcpListener::bind(("127.0.0.1", def.port)).is_err() {
+        bail!("port {} is already in use by another process", def.port);
+    }
+
+    // Acquire global reservation lock so simultaneous server starts cannot race (C6)
+    let _vram_lock = VRAM_RESERVATION_MUTEX.lock().unwrap();
+
+    let prior_reserved: u64 = {
+        let res = VRAM_RESERVATIONS_MB.lock().unwrap();
+        res.iter()
+            .filter(|(k, _)| k.as_str() != id)
+            .map(|(_, v)| *v)
+            .sum()
+    };
+
     let mut vram_notice: Option<String> = None;
+    let mut vram_guard: Option<VramReservationGuard> = None;
     if backend_kind == crate::state::ServerBackend::Vllm {
         if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
             if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
                 let startup_overhead_mb = 1400.0;
-                let available_mb = (snap.vram_free_mb as f64 - startup_overhead_mb).max(0.0);
-                let safe_ratio = available_mb / snap.vram_total_mb as f64;
+                let effective_free = (snap.vram_free_mb.saturating_sub(prior_reserved) as f64 - startup_overhead_mb).max(0.0);
+                if effective_free == 0.0 && prior_reserved > 0 {
+                    bail!(
+                        "insufficient GPU VRAM: {} MB free on GPU, but {} MB is reserved by other servers; cannot safely launch server {}",
+                        snap.vram_free_mb, prior_reserved, def.name
+                    );
+                }
+                let safe_ratio = effective_free / snap.vram_total_mb as f64;
                 let cap = if snap.vram_total_mb >= 20000 {
                     0.92
                 } else if snap.vram_total_mb >= 15000 {
@@ -1244,10 +1390,12 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     let orig = def.gpu_mem_util;
                     def.gpu_mem_util = safe_max_rounded;
                     vram_notice = Some(format!(
-                    "[LocalLLmPanel] Free VRAM is {} MB / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} (accounting for PyTorch/NCCL startup buffers) to prevent startup crash.",
-                    snap.vram_free_mb, snap.vram_total_mb, (snap.vram_free_mb as f64 / snap.vram_total_mb as f64) * 100.0, orig, def.gpu_mem_util
+                    "[LocalLLmPanel] Free VRAM is {} MB ({} MB unreserved) / {} MB ({:.1}%). Clamping GPU memory utilization from {:.2} to {:.2} (accounting for PyTorch/NCCL startup buffers) to prevent startup crash.",
+                    snap.vram_free_mb, snap.vram_free_mb.saturating_sub(prior_reserved), snap.vram_total_mb, (snap.vram_free_mb as f64 / snap.vram_total_mb as f64) * 100.0, orig, def.gpu_mem_util
                 ));
                 }
+                let target_vram_mb = (snap.vram_total_mb as f64 * def.gpu_mem_util) as u64;
+                vram_guard = Some(VramReservationGuard::new(id, target_vram_mb));
             }
         }
     }
@@ -1423,6 +1571,11 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             },
         );
     }
+    if let Some(mut vg) = vram_guard {
+        vg.disarm();
+    }
+    set_server_health(id, ServerHealthState { process_alive: true, http_healthy: false });
+
     let persist_error = {
         let mut cfg = state.config.lock().unwrap();
         if let Some(d) = cfg.servers.iter_mut().find(|s| s.id == id) {
@@ -1523,7 +1676,8 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 ls.crash_retry_count = 0;
             }
         }
-        emit_status(app.as_ref(), &id_task, ServerStatus::Running, None);
+        set_server_health(&id_task, ServerHealthState { process_alive: true, http_healthy: true });
+        emit_status_full(app.as_ref(), &id_task, ServerStatus::Running, None, Some(true), Some(true));
         update_status(&state_task, &id_task, ServerStatus::Running);
 
         // Metrics + liveness loop
@@ -1553,6 +1707,8 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 (exit, stopping)
             };
             if let Some(exit) = exited {
+                release_vram(&id_task);
+                set_server_health(&id_task, ServerHealthState { process_alive: false, http_healthy: false });
                 if !stopping {
                     let auto_restart = state_task.config.lock().unwrap().auto_restart_crashed;
                     let retry_count = {
@@ -1910,10 +2066,12 @@ pub fn stop_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &s
                 ls.stopping = true;
                 (ls.wsl_child.take(), ls.native_child.take())
             }
-            // Already stopped — idempotent no-op.
+            // Already stopped ? idempotent no-op.
             _ => (None, None),
         }
     };
+    release_vram(id);
+    remove_server_health(id);
 
     let had_wsl_child_stop = wsl_child.is_some();
     let backend_is_wsl = if had_wsl_child_stop {
@@ -3185,6 +3343,99 @@ pub fn server_metrics(state: &Arc<AppState>, server_id: &str) -> Option<MetricsS
     servers
         .get(server_id)
         .and_then(|ls| ls.last_metrics.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Hard-crash reconciliation (C9)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReconciledServer {
+    pub id: String,
+    pub backend: String,
+    pub orphaned_pid: Option<u32>,
+    pub port: u16,
+    pub action: String,
+}
+
+/// Pure helper for testing pidfile reconciliation logic without shelling out.
+pub fn reconcile_server_pidfile(
+    content: &str,
+    mut is_alive: impl FnMut(u32) -> bool,
+    mut kill_pid: impl FnMut(u32),
+) -> Option<(&'static str, u32)> {
+    let pid = content.trim().parse::<u32>().ok()?;
+    if is_alive(pid) {
+        kill_pid(pid);
+        Some(("terminated_orphaned_wsl_process", pid))
+    } else {
+        Some(("cleaned_stale_pidfile", pid))
+    }
+}
+
+/// Reconcile orphaned llama-server / WSL vLLM processes on app startup or restart (C9).
+pub fn reconcile_orphaned_servers(state: &Arc<AppState>) -> Vec<ReconciledServer> {
+    let mut reconciled = Vec::new();
+    let cfg = state.config();
+    let distro = state.resolve_distro();
+
+    for def in &cfg.servers {
+        release_vram(&def.id);
+        remove_server_health(&def.id);
+
+        if def.backend == "vllm" || def.backend == "Vllm" {
+            let pid_script = format!(
+                r#"{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\ncat "$venv_dir/../run/$run_id.pid" 2>/dev/null || true"#,
+                wsl::WSL_TILDE_EXPANSION_SNIPPET,
+                wsl::shell_quote_wsl(&cfg.venv_dir),
+                wsl::shell_quote_wsl(&def.id),
+            );
+            let out = wsl::run_script(&distro, &pid_script);
+            let pid_trimmed = out.stdout.trim();
+            if let Ok(pid) = pid_trimmed.parse::<u32>() {
+                let probe = wsl::run_script(
+                    &distro,
+                    &format!("kill -0 {pid} 2>/dev/null && echo alive || echo dead"),
+                );
+                let is_alive = probe.stdout.contains("alive");
+                if is_alive {
+                    let _ = wsl::run_script(
+                        &distro,
+                        &format!("kill -TERM {pid} 2>/dev/null || true"),
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                    let _ = wsl::run_script(
+                        &distro,
+                        &format!("kill -KILL {pid} 2>/dev/null || true"),
+                    );
+                    reconciled.push(ReconciledServer {
+                        id: def.id.clone(),
+                        backend: def.backend.clone(),
+                        orphaned_pid: Some(pid),
+                        port: def.port,
+                        action: "terminated_orphaned_wsl_process".into(),
+                    });
+                } else {
+                    reconciled.push(ReconciledServer {
+                        id: def.id.clone(),
+                        backend: def.backend.clone(),
+                        orphaned_pid: Some(pid),
+                        port: def.port,
+                        action: "cleaned_stale_pidfile".into(),
+                    });
+                }
+                let cleanup_script = format!(
+                    r#"{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrm -f "$venv_dir/../run/{}.pid""#,
+                    wsl::WSL_TILDE_EXPANSION_SNIPPET,
+                    wsl::shell_quote_wsl(&cfg.venv_dir),
+                    wsl::shell_quote_wsl(&def.id),
+                );
+                let _ = wsl::run_script(&distro, &cleanup_script);
+            }
+        }
+    }
+
+    reconciled
 }
 
 #[cfg(test)]
@@ -4549,4 +4800,80 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let filtered = filter_llamacpp_args(input_args, old_help);
         assert_eq!(filtered, vec!["-m", "model.gguf"]);
     }
+
+    #[test]
+    fn test_vram_reservation_tracking() {
+        release_vram("test-server-1");
+        release_vram("test-server-2");
+        assert_eq!(total_reserved_vram_mb(), 0);
+
+        reserve_vram("test-server-1", 8000);
+        assert_eq!(reserved_vram_mb("test-server-1"), Some(8000));
+        assert_eq!(total_reserved_vram_mb(), 8000);
+
+        reserve_vram("test-server-2", 4000);
+        assert_eq!(total_reserved_vram_mb(), 12000);
+
+        release_vram("test-server-1");
+        assert_eq!(total_reserved_vram_mb(), 4000);
+        assert_eq!(reserved_vram_mb("test-server-1"), None);
+
+        release_vram("test-server-2");
+        assert_eq!(total_reserved_vram_mb(), 0);
+    }
+
+    #[test]
+    fn test_alloc_port_held_bind_and_hold() {
+        let mut held = alloc_port_held(&[]).expect("allocate held port");
+        let port = held.port;
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_err());
+
+        held.release();
+        let second_bind = TcpListener::bind(("127.0.0.1", port));
+        assert!(second_bind.is_ok());
+    }
+
+    #[test]
+    fn test_server_health_state_separation() {
+        remove_server_health("srv-c8");
+        assert_eq!(get_server_health("srv-c8"), None);
+
+        set_server_health("srv-c8", ServerHealthState { process_alive: true, http_healthy: false });
+        assert_eq!(get_server_health("srv-c8"), Some(ServerHealthState { process_alive: true, http_healthy: false }));
+
+        set_server_health("srv-c8", ServerHealthState { process_alive: true, http_healthy: true });
+        assert_eq!(get_server_health("srv-c8"), Some(ServerHealthState { process_alive: true, http_healthy: true }));
+
+        set_server_health("srv-c8", ServerHealthState { process_alive: false, http_healthy: false });
+        assert_eq!(get_server_health("srv-c8"), Some(ServerHealthState { process_alive: false, http_healthy: false }));
+
+        remove_server_health("srv-c8");
+        assert_eq!(get_server_health("srv-c8"), None);
+    }
+
+    #[test]
+    fn test_reconcile_server_pidfile_alive_vs_dead() {
+        let mut killed = Vec::new();
+
+        let res_alive = reconcile_server_pidfile(
+            "12345\n",
+            |pid| pid == 12345,
+            |pid| killed.push(pid),
+        );
+        assert_eq!(res_alive, Some(("terminated_orphaned_wsl_process", 12345)));
+        assert_eq!(killed, vec![12345]);
+
+        killed.clear();
+        let res_dead = reconcile_server_pidfile(
+            "67890",
+            |_pid| false,
+            |pid| killed.push(pid),
+        );
+        assert_eq!(res_dead, Some(("cleaned_stale_pidfile", 67890)));
+        assert!(killed.is_empty());
+
+        assert_eq!(reconcile_server_pidfile("", |_| true, |_| {}), None);
+        assert_eq!(reconcile_server_pidfile("not_a_pid", |_| true, |_| {}), None);
+    }
+
 }
