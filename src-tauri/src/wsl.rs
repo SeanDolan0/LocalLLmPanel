@@ -28,6 +28,31 @@ fn exec_exit() {
     ACTIVE_WSL_EXECS.fetch_sub(1, Ordering::Relaxed);
 }
 
+#[derive(Debug)]
+pub struct WslExecGuard {
+    active: bool,
+}
+
+impl WslExecGuard {
+    pub fn enter() -> Self {
+        exec_enter();
+        Self { active: true }
+    }
+
+    pub fn exit(&mut self) {
+        if self.active {
+            self.active = false;
+            exec_exit();
+        }
+    }
+}
+
+impl Drop for WslExecGuard {
+    fn drop(&mut self) {
+        self.exit();
+    }
+}
+
 /// Seconds since the last WSL exec started by this process. Returns a large value
 /// if no exec has been recorded.
 pub fn secs_since_last_exec() -> u64 {
@@ -137,16 +162,70 @@ __llm_panel_expand_tilde() {
 "#;
 
 /// Ensure the app's dedicated Ubuntu distro exists. Installs it if missing.
+/// Parse `wsl --version` output into (major, minor, patch).
+pub fn parse_wsl_version(output: &str) -> Option<(u32, u32, u32)> {
+    let clean: String = output.chars().filter(|c| *c != '\u{0}').collect();
+    for line in clean.lines() {
+        let line_trimmed = line.trim();
+        let lower = line_trimmed.to_lowercase();
+        if lower.contains("wsl") && (lower.contains("version") || lower.contains(':')) {
+            for token in line_trimmed.split_whitespace() {
+                let token = token.trim_matches(|c: char| !c.is_ascii_digit());
+                let parts: Vec<&str> = token.split('.').collect();
+                if parts.len() >= 3 {
+                    if let (Ok(maj), Ok(min), Ok(pat)) = (
+                        parts[0].parse::<u32>(),
+                        parts[1].parse::<u32>(),
+                        parts[2].parse::<u32>(),
+                    ) {
+                        return Some((maj, min, pat));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Query local WSL version via `wsl --version`. Returns None on older WSL without `--version` support.
+pub fn get_wsl_version() -> Option<(u32, u32, u32)> {
+    let out = wsl_command()
+        .env("WSL_UTF8", "1")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_wsl_version(&text)
+}
+
 /// Returns the distro name (always APP_DISTRO_NAME on success).
 pub fn ensure_app_distro(mut on_log: impl FnMut(&str)) -> Result<String, String> {
     let distros = installed_distros();
-    if distros.contains(&APP_DISTRO_NAME.to_string()) {
+        if distros.contains(&APP_DISTRO_NAME.to_string()) {
         on_log(&format!("distro '{}' already installed", APP_DISTRO_NAME));
         return Ok(APP_DISTRO_NAME.to_string());
     }
 
+    // Check WSL version for --name support (requires WSL >= 2.4.4)
+    if let Some((major, minor, patch)) = get_wsl_version() {
+        if (major, minor, patch) < (2, 4, 4) {
+            let msg = format!(
+                "WSL version 2.4.4 or higher is required for dedicated app distro support (detected {major}.{minor}.{patch}). Please run 'wsl --update' in an Administrator terminal to upgrade WSL, or select an existing installed distro in Settings."
+            );
+            on_log(&msg);
+            return Err(msg);
+        }
+    } else {
+        let msg = "WSL version 2.4.4 or higher is required for dedicated app distro support. Please run 'wsl --update' in an Administrator terminal to upgrade WSL, or select an existing installed distro in Settings.".to_string();
+        on_log(&msg);
+        return Err(msg);
+    }
+
     on_log(&format!(
-        "installing dedicated distro '{}'…",
+        "installing dedicated distro '{}'...",
         APP_DISTRO_NAME
     ));
     let mut cmd = wsl_command();
@@ -281,21 +360,78 @@ pub fn is_running(distro: &str) -> bool {
 }
 
 /// Parse `wsl -l -v` output for whether `distro` is running. Pure so it can
-/// be unit-tested without shelling out.
-fn verbose_state_is_running(text: &str, distro: &str) -> bool {
-    text.lines().any(|line| {
+/// be unit-tested without shelling out. Supports multi-lingual localized output.
+pub fn verbose_state_is_running(text: &str, distro: &str) -> bool {
+    let clean: String = text.chars().filter(|c| *c != '\u{0}').collect();
+    for line in clean.lines() {
         let line = line.trim();
-        if line.is_empty() || line.contains("NAME") || !line.contains("Running") {
+        if line.is_empty() || line.contains("NAME") || line.contains("STATE") {
+            continue;
+        }
+        let line = line.trim_start_matches('*').trim();
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        let name = tokens[0].trim_end_matches(':');
+        if name != distro {
+            continue;
+        }
+        let state = if tokens.len() >= 3
+            && tokens
+                .last()
+                .map_or(false, |t| t.chars().all(|c| c.is_ascii_digit()))
+        {
+            tokens[1..tokens.len() - 1].join(" ")
+        } else {
+            tokens[1..].join(" ")
+        };
+
+        let state_lower = state.to_lowercase();
+        let running_keywords = [
+            "running",
+            "wird ausgeführt",
+            "ausgeführt",
+            "en cours",
+            "exécution",
+            "execution",
+            "ejecución",
+            "ejecucion",
+            "esecuzione",
+            "executando",
+            "выполняется",
+            "работает",
+            "正在运行",
+            "运行中",
+            "実行中",
+            "실행 중",
+            "실행중",
+        ];
+        let stopped_keywords = [
+            "stopped",
+            "beendet",
+            "arrêté",
+            "arrete",
+            "detenido",
+            "arrestato",
+            "interrompido",
+            "остановлен",
+            "остановлена",
+            "停止",
+            "已停止",
+            "중지됨",
+            "중지",
+        ];
+
+        if running_keywords.iter().any(|k| state_lower.contains(k)) {
+            return true;
+        }
+        if stopped_keywords.iter().any(|k| state_lower.contains(k)) {
             return false;
         }
-        let name = line
-            .trim_start_matches('*')
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_end_matches(':');
-        name == distro
-    })
+        return state_lower.contains("run");
+    }
+    false
 }
 
 /// Check if a distro looks Ubuntu-ish (apt-based).
@@ -561,6 +697,7 @@ pub struct WslChild {
     /// Distro used to launch the script, retained for best-effort cleanup when
     /// the process is force-killed before its EXIT trap runs.
     distro: Option<String>,
+    exec_guard: Option<WslExecGuard>,
 }
 
 /// Native Windows child used by llama-server. Output is streamed using the
@@ -603,7 +740,7 @@ impl NativeChild {
         {
             let cb = callback.clone();
             handles.push(std::thread::spawn(move || {
-                for line in BufReader::new(stream).lines().flatten() {
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
                     if let Ok(mut cb) = cb.lock() {
                         cb(line);
                     }
@@ -704,7 +841,7 @@ pub fn spawn_script_via_stdin(
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    exec_enter();
+    let guard = WslExecGuard::enter();
 
     let script_path = gen_script_name(server_id);
 
@@ -746,8 +883,13 @@ pub fn spawn_script_via_stdin(
 
     // Write script content to stdin, then close stdin (EOF signals end to cat)
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(script.as_bytes());
-        let _ = stdin.flush();
+        if let Err(e) = stdin.write_all(script.as_bytes()).and_then(|()| stdin.flush()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let cleanup = format!("rm -f -- {}", shell_quote_wsl(&script_path));
+            let _ = run_script(distro, &cleanup);
+            return Err(format!("failed to write script via stdin: {e}"));
+        }
         // stdin dropped here, closing the pipe - cat sees EOF and finishes
     }
 
@@ -765,7 +907,7 @@ pub fn spawn_script_via_stdin(
         let cb = on_line.clone();
         handles.push(std::thread::spawn(move || {
             let reader = BufReader::new(stream);
-            for l in reader.lines().flatten() {
+            for l in reader.lines().map_while(Result::ok) {
                 let clean: String = l.chars().filter(|c| *c != '\u{0}').collect();
                 if let Ok(mut cb) = cb.lock() {
                     cb(clean);
@@ -778,6 +920,7 @@ pub fn spawn_script_via_stdin(
         handles,
         script_path: Some(script_path),
         distro: Some(distro.to_string()),
+        exec_guard: Some(guard),
     })
 }
 
@@ -796,13 +939,22 @@ impl WslChild {
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait()
+        let res = self.child.try_wait()?;
+        if res.is_some() {
+            if let Some(mut guard) = self.exec_guard.take() {
+                guard.exit();
+            }
+        }
+        Ok(res)
     }
 
     /// Terminate the wsl.exe process tree (Windows side). Killing only the
     /// launcher can leave the Linux child orphaned, so use taskkill on Windows
     /// before falling back to the platform child handle.
     pub fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(mut guard) = self.exec_guard.take() {
+            guard.exit();
+        }
         if let Ok(Some(_)) = self.child.try_wait() {
             return Ok(());
         }
@@ -831,7 +983,22 @@ impl WslChild {
     }
 
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait()
+        let res = self.child.wait();
+        if let Some(mut guard) = self.exec_guard.take() {
+            guard.exit();
+        }
+        res
+    }
+
+    #[cfg(test)]
+    pub fn mock_with_guard(child: Child, guard: WslExecGuard) -> Self {
+        Self {
+            child,
+            handles: Vec::new(),
+            script_path: None,
+            distro: None,
+            exec_guard: Some(guard),
+        }
     }
 
     pub fn script_path(&self) -> Option<&str> {
@@ -848,6 +1015,9 @@ impl WslChild {
 
 impl Drop for WslChild {
     fn drop(&mut self) {
+        if let Some(mut guard) = self.exec_guard.take() {
+            guard.exit();
+        }
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.kill();
         }
@@ -1023,4 +1193,143 @@ sys.stdout.flush()
         // Even if Ubuntu is absent or command fails, it must return cleanly without hanging
         let _ = res;
     }
+
+    static TEST_EXEC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_wsl_exec_guard_normal_exit() {
+        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
+        let baseline = active_wsl_execs();
+        let guard = WslExecGuard::enter();
+        assert_eq!(active_wsl_execs(), baseline + 1);
+
+        #[cfg(windows)]
+        let child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn dummy cmd");
+        #[cfg(not(windows))]
+        let child = Command::new("true").spawn().expect("spawn dummy");
+
+        let mut wsl_child = WslChild::mock_with_guard(child, guard);
+        let res = wsl_child.wait();
+        assert!(res.is_ok());
+        assert_eq!(active_wsl_execs(), baseline);
+    }
+
+    #[test]
+    fn test_wsl_exec_guard_try_wait_exit() {
+        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
+        let baseline = active_wsl_execs();
+        let guard = WslExecGuard::enter();
+        assert_eq!(active_wsl_execs(), baseline + 1);
+
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn dummy cmd");
+        #[cfg(not(windows))]
+        let mut child = Command::new("true").spawn().expect("spawn dummy");
+
+        let _ = child.wait();
+        let mut wsl_child = WslChild::mock_with_guard(child, guard);
+        let status = wsl_child.try_wait();
+        assert!(status.is_ok());
+        assert!(status.unwrap().is_some());
+        assert_eq!(active_wsl_execs(), baseline);
+    }
+
+    #[test]
+    fn test_wsl_exec_guard_kill() {
+        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
+        let baseline = active_wsl_execs();
+        let guard = WslExecGuard::enter();
+        assert_eq!(active_wsl_execs(), baseline + 1);
+
+        #[cfg(windows)]
+        let child = Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn dummy cmd");
+        #[cfg(not(windows))]
+        let child = Command::new("sleep").arg("10").spawn().expect("spawn dummy");
+
+        let mut wsl_child = WslChild::mock_with_guard(child, guard);
+        let kill_res = wsl_child.kill();
+        assert!(kill_res.is_ok());
+        assert_eq!(active_wsl_execs(), baseline);
+    }
+
+    #[test]
+    fn test_wsl_exec_guard_drop() {
+        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
+        let baseline = active_wsl_execs();
+        {
+            let guard = WslExecGuard::enter();
+            assert_eq!(active_wsl_execs(), baseline + 1);
+
+            #[cfg(windows)]
+            let child = Command::new("cmd")
+                .args(["/C", "exit 0"])
+                .spawn()
+                .expect("spawn dummy cmd");
+            #[cfg(not(windows))]
+            let child = Command::new("true").spawn().expect("spawn dummy");
+
+            let _wsl_child = WslChild::mock_with_guard(child, guard);
+        }
+        assert_eq!(active_wsl_execs(), baseline);
+    }
+
+    #[test]
+    fn test_wsl_exec_guard_spawn_failure() {
+        let _lock = TEST_EXEC_MUTEX.lock().unwrap();
+        let baseline = active_wsl_execs();
+        let bad_distro = "__definitely_nonexistent_distro_xyz123__";
+        let res = spawn_script_via_stdin(bad_distro, "echo hello", "test-server", |_| {});
+        if let Ok(mut child) = res {
+            let _ = child.kill();
+        }
+        assert_eq!(active_wsl_execs(), baseline);
+    }
+
+    #[test]
+    fn test_parse_wsl_version() {
+        let modern_utf16_style = "W\0S\0L\0 \0v\0e\0r\0s\0i\0o\0n\0:\0 \02\0.\07\0.\03\0.\00\0";
+        assert_eq!(parse_wsl_version(modern_utf16_style), Some((2, 7, 3)));
+
+        let plain = "WSL version: 2.4.4.0\nKernel version: 6.6.114.1-1";
+        assert_eq!(parse_wsl_version(plain), Some((2, 4, 4)));
+
+        let older = "WSL-Version: 2.3.26.0";
+        assert_eq!(parse_wsl_version(older), Some((2, 3, 26)));
+
+        let spanish = "Versión de WSL: 2.4.4.0";
+        assert_eq!(parse_wsl_version(spanish), Some((2, 4, 4)));
+
+        let invalid = "Usage: wsl.exe [Argument] [Options...]";
+        assert_eq!(parse_wsl_version(invalid), None);
+    }
+
+    #[test]
+    fn test_verbose_state_is_running_localized() {
+        let fixtures = [
+            ("German", "  NAME                   STATE           VERSION\n* Ubuntu-24.04           Wird ausgeführt 2\n  docker-desktop         Beendet         2\n"),
+            ("French", "  NAME                   STATE                 VERSION\n* Ubuntu-24.04           En cours d’exécution  2\n  docker-desktop         Arrêté                2\n"),
+            ("Spanish", "  NAME                   STATE           VERSION\n* Ubuntu-24.04           En ejecución    2\n  docker-desktop         Detenido        2\n"),
+            ("Japanese", "  NAME                   STATE           VERSION\n* Ubuntu-24.04           実行中          2\n  docker-desktop         停止            2\n"),
+            ("Chinese", "  NAME                   STATE           VERSION\n* Ubuntu-24.04           正在运行        2\n  docker-desktop         已停止          2\n"),
+            ("Russian", "  NAME                   STATE           VERSION\n* Ubuntu-24.04           Выполняется     2\n  docker-desktop         Остановлен      2\n"),
+        ];
+
+        for (lang, txt) in fixtures {
+            assert!(verbose_state_is_running(txt, "Ubuntu-24.04"), "Failed on {lang} running");
+            assert!(!verbose_state_is_running(txt, "docker-desktop"), "Failed on {lang} stopped");
+            assert!(!verbose_state_is_running(txt, "Nonexistent"), "Failed on {lang} nonexistent");
+        }
+    }
+
 }
