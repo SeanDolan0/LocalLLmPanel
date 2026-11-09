@@ -3050,6 +3050,7 @@ pub struct GatewayStatus {
     pub port: u16,
     pub running: bool,
     pub auth_configured: bool,
+    pub port_conflict: bool,
 }
 
 #[tauri::command]
@@ -3064,12 +3065,9 @@ pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
         .as_deref()
         .map(str::trim)
         .is_some_and(|key| !key.is_empty());
-    let running = if enabled && auth_configured {
-        std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            std::time::Duration::from_millis(300),
-        )
-        .is_ok()
+    let port_conflict = crate::gateway::is_port_conflict(port);
+    let running = if enabled && auth_configured && !port_conflict {
+        crate::gateway::verify_gateway_health(port)
     } else {
         false
     };
@@ -3078,6 +3076,7 @@ pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
         port,
         running,
         auth_configured,
+        port_conflict,
     }
 }
 

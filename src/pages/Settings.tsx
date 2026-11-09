@@ -1553,18 +1553,30 @@ export default function Settings() {
                     className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
                       gw.running && adv.gateway_enabled
                         ? "bg-emerald-500/15 text-emerald-300"
+                        : gw.port_conflict
+                        ? "bg-amber-500/15 text-amber-300"
                         : "bg-slate-500/15 text-slate-400"
                     }`}
                   >
                     <span
                       className={`h-1.5 w-1.5 rounded-full ${
-                        gw.running && adv.gateway_enabled ? "bg-emerald-400" : "bg-slate-500"
+                        gw.running && adv.gateway_enabled
+                          ? "bg-emerald-400"
+                          : gw.port_conflict
+                          ? "bg-amber-400"
+                          : "bg-slate-500"
                       }`}
                     />
-                    {gw.running && adv.gateway_enabled ? "listening" : "off"}
+                    {gw.running && adv.gateway_enabled ? "listening" : gw.port_conflict ? "port conflict" : "off"}
                   </span>
                 )}
               </div>
+
+              {gw?.port_conflict && adv.gateway_enabled && (
+                <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
+                  Port {gw.port} is already in use by another application. The gateway cannot start until you change the port or stop the conflicting application.
+                </div>
+              )}
 
               {adv.gateway_enabled && !s.api_key_configured && !adv.api_key && (
                 <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
