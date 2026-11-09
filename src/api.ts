@@ -45,6 +45,9 @@ import type {
   LogicalGgufArtifact,
   DownloadJob,
   DownloadProgressPayload,
+  CleanupTarget,
+  CleanupPlan,
+  CleanupExecutionReport,
 } from "./types";
 
 export type {
@@ -94,6 +97,9 @@ export const api = {
     invoke<DownloadJob[]>("download_queue_status"),
   downloadClearCompleted: () =>
     invoke<number>("download_clear_completed"),
+  cleanupInspect: () => invoke<CleanupPlan>("cleanup_inspect"),
+  cleanupExecute: (confirmedTargets: CleanupTarget[]) =>
+    invoke<CleanupExecutionReport>("cleanup_execute", { confirmedTargets }),
   analyzeContextFit: (input: ContextFitRequest) =>
     invoke<ContextFitReport>("analyze_context_fit", { input }),
   pullModel: (modelId: string) => invoke<void>("pull_model", { modelId }),

@@ -847,4 +847,40 @@ export type DiscoveryCategory =
   | "chat"
   | "small"
   | "embeddings"
-  | "vision";
+  | "vision";
+
+export type CleanupTarget =
+  | "wsl_distro"
+  | "venv"
+  | "hf_cache"
+  | "gguf_dir"
+  | "partial_downloads"
+  | "sudoers_rule";
+
+export interface CleanupItem {
+  target: CleanupTarget;
+  label: string;
+  description: string;
+  path_or_target: string;
+  exists: boolean;
+  estimated_bytes: number;
+  is_wsl: boolean;
+}
+
+export interface CleanupPlan {
+  distro: string;
+  items: CleanupItem[];
+  total_estimated_bytes: number;
+}
+
+export interface CleanupItemResult {
+  target: CleanupTarget;
+  success: boolean;
+  message: string;
+  freed_bytes: number;
+}
+
+export interface CleanupExecutionReport {
+  results: CleanupItemResult[];
+  total_freed_bytes: number;
+}
