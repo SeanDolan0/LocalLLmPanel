@@ -1,3 +1,6 @@
+import { FirstRunDiagnosticCard } from "../components/FirstRunDiagnosticCard";
+import { SmartScreenTrustModal } from "../components/SmartScreenTrustModal";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, events, fmtGB, fmtNum } from "../api";
 import { Button, Card, CardTitle, Collapsible, Gauge, Spinner } from "../ui";
@@ -17,6 +20,8 @@ export default function Dashboard() {
   const [vllmUpdateMsg, setVllmUpdateMsg] = useState<string | null>(null);
   const [flashInferReady, setFlashInferReady] = useState<FlashInferReady | null>(null);
   const [checkingFlashInfer, setCheckingFlashInfer] = useState(false);
+  const [showTrustModal, setShowTrustModal] = useState(false);
+
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -159,21 +164,23 @@ export default function Dashboard() {
       </div>
 
       {provisionErr && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{provisionErr}</div>
+        <ErrorAlert
+          source="provisioning"
+          error={provisionErr}
+          onDismiss={() => setProvisionErr(null)}
+        />
       )}
       {llamacppErr && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
-          <div className="whitespace-pre-wrap">{llamacppErr}</div>
-          <div className="mt-2 flex gap-2">
-            <Button variant="ghost" onClick={() => void navigator.clipboard?.writeText(llamacppErr)}>
-              Copy diagnostics
-            </Button>
-            <Button variant="ghost" onClick={() => void api.openUrl("https://github.com/ggml-org/llama.cpp/releases")}>
-              Open releases
-            </Button>
-          </div>
-        </div>
+        <ErrorAlert
+          source="provisioning"
+          error={llamacppErr}
+          title="llama.cpp Engine Setup Error"
+          onDismiss={() => setLlamacppErr(null)}
+        />
       )}
+
+      {/* Unified First-Run Diagnostic & Hardware Validation */}
+      <FirstRunDiagnosticCard onOpenTrustModal={() => setShowTrustModal(true)} />
 
       {/* VRAM Pressure Alert */}
       {gpu && (freeGb < 1.0 || (env && env.running_weight_gb > 0 && env.running_weight_gb > freeGb)) && (
@@ -485,6 +492,7 @@ export default function Dashboard() {
           </Card>
         </div>
       </Collapsible>
+          <SmartScreenTrustModal isOpen={showTrustModal} onClose={() => setShowTrustModal(false)} />
     </div>
   );
 }

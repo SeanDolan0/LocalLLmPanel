@@ -1,3 +1,6 @@
+import { ServerCompatibilityModal } from "../components/ServerCompatibilityModal";
+import { ErrorAlert } from "../components/ErrorAlert";
+import { StoragePlanner } from "../components/StoragePlanner";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -38,6 +41,7 @@ export default function Servers() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
   const [showImportRecipe, setShowImportRecipe] = useState(false);
+    const [compatTestServer, setCompatTestServer] = useState<ServerListRow | null>(null);
   const [recipeInput, setRecipeInput] = useState("");
   const [recipeErr, setRecipeErr] = useState<string | null>(null);
   const [toolResults, setToolResults] = useState<Record<string, string>>({});
@@ -501,6 +505,15 @@ export default function Servers() {
                   {r.status === "running" && r.def.task === "instruct" && (
                     <ChatButton serverId={r.def.id} port={r.def.port} model={effectiveModelName(r.def)} />
                   )}
+                  {r.status === "running" && (
+                    <Button
+                      variant="subtle"
+                      onClick={() => setCompatTestServer(r)}
+                      title="Run live compatibility test battery against this server"
+                    >
+                      🧪 Test
+                    </Button>
+                  )}
                   <Menu
                     items={[
                       ...(r.status === "running"
@@ -558,7 +571,14 @@ export default function Servers() {
                   />
                 </div>
               </div>
-              {r.error && <div className="mt-2 text-xs text-red-300">{r.error}</div>}
+              {r.error && (
+                <ErrorAlert
+                  source="server"
+                  error={r.error}
+                  title={`Server Engine Error (${r.def.name})`}
+                  className="mt-2"
+                />
+              )}
               {toolsOpen[r.def.id] && r.status === "running" && r.def.task === "instruct" && (
                 <Collapsible
                   compact
@@ -699,6 +719,14 @@ export default function Servers() {
             />
           </Card>
         </div>
+      )}
+
+      {compatTestServer && (
+        <ServerCompatibilityModal
+          server={compatTestServer}
+          isOpen={true}
+          onClose={() => setCompatTestServer(null)}
+        />
       )}
     </div>
   );
@@ -1895,6 +1923,7 @@ function NewServerForm({
         loading={contextFitLoading}
         onApply={applyContextRecommendation}
       />
+      <StoragePlanner modelWeightGb={8.0} kvCacheGb={Number(swapSpaceGb) || 0} compact />
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
         <Button
@@ -2917,7 +2946,9 @@ function BenchmarkDrawer({
             </div>
           )}
         </div>
-      </div>
+      
+
+</div>
     </div>
   );
 }

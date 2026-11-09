@@ -886,3 +886,89 @@ export interface CleanupExecutionReport {
   total_freed_bytes: number;
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Stream G: Diagnostics, Windows Trust & Compatibility Test Types
+// ---------------------------------------------------------------------------
+
+export interface WindowsInfo {
+  build_number: number | null;
+  display_version: string | null;
+  product_name: string | null;
+  raw_version: string | null;
+  is_supported: boolean;
+  is_windows_11: boolean;
+  os_label: string;
+  support_note: string;
+}
+
+export type DiagnosticStepStatus = "pass" | "warning" | "fail" | "skipped";
+
+export interface DiagnosticStep {
+  order: number;
+  id: string;
+  title: string;
+  status: DiagnosticStepStatus;
+  value: string;
+  details: string | null;
+  fix_recommendation: string | null;
+  doc_url: string | null;
+}
+
+export interface DiagnosticReport {
+  passed: boolean;
+  gpu_usable: boolean;
+  summary: string;
+  windows_info: WindowsInfo;
+  steps: DiagnosticStep[];
+}
+
+export interface DiskPreflightInfo {
+  target_path: string;
+  available_bytes: number;
+  total_bytes: number;
+  available_gb: number;
+  total_gb: number;
+  required_bytes: number | null;
+  required_gb: number | null;
+  headroom_gb: number | null;
+  status: "sufficient" | "tight" | "insufficient";
+  recommendation: string | null;
+}
+
+export interface CompatibilityTestItem {
+  id: string;
+  name: string;
+  description: string;
+  passed: boolean;
+  latency_ms: number;
+  details: string | null;
+  error: string | null;
+}
+
+export interface CompatibilityTestReport {
+  server_id: string;
+  model_id: string;
+  backend: string;
+  timestamp: string;
+  all_passed: boolean;
+  passed_count: number;
+  total_count: number;
+  items: CompatibilityTestItem[];
+}
+
+export interface DiagnosticBundle {
+  app_version: string;
+  generated_at: string;
+  windows: WindowsInfo;
+  wsl_version: string | null;
+  wsl_distro: string;
+  wsl_running: boolean;
+  gpus: GpuSnapshot[];
+  llama_devices: LlamaDevice[];
+  provision_report: ProvisionReport | null;
+  diagnostic_report: DiagnosticReport;
+  server_configurations: any[];
+  recent_logs: string[];
+}

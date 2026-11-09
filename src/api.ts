@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  DiagnosticReport, DiskPreflightInfo, CompatibilityTestReport, 
   ContextFitReport,
   ContextFitRequest,
   CreateServerInput,
@@ -224,6 +225,15 @@ export const api = {
     invoke<LastUpdateStatus | null>("last_update_status"),
   onAppUpdateProgress: (cb: (progress: AppUpdateProgress) => void) =>
     listen<AppUpdateProgress>("app-update-progress", (e) => cb(e.payload)),
+  diagnosticsRun: () => invoke<DiagnosticReport>("diagnostics_run"),
+  diagnosticsExportBundle: () => invoke<string>("diagnostics_export_bundle"),
+  diskPreflight: (targetPath?: string, requiredBytes?: number) =>
+    invoke<DiskPreflightInfo>("disk_preflight", {
+      target_path: targetPath,
+      required_bytes: requiredBytes,
+    }),
+  serversCompatibilityTest: (serverId: string) =>
+    invoke<CompatibilityTestReport>("servers_compatibility_test", { id: serverId }),
   onAppUpdateAvailable: (cb: (info: AppUpdateInfo) => void) =>
     listen<AppUpdateInfo>("app-update-available", (e) => cb(e.payload)),
 };
