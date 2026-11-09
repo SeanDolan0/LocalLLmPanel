@@ -1672,7 +1672,7 @@ function NewServerForm({
           <Field label="API model name / alias" help="Public model name clients use to reach this server. No effect on model speed or RAM." hint="Blank uses the model ID or GGUF filename. vLLM maps this to --served-model-name; llama.cpp maps it to --alias.">
             <input className={inputCls} placeholder="blank = model identity" value={served} onChange={(e) => setServed(e.target.value)} />
           </Field>
-          <Field label="Per-server API key (optional)" help="Overrides the global key for this server only. No effect on model speed or RAM." hint="Overrides the global vLLM key for this server and is also passed to llama.cpp.">
+          <Field label="Per-server API key (optional)" help="Overrides the global key for this server only. No effect on model speed or RAM." hint="Overrides the global API key for this server (applies to both vLLM and llama.cpp).">
             <div className="flex gap-1.5">
               <input
                 type="password"

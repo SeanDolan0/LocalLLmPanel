@@ -543,9 +543,13 @@ pub fn launch_script_with_version(
                 .map(str::trim)
                 .filter(|key| !key.is_empty())
         });
-    if let Some(key) = api_key {
-        args.push("--api-key".into());
-        args.push(shell_quote(key));
+    let decrypted_key = api_key.and_then(|k| crate::security::decrypt_token(k).ok());
+    if let Some(ref key) = decrypted_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            args.push("--api-key".into());
+            args.push(shell_quote(trimmed));
+        }
     }
     let kv_cache_dtype = def
         .kv_cache_dtype
@@ -922,9 +926,14 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         structured_flags.push("--device");
         structured_flags.push("-dev");
     }
-    if let Some(api_key) = def.api_key.as_deref().filter(|v| !v.trim().is_empty()) {
-        args.extend(["--api-key".into(), api_key.to_string()]);
-        structured_flags.push("--api-key");
+    let api_key = def.api_key.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let decrypted_key = api_key.and_then(|k| crate::security::decrypt_token(k).ok());
+    if let Some(ref key) = decrypted_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            args.extend(["--api-key".into(), trimmed.to_string()]);
+            structured_flags.push("--api-key");
+        }
     }
     args.extend([
         "-fa".into(),
@@ -1072,6 +1081,7 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                     | "--device"
                     | "-dev"
                     | "--api-key"
+                    | "--api-key-file"
                     | "--alias"
                     | "-a"
                     | "--log-verbosity"
@@ -1161,6 +1171,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             "--fit-target" => supports("--fit-target"),
             "--device" => supports("--device") || supports("--dev"),
             "--api-key" => supports("--api-key"),
+            "--api-key-file" => supports("--api-key-file"),
             "--alias" | "-a" => supports("--alias") || supports("-a"),
             "--log-verbosity" => supports("--log-verbosity"),
             "--mmproj" => supports("--mmproj"),
@@ -1185,6 +1196,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "--device"
                     | "--log-verbosity"
                     | "--api-key"
+                    | "--api-key-file"
                     | "--alias"
                     | "-a"
                     | "--mmproj"
@@ -1220,6 +1232,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--fit-target"
                 | "--device"
                 | "--api-key"
+                    | "--api-key-file"
                 | "--alias"
                 | "-a"
                 | "--log-verbosity"
@@ -1244,6 +1257,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--fit-target"
                 | "--device"
                 | "--api-key"
+                    | "--api-key-file"
                 | "--alias"
                 | "-a"
                 | "--log-verbosity"
@@ -1345,6 +1359,19 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 bail!("server {} already {}", def.name, ls.status.label());
             }
         }
+    }
+
+    // Refuse externally-bound 0.0.0.0 launch without an effective API key configured (D2)
+    if cfg.advanced_settings.host.trim() == "0.0.0.0"
+        && server_api_key(state, &def)
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        bail!(
+            "refusing to start server bound to 0.0.0.0 without an API key configured; configure a global API key in Settings or a per-server key"
+        );
     }
 
     // Verify port is free before starting server process (C7)
@@ -1510,7 +1537,44 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     "[LocalLLmPanel] Speculative decoding enabled: draft model = {draft_display}, speculative tokens = {tokens}"
                 ));
             }
-            let args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
+            // Apply global API key if per-server key is not set (D3)
+            if def.api_key.as_deref().unwrap_or("").trim().is_empty() {
+                def.api_key = cfg.advanced_settings.api_key.clone();
+            }
+
+            let effective_key = server_api_key(state, &def);
+            let mut key_file_path_str: Option<String> = None;
+            if let Some(ref key) = effective_key {
+                if help_supports_flag(&help, "--api-key-file") {
+                    let run_dir = dirs::data_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join(crate::state::CONFIG_DIR_NAME)
+                        .join("run");
+                    let _ = std::fs::create_dir_all(&run_dir);
+                    let safe_id: String = def
+                        .id
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                        .collect();
+                    let key_path = run_dir.join(format!("{safe_id}.key"));
+                    if std::fs::write(&key_path, format!("{key}\n")).is_ok() {
+                        key_file_path_str = Some(key_path.to_string_lossy().into_owned());
+                    }
+                } else {
+                    log_cb("[LocalLLmPanel] Note: installed llama-server does not support --api-key-file; passing --api-key via process arguments.".into());
+                }
+            }
+
+            let mut args = filter_llamacpp_args(build_llamacpp_args_with_help(&def, &help), &help);
+            if let Some(ref key_path) = key_file_path_str {
+                if let Some(pos) = args.iter().position(|a| a == "--api-key") {
+                    args[pos] = "--api-key-file".into();
+                    if pos + 1 < args.len() {
+                        args[pos + 1] = key_path.clone();
+                    }
+                }
+            }
+
             let child = wsl::NativeChild::spawn(&exe, &args, log_cb)
                 .map_err(|e| anyhow!("failed to launch llama-server: {e}"))?;
             (None, Some(child), None)
@@ -2753,14 +2817,21 @@ pub fn apply_vllm_auth(
 }
 
 pub(crate) fn server_api_key(state: &Arc<AppState>, def: &ServerDef) -> Option<String> {
-    let per_server = def.api_key.clone().filter(|key| !key.trim().is_empty());
-    match def.backend_kind().ok() {
-        Some(crate::state::ServerBackend::Vllm) => {
-            per_server.or_else(|| state.config().advanced_settings.api_key.clone())
-        }
-        Some(crate::state::ServerBackend::Llamacpp) => per_server,
-        None => None,
+    if def.backend_kind().is_err() {
+        return None;
     }
+    let per_server = def.api_key.clone().filter(|key| !key.trim().is_empty());
+    let raw = per_server.or_else(|| state.config().advanced_settings.api_key.clone());
+    raw.and_then(|k| {
+        let trimmed = k.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            crate::security::decrypt_token(trimmed)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        }
+    })
 }
 
 /// Issue a chat completion against an instruct server (server-side, no CORS).
@@ -4876,4 +4947,66 @@ vllm:num_preemptions_total{model_name="my model"} 5
         assert_eq!(reconcile_server_pidfile("not_a_pid", |_| true, |_| {}), None);
     }
 
+
+    #[test]
+    fn test_server_api_key_applies_to_vllm_and_llamacpp() {
+        let mut vllm = def("vllm-model", "instruct", 8000, "fp16", None);
+        vllm.backend = "vllm".into();
+        let mut llama = def("llama-model.gguf", "instruct", 8001, "gguf", None);
+        llama.backend = "llamacpp".into();
+
+        // 1. With global key only (DPAPI encrypted)
+        let state = Arc::new(AppState::new());
+        let enc_global = crate::security::encrypt_token("my-global-secret-key").unwrap();
+        state.config.lock().unwrap().advanced_settings.api_key = Some(enc_global);
+
+        assert_eq!(server_api_key(&state, &vllm).as_deref(), Some("my-global-secret-key"));
+        assert_eq!(server_api_key(&state, &llama).as_deref(), Some("my-global-secret-key"));
+
+        // 2. With per-server override on llama (DPAPI encrypted)
+        let enc_llama = crate::security::encrypt_token("my-llama-override-key").unwrap();
+        llama.api_key = Some(enc_llama);
+        assert_eq!(server_api_key(&state, &llama).as_deref(), Some("my-llama-override-key"));
+        assert_eq!(server_api_key(&state, &vllm).as_deref(), Some("my-global-secret-key"));
+
+        // 3. With plaintext per-server override on vllm
+        vllm.api_key = Some("plaintext-override-vllm".into());
+        assert_eq!(server_api_key(&state, &vllm).as_deref(), Some("plaintext-override-vllm"));
+    }
+
+    #[test]
+    fn test_start_server_refuses_0_0_0_0_without_api_key() {
+        let state = Arc::new(AppState::new());
+        let mut server = def("model", "instruct", 8080, "fp16", None);
+        server.id = "s-lan-test".into();
+        state.config.lock().unwrap().advanced_settings.host = "0.0.0.0".into();
+        state.config.lock().unwrap().advanced_settings.api_key = None;
+        state.config.lock().unwrap().servers.push(server);
+
+        let res = start_server(&state, None, "s-lan-test");
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("refusing to start server bound to 0.0.0.0 without an API key configured"));
+    }
+
+    #[test]
+    fn test_llamacpp_args_decrypts_api_key() {
+        let mut d = def("model.gguf", "instruct", 8123, "gguf", None);
+        d.backend = "llamacpp".into();
+        let enc = crate::security::encrypt_token("test-secret-dpapi-key").unwrap();
+        d.api_key = Some(enc);
+        let args = build_llamacpp_args_with_help(&d, "");
+        assert!(args.windows(2).any(|w| w == ["--api-key", "test-secret-dpapi-key"]));
+    }
+
+    #[test]
+    fn test_launch_script_decrypts_api_key() {
+        let mut d = def("vllm-model", "instruct", 8124, "fp16", None);
+        let enc = crate::security::encrypt_token("test-vllm-dpapi-key").unwrap();
+        d.api_key = Some(enc);
+        let adv = crate::state::AdvancedSettings::default();
+        let script = launch_script("~/llm-lp/.venv", &d, "", &adv, &BTreeMap::new());
+        assert!(script.contains("--api-key 'test-vllm-dpapi-key'"));
+        assert!(!script.contains("dpapi:"));
+    }
 }
