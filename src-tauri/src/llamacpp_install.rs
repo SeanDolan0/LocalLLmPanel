@@ -39,7 +39,7 @@ pub struct Asset {
 /// Install-time configuration derived from a fork definition. Forks supply the
 /// regexes; this struct only compiles them once and derives the API/page URLs.
 #[derive(Debug, Clone)]
-struct ChannelConfig {
+pub(crate) struct ChannelConfig {
     label: String,
     api_url: String,
     page_url: String,
@@ -114,7 +114,7 @@ struct CudaCandidate {
 }
 
 #[derive(Debug, Clone)]
-struct Selection {
+pub(crate) struct Selection {
     tag: String,
     candidate: CudaCandidate,
     warning: Option<String>,
@@ -130,16 +130,24 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
+pub fn is_driver_override_acknowledged() -> bool {
+    std::env::var("LLP_ALLOW_UNKNOWN_CUDA_DRIVER").map_or(false, |v| {
+        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+    })
+}
+
 pub fn choose_assets(assets: &[Asset]) -> Result<(Asset, Option<Asset>)> {
     let fork = crate::state::builtin_llamacpp_forks()
         .into_iter()
         .find(|fork| fork.id == "upstream")
         .expect("builtin upstream fork is always present");
-    let selection = choose_assets_for_machine(&fork, assets, None, None)?;
+    let config = ChannelConfig::for_fork(&fork)?;
+    // Unit tests / callers using choose_assets directly bypass host driver check
+    let selection = choose_assets_for_machine_config_ext(&config, assets, None, None, true)?;
     Ok((selection.candidate.main, selection.candidate.runtime))
 }
 
-fn choose_assets_for_machine(
+pub(crate) fn choose_assets_for_machine(
     fork: &LlamaCppFork,
     assets: &[Asset],
     driver: Option<CudaVersion>,
@@ -213,6 +221,26 @@ fn choose_assets_for_machine_config(
     driver: Option<CudaVersion>,
     compute_cap: Option<(u32, u32)>,
 ) -> Result<Selection> {
+    choose_assets_for_machine_config_ext(config, assets, driver, compute_cap, false)
+}
+
+pub(crate) fn choose_assets_for_machine_config_ext(
+    config: &ChannelConfig,
+    assets: &[Asset],
+    driver: Option<CudaVersion>,
+    compute_cap: Option<(u32, u32)>,
+    allow_unknown_driver_override: bool,
+) -> Result<Selection> {
+    let has_override = allow_unknown_driver_override || is_driver_override_acknowledged();
+    if driver.is_none() && !has_override {
+        return Err(anyhow!(
+            "NVIDIA driver capability is unknown (unable to determine maximum supported CUDA version via nvidia-smi).\n\
+             Asset selection halted to prevent installing an incompatible binary.\n\
+             Diagnostic: Ensure NVIDIA Windows display driver is installed and nvidia-smi is in PATH.\n\
+             To override after acknowledging potential runtime instability, set LLP_ALLOW_UNKNOWN_CUDA_DRIVER=1."
+        ));
+    }
+
     let mut mains: Vec<(CudaVersion, &Asset)> = assets
         .iter()
         .filter_map(|asset| parse_main_channel(&asset.name, config).map(|version| (version, asset)))
@@ -232,11 +260,21 @@ fn choose_assets_for_machine_config(
         .iter()
         .find(|asset| parse_runtime_channel(&asset.name, config) == Some(*version))
         .cloned();
-    let warning = if compute_cap.is_some_and(|cc| cc >= (12, 0)) && *version < CudaVersion(12, 8) {
+
+    let mut warning = if compute_cap.is_some_and(|cc| cc >= (12, 0)) && *version < CudaVersion(12, 8) {
         Some(format!("CUDA {} predates Blackwell native support; it may be slow or fail. Update the NVIDIA driver to use CUDA 12.8 or newer.", version))
     } else {
         None
     };
+
+    if driver.is_none() && has_override {
+        let override_note = "Host NVIDIA driver CUDA version is unknown; proceeding under explicit user override acknowledgment.";
+        warning = Some(match warning {
+            Some(w) => format!("{override_note} {w}"),
+            None => override_note.to_string(),
+        });
+    }
+
     Ok(Selection {
         tag: parse_main_tag(&main.name, config),
         candidate: CudaCandidate {
@@ -246,6 +284,28 @@ fn choose_assets_for_machine_config(
         },
         warning,
     })
+}
+
+pub fn promote_staging_dir(staging: &Path, destination: &Path) -> Result<()> {
+    if !staging.exists() {
+        return Err(anyhow!("staging directory does not exist: {}", staging.display()));
+    }
+    if destination.exists() {
+        let backup = destination.with_extension(format!("old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::rename(destination, &backup)?;
+        if let Err(e) = std::fs::rename(staging, destination) {
+            let _ = std::fs::rename(&backup, destination);
+            return Err(anyhow!("Failed to promote staging dir, restored previous working install: {e}"));
+        }
+        let _ = std::fs::remove_dir_all(&backup);
+    } else {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(staging, destination)?;
+    }
+    Ok(())
 }
 
 pub fn install_for_channel(
@@ -260,14 +320,22 @@ pub fn install_for_channel(
             fork.id
         ));
     }
+    // Disk space preflight check
+    check_disk_space(destination, MIN_DISK_SPACE_BYTES)?;
+
     let config = ChannelConfig::for_fork(fork)?;
     let selection = latest_release_for_channel(&config, token)?;
     let tag = selection.tag;
     let main = selection.candidate.main;
     let runtime = selection.candidate.runtime;
+
     let install_dir = destination
         .join(format!("{}-{}-cuda-{}", fork.id, tag, selection.candidate.version).to_lowercase());
-    std::fs::create_dir_all(&install_dir)?;
+    let staging_dir = destination
+        .join(format!("{}-{}-cuda-{}.staging-{}", fork.id, tag, selection.candidate.version, std::process::id()).to_lowercase());
+    let _ = std::fs::remove_dir_all(&staging_dir);
+    std::fs::create_dir_all(&staging_dir)?;
+
     let temp = destination
         .join(format!(".llamacpp-{}-{}.zip", fork.id, std::process::id()).to_lowercase());
     let download_label = selection.warning.as_ref().map_or_else(
@@ -275,11 +343,12 @@ pub fn install_for_channel(
         |warning| format!("downloading {} ({warning})", main.name),
     );
     progress(&download_label, 0, None);
+
     let result = (|| {
-        download(&main.browser_download_url, &temp, |done, total| {
+        download_with_retry(&main.browser_download_url, &temp, |done, total| {
             progress(&main.name, done, total)
         })?;
-        expand_archive(&temp, &install_dir)?;
+        expand_archive(&temp, &staging_dir)?;
         let _ = std::fs::remove_file(&temp);
 
         if let Some(runtime) = runtime {
@@ -287,25 +356,37 @@ pub fn install_for_channel(
                 format!(".llamacpp-{}-cudart-{}.zip", fork.id, std::process::id()).to_lowercase(),
             );
             let runtime_result = (|| {
-                download(
+                download_with_retry(
                     &runtime.browser_download_url,
                     &runtime_zip,
                     |done, total| progress(&runtime.name, done, total),
                 )?;
-                expand_archive(&runtime_zip, &install_dir)
+                expand_archive(&runtime_zip, &staging_dir)
             })();
-            let _ = std::fs::remove_file(runtime_zip);
+            let _ = std::fs::remove_file(&runtime_zip);
             runtime_result?;
         }
 
-        let exe = find_file(&install_dir, "llama-server.exe")
+        // Verify executable in staging directory BEFORE promotion
+        let staging_exe = find_file(&staging_dir, "llama-server.exe")
             .ok_or_else(|| anyhow!("archive did not contain llama-server.exe"))?;
-        let version = command_output(&exe, &["--version"])?;
-        let help = command_output(&exe, &["--help"])?;
-        Ok((tag, exe, version, help))
+        let version = command_output(&staging_exe, &["--version"])?;
+        let help = command_output(&staging_exe, &["--help"])?;
+
+        // Atomically promote staging to destination
+        promote_staging_dir(&staging_dir, &install_dir)?;
+
+        let final_exe = install_dir.join(
+            staging_exe
+                .strip_prefix(&staging_dir)
+                .unwrap_or(Path::new("llama-server.exe")),
+        );
+        Ok((tag, final_exe, version, help))
     })();
+
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_dir_all(&staging_dir);
     }
     result
 }
@@ -365,9 +446,83 @@ pub fn executable_from_config(cfg: &crate::state::PersistedConfig) -> Option<Pat
     executable_from_config_channel(cfg, "upstream")
 }
 
+pub const MIN_DISK_SPACE_BYTES: u64 = 1_500_000_000;
+
+pub fn check_disk_space(target_dir: &Path, required_bytes: u64) -> Result<()> {
+    let mut check_path = target_dir;
+    while !check_path.exists() {
+        if let Some(parent) = check_path.parent() {
+            check_path = parent;
+        } else {
+            break;
+        }
+    }
+    let ps_cmd = format!(
+        "$drive = [System.IO.Path]::GetPathRoot('{}'); (Get-PSDrive -PSProvider FileSystem | Where-Object {{ $_.Root -eq $drive }}).Free",
+        check_path.display()
+    );
+    let output = hidden_command("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+        .output();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Ok(free_bytes) = s.trim().parse::<u64>() {
+                if free_bytes < required_bytes {
+                    return Err(anyhow!(
+                        "Insufficient disk space on {}: {:.2} GB available, {:.2} GB required for installation.",
+                        check_path.display(),
+                        free_bytes as f64 / 1_000_000_000.0,
+                        required_bytes as f64 / 1_000_000_000.0
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn compute_file_sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn download_with_retry(
+    url: &str,
+    path: &Path,
+    progress: impl Fn(u64, Option<u64>) + Copy,
+) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        match download(url, path, progress) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(path);
+                last_err = Some(e);
+                if attempt < 3 {
+                    std::thread::sleep(Duration::from_millis(500 * attempt as u64));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("download failed after 3 attempts")))
+}
+
 fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("LocalLLmPanel")
+        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(30))
         .build()?;
     let mut response = client.get(url).send()?.error_for_status()?;
     let total = response.content_length();
@@ -455,15 +610,37 @@ fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn driver_cuda_version() -> Option<CudaVersion> {
-    let output = hidden_command("nvidia-smi").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
+pub fn parse_driver_cuda_version(text: &str) -> Option<CudaVersion> {
     let re = Regex::new(r"CUDA Version:\s*(\d+)\.(\d+)").ok()?;
-    let c = re.captures(&text)?;
+    let c = re.captures(text)?;
     Some(CudaVersion(
         c.get(1)?.as_str().parse().ok()?,
         c.get(2)?.as_str().parse().ok()?,
     ))
+}
+
+fn driver_cuda_version() -> Option<CudaVersion> {
+    let output = hidden_command("nvidia-smi").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_driver_cuda_version(&text)
+}
+
+pub fn parse_compute_capabilities(text: &str) -> Vec<(u32, u32)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let parts: Vec<&str> = line.split('.').collect();
+            let major: u32 = parts.first()?.trim().parse().ok()?;
+            let minor: u32 = parts.get(1).map_or(0, |s| s.trim().parse().unwrap_or(0));
+            Some((major, minor))
+        })
+        .collect()
 }
 
 fn compute_capability() -> Option<(u32, u32)> {
@@ -471,12 +648,12 @@ fn compute_capability() -> Option<(u32, u32)> {
         .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
         .output()
         .ok()?;
-    let output_text = String::from_utf8_lossy(&output.stdout);
-    let value = output_text.trim().split('.').collect::<Vec<_>>();
-    Some((
-        value.first()?.parse().ok()?,
-        value.get(1).unwrap_or(&"0").parse().ok()?,
-    ))
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Explicit policy: take minimum compute capability across all selected/enumerated GPUs
+    parse_compute_capabilities(&text).into_iter().min()
 }
 
 fn releases_for_channel(
@@ -907,21 +1084,71 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-pub fn windows_gpu_snapshot() -> Option<crate::state::GpuSnapshot> {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct NvidiaGpuDevice {
+    pub index: u32,
+    pub name: String,
+    pub vram_total_mb: u64,
+    pub vram_free_mb: u64,
+    pub compute_cap: (u32, u32),
+    pub util_percent: u32,
+}
+
+pub fn parse_nvidia_gpus(text: &str) -> Vec<NvidiaGpuDevice> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+            if fields.len() < 6 {
+                return None;
+            }
+            let index: u32 = fields[0].parse().ok()?;
+            let name = fields[1].to_string();
+            let vram_total_mb: u64 = fields[2].parse().ok()?;
+            let vram_free_mb: u64 = fields[3].parse().ok()?;
+            let cc_parts: Vec<&str> = fields[4].split('.').collect();
+            let cc_major: u32 = cc_parts.first()?.parse().ok()?;
+            let cc_minor: u32 = cc_parts.get(1).map_or(0, |s| s.parse().unwrap_or(0));
+            let util_percent: u32 = fields[5].parse().unwrap_or(0);
+            Some(NvidiaGpuDevice {
+                index,
+                name,
+                vram_total_mb,
+                vram_free_mb,
+                compute_cap: (cc_major, cc_minor),
+                util_percent,
+            })
+        })
+        .collect()
+}
+
+pub fn windows_gpu_devices() -> Vec<NvidiaGpuDevice> {
     let output = hidden_command("nvidia-smi")
         .args([
-            "--query-gpu=name,memory.total,memory.free,utilization.gpu",
+            "--query-gpu=index,name,memory.total,memory.free,compute_cap,utilization.gpu",
             "--format=csv,noheader,nounits",
         ])
         .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&output.stdout);
-    let mut it = line.lines().next()?.split(',');
+        .ok();
+    let Some(output) = output else { return Vec::new(); };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_nvidia_gpus(&text)
+}
+
+pub fn windows_gpu_snapshot() -> Option<crate::state::GpuSnapshot> {
+    let devices = windows_gpu_devices();
+    let dev = devices.first()?;
     Some(crate::state::GpuSnapshot {
-        name: it.next()?.trim().to_string(),
-        vram_total_mb: it.next()?.trim().parse().ok()?,
-        vram_free_mb: it.next()?.trim().parse().ok()?,
-        util_percent: it.next()?.trim().parse().unwrap_or(0),
+        name: dev.name.clone(),
+        vram_total_mb: dev.vram_total_mb,
+        vram_free_mb: dev.vram_free_mb,
+        util_percent: dev.util_percent,
     })
 }
 
@@ -1407,4 +1634,111 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_cuda_selection_refuses_when_driver_unknown() {
+        let fork = upstream_fork();
+        let assets = vec![
+            Asset {
+                name: "llama-b123-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "url1".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "url2".into(),
+            },
+        ];
+        // Without override acknowledged, selecting without driver capability must refuse
+        let err = choose_assets_for_machine(&fork, &assets, None, None).unwrap_err();
+        assert!(err.to_string().contains("NVIDIA driver capability is unknown"));
+    }
+
+    #[test]
+    fn test_cuda_selection_allows_with_override_and_warns() {
+        let fork = upstream_fork();
+        let config = super::ChannelConfig::for_fork(&fork).unwrap();
+        let assets = vec![
+            Asset {
+                name: "llama-b123-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "url1".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "url2".into(),
+            },
+        ];
+        // When explicit override is passed, selection succeeds with warning
+        let selection = super::choose_assets_for_machine_config_ext(&config, &assets, None, None, true).unwrap();
+        assert_eq!(selection.candidate.version, CudaVersion(12, 4));
+        assert!(selection.warning.as_deref().unwrap_or("").contains("override acknowledgment"));
+    }
+
+    #[test]
+    fn test_parse_compute_capabilities_multiline_and_min_policy() {
+        let multiline = "8.9\n8.6\n";
+        let caps = super::parse_compute_capabilities(multiline);
+        assert_eq!(caps, vec![(8, 9), (8, 6)]);
+        // Min capability policy
+        assert_eq!(caps.into_iter().min(), Some((8, 6)));
+    }
+
+    #[test]
+    fn test_parse_nvidia_gpus_multiline() {
+        let multiline = "0, NVIDIA GeForce RTX 4090, 24564, 23000, 8.9, 15\n1, NVIDIA GeForce RTX 3090, 24576, 20000, 8.6, 5\n";
+        let gpus = super::parse_nvidia_gpus(multiline);
+        assert_eq!(gpus.len(), 2);
+        assert_eq!(gpus[0].index, 0);
+        assert_eq!(gpus[0].name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(gpus[0].vram_total_mb, 24564);
+        assert_eq!(gpus[0].compute_cap, (8, 9));
+        assert_eq!(gpus[1].index, 1);
+        assert_eq!(gpus[1].name, "NVIDIA GeForce RTX 3090");
+        assert_eq!(gpus[1].compute_cap, (8, 6));
+    }
+
+    #[test]
+    fn test_staging_dir_promotion_and_atomic_rollback() {
+        let temp_dir = std::env::temp_dir().join(format!("llp-test-staging-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let staging = temp_dir.join("staging");
+        let dest = temp_dir.join("installed");
+
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("llama-server.exe"), b"new binary").unwrap();
+
+        // Initial promotion: dest does not exist yet
+        super::promote_staging_dir(&staging, &dest).unwrap();
+        assert!(dest.join("llama-server.exe").is_file());
+        assert_eq!(std::fs::read(dest.join("llama-server.exe")).unwrap(), b"new binary");
+        assert!(!staging.exists());
+
+        // Second promotion over existing install
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("llama-server.exe"), b"newer binary").unwrap();
+
+        super::promote_staging_dir(&staging, &dest).unwrap();
+        assert_eq!(std::fs::read(dest.join("llama-server.exe")).unwrap(), b"newer binary");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compute_file_sha256() {
+        let temp_dir = std::env::temp_dir().join(format!("llp-test-sha256-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file = temp_dir.join("test.txt");
+        std::fs::write(&file, b"hello local llm panel").unwrap();
+
+        let hash = super::compute_file_sha256(&file).unwrap();
+        // SHA256 of "hello local llm panel"
+        use sha2::{Digest, Sha256};
+        let expected = format!("{:x}", Sha256::digest(b"hello local llm panel"));
+        assert_eq!(hash, expected);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
 }
