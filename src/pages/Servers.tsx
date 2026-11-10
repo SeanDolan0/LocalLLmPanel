@@ -479,9 +479,9 @@ export default function Servers() {
                     {r.def.speculative_enabled && (
                       <span
                         className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-950/80 text-purple-300 border border-purple-800"
-                        title={`Speculative decoding enabled (draft: ${r.def.speculative_model || r.def.speculative_model_path || "configured"}, tokens: ${r.def.speculative_num_tokens ?? 5})`}
+                        title={`Speculative decoding enabled: ${r.def.speculative_type || "draft-simple"} (${r.def.speculative_model || r.def.speculative_model_path || "configured"}, max ${r.def.speculative_num_tokens ?? 5}t${r.def.speculative_draft_ngl ? `, ngl: ${r.def.speculative_draft_ngl}` : ""}${r.def.speculative_draft_p_min != null ? `, p-min: ${r.def.speculative_draft_p_min}` : ""})`}
                       >
-                        spec {r.def.speculative_num_tokens ?? 5}t
+                        spec {r.def.speculative_type ? `${r.def.speculative_type.replace("draft-", "")} ` : ""}{r.def.speculative_num_tokens ?? 5}t
                       </span>
                     )}
                   </div>
@@ -1116,6 +1116,61 @@ function NewServerForm({
         ? String(initialSpeculativeNumTokens)
         : "5"
   );
+  const [speculativeDraftNgl, setSpeculativeDraftNgl] = useState(
+    initialServer?.speculative_draft_ngl ?? ""
+  );
+  const [speculativeDraftNMin, setSpeculativeDraftNMin] = useState(
+    initialServer?.speculative_draft_n_min != null ? String(initialServer.speculative_draft_n_min) : ""
+  );
+  const [speculativeDraftPMin, setSpeculativeDraftPMin] = useState(
+    initialServer?.speculative_draft_p_min != null ? String(initialServer.speculative_draft_p_min) : ""
+  );
+  const [speculativeDraftPSplit, setSpeculativeDraftPSplit] = useState(
+    initialServer?.speculative_draft_p_split != null ? String(initialServer.speculative_draft_p_split) : ""
+  );
+  const [speculativeType, setSpeculativeType] = useState(
+    initialServer?.speculative_type ?? ""
+  );
+  const [speculativeDraftDevice, setSpeculativeDraftDevice] = useState(
+    initialServer?.speculative_draft_device ?? ""
+  );
+  const [speculativeDraftSampling, setSpeculativeDraftSampling] = useState(
+    initialServer?.speculative_draft_sampling ?? ""
+  );
+  const [speculativeDraftBackendSampling, setSpeculativeDraftBackendSampling] = useState<string>(
+    initialServer?.speculative_draft_backend_sampling === true
+      ? "true"
+      : initialServer?.speculative_draft_backend_sampling === false
+      ? "false"
+      : ""
+  );
+  const [speculativeDraftCacheTypeK, setSpeculativeDraftCacheTypeK] = useState(
+    initialServer?.speculative_draft_cache_type_k ?? ""
+  );
+  const [speculativeDraftCacheTypeV, setSpeculativeDraftCacheTypeV] = useState(
+    initialServer?.speculative_draft_cache_type_v ?? ""
+  );
+  const [speculativeDraftNUbatch, setSpeculativeDraftNUbatch] = useState(
+    initialServer?.speculative_draft_n_ubatch != null ? String(initialServer.speculative_draft_n_ubatch) : ""
+  );
+  const [speculativeDraftThreads, setSpeculativeDraftThreads] = useState(
+    initialServer?.speculative_draft_threads != null ? String(initialServer.speculative_draft_threads) : ""
+  );
+  const [speculativeDraftThreadsBatch, setSpeculativeDraftThreadsBatch] = useState(
+    initialServer?.speculative_draft_threads_batch != null ? String(initialServer.speculative_draft_threads_batch) : ""
+  );
+  const [speculativeDraftCpuMoe, setSpeculativeDraftCpuMoe] = useState<boolean>(
+    initialServer?.speculative_draft_cpu_moe ?? false
+  );
+  const [speculativeDraftNCpuMoe, setSpeculativeDraftNCpuMoe] = useState(
+    initialServer?.speculative_draft_n_cpu_moe != null ? String(initialServer.speculative_draft_n_cpu_moe) : ""
+  );
+  const [speculativeDraftPrio, setSpeculativeDraftPrio] = useState(
+    initialServer?.speculative_draft_prio != null ? String(initialServer.speculative_draft_prio) : ""
+  );
+  const [speculativeDraftPoll, setSpeculativeDraftPoll] = useState(
+    initialServer?.speculative_draft_poll != null ? String(initialServer.speculative_draft_poll) : ""
+  );
   const [contextFit, setContextFit] = useState<ContextFitReport | null>(null);
   const [contextFitError, setContextFitError] = useState<string | null>(null);
   const [contextFitLoading, setContextFitLoading] = useState(false);
@@ -1212,6 +1267,29 @@ function NewServerForm({
           ? String(initialServer.speculative_num_tokens)
           : "5"
       );
+      setSpeculativeDraftNgl(initialServer.speculative_draft_ngl || "");
+      setSpeculativeDraftNMin(initialServer.speculative_draft_n_min != null ? String(initialServer.speculative_draft_n_min) : "");
+      setSpeculativeDraftPMin(initialServer.speculative_draft_p_min != null ? String(initialServer.speculative_draft_p_min) : "");
+      setSpeculativeDraftPSplit(initialServer.speculative_draft_p_split != null ? String(initialServer.speculative_draft_p_split) : "");
+      setSpeculativeType(initialServer.speculative_type || "");
+      setSpeculativeDraftDevice(initialServer.speculative_draft_device || "");
+      setSpeculativeDraftSampling(initialServer.speculative_draft_sampling || "");
+      setSpeculativeDraftBackendSampling(
+        initialServer.speculative_draft_backend_sampling === true
+          ? "true"
+          : initialServer.speculative_draft_backend_sampling === false
+          ? "false"
+          : ""
+      );
+      setSpeculativeDraftCacheTypeK(initialServer.speculative_draft_cache_type_k || "");
+      setSpeculativeDraftCacheTypeV(initialServer.speculative_draft_cache_type_v || "");
+      setSpeculativeDraftNUbatch(initialServer.speculative_draft_n_ubatch != null ? String(initialServer.speculative_draft_n_ubatch) : "");
+      setSpeculativeDraftThreads(initialServer.speculative_draft_threads != null ? String(initialServer.speculative_draft_threads) : "");
+      setSpeculativeDraftThreadsBatch(initialServer.speculative_draft_threads_batch != null ? String(initialServer.speculative_draft_threads_batch) : "");
+      setSpeculativeDraftCpuMoe(initialServer.speculative_draft_cpu_moe ?? false);
+      setSpeculativeDraftNCpuMoe(initialServer.speculative_draft_n_cpu_moe != null ? String(initialServer.speculative_draft_n_cpu_moe) : "");
+      setSpeculativeDraftPrio(initialServer.speculative_draft_prio != null ? String(initialServer.speculative_draft_prio) : "");
+      setSpeculativeDraftPoll(initialServer.speculative_draft_poll != null ? String(initialServer.speculative_draft_poll) : "");
     }
   }, [
     initialModelId,
@@ -1243,6 +1321,23 @@ function NewServerForm({
     setSpeculativeModel("");
     setSpeculativeModelPath("");
     setSpeculativeNumTokens("5");
+    setSpeculativeDraftNgl("");
+    setSpeculativeDraftNMin("");
+    setSpeculativeDraftPMin("");
+    setSpeculativeDraftPSplit("");
+    setSpeculativeType("");
+    setSpeculativeDraftDevice("");
+    setSpeculativeDraftSampling("");
+    setSpeculativeDraftBackendSampling("");
+    setSpeculativeDraftCacheTypeK("");
+    setSpeculativeDraftCacheTypeV("");
+    setSpeculativeDraftNUbatch("");
+    setSpeculativeDraftThreads("");
+    setSpeculativeDraftThreadsBatch("");
+    setSpeculativeDraftCpuMoe(false);
+    setSpeculativeDraftNCpuMoe("");
+    setSpeculativeDraftPrio("");
+    setSpeculativeDraftPoll("");
     if (nextBackend === "vllm") {
       if (/[\\/]|\.gguf$/i.test(modelId)) setModelId("");
       setModelPath("");
@@ -1341,6 +1436,30 @@ function NewServerForm({
             : null,
         speculative_num_tokens:
           speculativeEnabled && speculativeNumTokens ? parseInt(speculativeNumTokens, 10) : 5,
+        speculative_draft_ngl: backend === "llamacpp" && speculativeEnabled && speculativeDraftNgl.trim() ? speculativeDraftNgl.trim() : null,
+        speculative_draft_n_min: backend === "llamacpp" && speculativeEnabled && speculativeDraftNMin.trim() ? parseInt(speculativeDraftNMin, 10) : null,
+        speculative_draft_p_min: backend === "llamacpp" && speculativeEnabled && speculativeDraftPMin.trim() ? parseFloat(speculativeDraftPMin) : null,
+        speculative_draft_p_split: backend === "llamacpp" && speculativeEnabled && speculativeDraftPSplit.trim() ? parseFloat(speculativeDraftPSplit) : null,
+        speculative_type: backend === "llamacpp" && speculativeEnabled && speculativeType.trim() ? speculativeType.trim() : null,
+        speculative_draft_device: backend === "llamacpp" && speculativeEnabled && speculativeDraftDevice.trim() ? speculativeDraftDevice.trim() : null,
+        speculative_draft_sampling: backend === "llamacpp" && speculativeEnabled && speculativeDraftSampling.trim() ? speculativeDraftSampling.trim() : null,
+        speculative_draft_backend_sampling:
+          backend === "llamacpp" && speculativeEnabled
+            ? speculativeDraftBackendSampling === "true"
+              ? true
+              : speculativeDraftBackendSampling === "false"
+              ? false
+              : null
+            : null,
+        speculative_draft_cache_type_k: backend === "llamacpp" && speculativeEnabled && speculativeDraftCacheTypeK.trim() ? speculativeDraftCacheTypeK.trim() : null,
+        speculative_draft_cache_type_v: backend === "llamacpp" && speculativeEnabled && speculativeDraftCacheTypeV.trim() ? speculativeDraftCacheTypeV.trim() : null,
+        speculative_draft_n_ubatch: backend === "llamacpp" && speculativeEnabled && speculativeDraftNUbatch.trim() ? parseInt(speculativeDraftNUbatch, 10) : null,
+        speculative_draft_threads: backend === "llamacpp" && speculativeEnabled && speculativeDraftThreads.trim() ? parseInt(speculativeDraftThreads, 10) : null,
+        speculative_draft_threads_batch: backend === "llamacpp" && speculativeEnabled && speculativeDraftThreadsBatch.trim() ? parseInt(speculativeDraftThreadsBatch, 10) : null,
+        speculative_draft_cpu_moe: backend === "llamacpp" && speculativeEnabled ? speculativeDraftCpuMoe : null,
+        speculative_draft_n_cpu_moe: backend === "llamacpp" && speculativeEnabled && speculativeDraftNCpuMoe.trim() ? parseInt(speculativeDraftNCpuMoe, 10) : null,
+        speculative_draft_prio: backend === "llamacpp" && speculativeEnabled && speculativeDraftPrio.trim() ? parseInt(speculativeDraftPrio, 10) : null,
+        speculative_draft_poll: backend === "llamacpp" && speculativeEnabled && speculativeDraftPoll.trim() ? parseInt(speculativeDraftPoll, 10) : null,
       });
       setContextFit(result);
     } catch (error) {
@@ -1388,10 +1507,29 @@ function NewServerForm({
       const parsedSpecTokens = parseInt(speculativeNumTokens, 10);
       const validSpecTokens = !isNaN(parsedSpecTokens) && parsedSpecTokens > 0 ? parsedSpecTokens : 5;
       const isSpecActive = speculativeEnabled && task !== "embed";
+      const isNgramSpec = speculativeType.trim().toLowerCase().includes("ngram");
       const specDraftVllm = isSpecActive && speculativeModel.trim() ? speculativeModel.trim() : null;
       const specDraftLlama = isSpecActive && (speculativeModelPath.trim() || speculativeModel.trim())
         ? (speculativeModelPath.trim() || speculativeModel.trim())
         : null;
+      const isLlamaSpecActive = isSpecActive && (Boolean(specDraftLlama) || isNgramSpec);
+
+      const parsedDraftNMin = speculativeDraftNMin.trim() ? parseInt(speculativeDraftNMin, 10) : null;
+      const parsedDraftPMin = speculativeDraftPMin.trim() ? parseFloat(speculativeDraftPMin) : null;
+      const parsedDraftPSplit = speculativeDraftPSplit.trim() ? parseFloat(speculativeDraftPSplit) : null;
+      const parsedDraftNUbatch = speculativeDraftNUbatch.trim() ? parseInt(speculativeDraftNUbatch, 10) : null;
+      const parsedDraftThreads = speculativeDraftThreads.trim() ? parseInt(speculativeDraftThreads, 10) : null;
+      const parsedDraftThreadsBatch = speculativeDraftThreadsBatch.trim() ? parseInt(speculativeDraftThreadsBatch, 10) : null;
+      const parsedDraftNCpuMoe = speculativeDraftNCpuMoe.trim() ? parseInt(speculativeDraftNCpuMoe, 10) : null;
+      const parsedDraftPrio = speculativeDraftPrio.trim() ? parseInt(speculativeDraftPrio, 10) : null;
+      const parsedDraftPoll = speculativeDraftPoll.trim() ? parseInt(speculativeDraftPoll, 10) : null;
+      const draftBackendSamplingBool =
+        speculativeDraftBackendSampling === "true"
+          ? true
+          : speculativeDraftBackendSampling === "false"
+          ? false
+          : null;
+
       const serverData = {
         backend,
         model_id: backend === "llamacpp" ? (chosenModelPath || chosenModelId) : chosenModelId,
@@ -1448,12 +1586,76 @@ function NewServerForm({
                 .filter(Boolean)
             : null,
         env: backend === "vllm" ? env : {},
-        speculative_enabled: backend === "vllm" ? Boolean(specDraftVllm) : Boolean(specDraftLlama),
+        speculative_enabled: backend === "vllm" ? Boolean(specDraftVllm) : isLlamaSpecActive,
         speculative_model: backend === "vllm" ? specDraftVllm : specDraftLlama,
         speculative_model_path: backend === "llamacpp" ? specDraftLlama : null,
         speculative_num_tokens:
-          (backend === "vllm" ? Boolean(specDraftVllm) : Boolean(specDraftLlama))
+          (backend === "vllm" ? Boolean(specDraftVllm) : isLlamaSpecActive)
             ? validSpecTokens
+            : null,
+        speculative_draft_ngl:
+          backend === "llamacpp" && isLlamaSpecActive && speculativeDraftNgl.trim()
+            ? speculativeDraftNgl.trim()
+            : null,
+        speculative_draft_n_min:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftNMin !== null && !isNaN(parsedDraftNMin)
+            ? parsedDraftNMin
+            : null,
+        speculative_draft_p_min:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftPMin !== null && !isNaN(parsedDraftPMin)
+            ? parsedDraftPMin
+            : null,
+        speculative_draft_p_split:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftPSplit !== null && !isNaN(parsedDraftPSplit)
+            ? parsedDraftPSplit
+            : null,
+        speculative_type:
+          backend === "llamacpp" && isLlamaSpecActive && speculativeType.trim()
+            ? speculativeType.trim()
+            : null,
+        speculative_draft_device:
+          backend === "llamacpp" && isLlamaSpecActive && speculativeDraftDevice.trim()
+            ? speculativeDraftDevice.trim()
+            : null,
+        speculative_draft_sampling:
+          backend === "llamacpp" && isLlamaSpecActive && speculativeDraftSampling.trim()
+            ? speculativeDraftSampling.trim()
+            : null,
+        speculative_draft_backend_sampling:
+          backend === "llamacpp" && isLlamaSpecActive ? draftBackendSamplingBool : null,
+        speculative_draft_cache_type_k:
+          backend === "llamacpp" && isLlamaSpecActive && speculativeDraftCacheTypeK.trim()
+            ? speculativeDraftCacheTypeK.trim()
+            : null,
+        speculative_draft_cache_type_v:
+          backend === "llamacpp" && isLlamaSpecActive && speculativeDraftCacheTypeV.trim()
+            ? speculativeDraftCacheTypeV.trim()
+            : null,
+        speculative_draft_n_ubatch:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftNUbatch !== null && !isNaN(parsedDraftNUbatch)
+            ? parsedDraftNUbatch
+            : null,
+        speculative_draft_threads:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftThreads !== null && !isNaN(parsedDraftThreads)
+            ? parsedDraftThreads
+            : null,
+        speculative_draft_threads_batch:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftThreadsBatch !== null && !isNaN(parsedDraftThreadsBatch)
+            ? parsedDraftThreadsBatch
+            : null,
+        speculative_draft_cpu_moe:
+          backend === "llamacpp" && isLlamaSpecActive ? speculativeDraftCpuMoe : null,
+        speculative_draft_n_cpu_moe:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftNCpuMoe !== null && !isNaN(parsedDraftNCpuMoe)
+            ? parsedDraftNCpuMoe
+            : null,
+        speculative_draft_prio:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftPrio !== null && !isNaN(parsedDraftPrio)
+            ? parsedDraftPrio
+            : null,
+        speculative_draft_poll:
+          backend === "llamacpp" && isLlamaSpecActive && parsedDraftPoll !== null && !isNaN(parsedDraftPoll)
+            ? parsedDraftPoll
             : null,
       };
       let s;
@@ -1811,7 +2013,11 @@ function NewServerForm({
           title="Speculative decoding (optional)"
           subtitle={
             speculativeEnabled
-              ? `Enabled · draft model: ${backend === "llamacpp" ? (speculativeModelPath || speculativeModel || "none") : (speculativeModel || "none")} (${speculativeNumTokens || "5"} tokens)`
+              ? `Enabled · ${backend === "llamacpp" ? (speculativeType || "draft-simple") : "vLLM draft"} · ${
+                  backend === "llamacpp"
+                    ? (speculativeModelPath || speculativeModel || (speculativeType.includes("ngram") ? "ngram cache" : "none"))
+                    : (speculativeModel || "none")
+                } (${speculativeNumTokens || "5"} tokens${speculativeDraftNgl ? `, ngl: ${speculativeDraftNgl}` : ""}${speculativeDraftPMin ? `, p-min: ${speculativeDraftPMin}` : ""})`
               : "Accelerate inference with a smaller draft model running alongside the main model"
           }
           storageKey="llm_panel_server_form_speculative"
@@ -1829,17 +2035,41 @@ function NewServerForm({
                 checked={speculativeEnabled}
                 onChange={(e) => setSpeculativeEnabled(e.target.checked)}
               />
-              Enable speculative decoding with a draft model <HelpBubble text="Runs a small draft model that proposes tokens the main model verifies, typically raising tokens/sec. Adds the draft model's weights to VRAM/RAM use." />
+              Enable speculative decoding <HelpBubble text="Runs a draft model (or n-gram cache) that proposes tokens the main model verifies, typically raising tokens/sec. Adds the draft model's weights to VRAM/RAM use." />
             </label>
 
             {speculativeEnabled && (
               <>
+                {backend === "llamacpp" && (
+                  <Field
+                    label="Speculative decoding type (--spec-type)"
+                    help="Draft method to use. 'draft-simple' uses a standard draft model. 'draft-mtp' for Multi-Token Prediction. 'draft-eagle3' for EAGLE-3 speculative decoding. 'draft-dflash' / 'draft-dspark' for deep speculative models. 'ngram-mod' uses n-gram context matching without requiring a separate draft model."
+                    hint="llama.cpp: --spec-type draft-simple | draft-mtp | draft-eagle3 | draft-dflash | draft-dspark | ngram-mod"
+                  >
+                    <select
+                      className={inputCls}
+                      value={speculativeType}
+                      onChange={(e) => setSpeculativeType(e.target.value)}
+                    >
+                      <option value="">Default (draft-simple)</option>
+                      <option value="draft-simple">Standard Draft Model (draft-simple)</option>
+                      <option value="draft-mtp">Multi-Token Prediction (draft-mtp)</option>
+                      <option value="draft-eagle3">EAGLE-3 Speculative (draft-eagle3)</option>
+                      <option value="draft-dflash">dFlash Speculative (draft-dflash)</option>
+                      <option value="draft-dspark">dSpark Speculative (draft-dspark)</option>
+                      <option value="ngram-mod">N-gram / Lookup Cache (ngram-mod)</option>
+                    </select>
+                  </Field>
+                )}
+
                 <Field
                   label={backend === "llamacpp" ? "Draft GGUF model path" : "Draft model ID (HF or local)"}
                   help="Small draft model loaded alongside the main model. Its weights add to VRAM/RAM use; a faster draft means faster overall generation."
                   hint={
                     backend === "llamacpp"
-                      ? "Must be a GGUF file compatible with the target model (e.g. 0.5B draft for 7B target)."
+                      ? speculativeType.toLowerCase().includes("ngram")
+                        ? "Optional for ngram-mod. If omitted, ngram cache matches against prompt context."
+                        : "Must be a GGUF file compatible with the target model (e.g. 0.5B draft for 7B target)."
                       : "Hugging Face model repository ID or local directory (e.g. Qwen/Qwen2.5-0.5B-Instruct)."
                   }
                 >
@@ -1847,7 +2077,11 @@ function NewServerForm({
                     <div className="flex gap-1.5">
                       <input
                         className={inputCls}
-                        placeholder="C:\models\draft-model-Q4_K_M.gguf"
+                        placeholder={
+                          speculativeType.toLowerCase().includes("ngram")
+                            ? "Optional: C:\\models\\draft-model.gguf (or leave blank for context ngrams)"
+                            : "C:\\models\\draft-model-Q4_K_M.gguf"
+                        }
                         value={speculativeModelPath || speculativeModel}
                         onChange={(e) => {
                           setSpeculativeModelPath(e.target.value);
@@ -1886,20 +2120,279 @@ function NewServerForm({
                 </Field>
 
                 <Field
-                  label="Number of speculative tokens"
+                  label={backend === "llamacpp" ? "Max draft tokens (--spec-draft-n-max / --draft-max)" : "Number of speculative tokens"}
                   help="Tokens the draft proposes per forward pass. More tokens can mean higher tokens/sec but less gain if predictions are often wrong. No direct VRAM/RAM change."
-                  hint="Tokens proposed by the draft model per forward pass. Default is 5."
+                  hint="llama.cpp: --spec-draft-n-max N (fallback --draft-max N). Default is 5."
                 >
                   <input
                     type="number"
                     min="1"
-                    max="32"
+                    max="64"
                     className={inputCls}
                     placeholder="5"
                     value={speculativeNumTokens}
                     onChange={(e) => setSpeculativeNumTokens(e.target.value)}
                   />
                 </Field>
+
+                {backend === "llamacpp" && (
+                  <>
+                    <Field
+                      label="Min draft tokens (--spec-draft-n-min)"
+                      help="Minimum number of draft tokens to draft before early verification. Default is 0."
+                      hint="llama.cpp: --spec-draft-n-min N (fallback --draft-min N). Blank uses 0."
+                    >
+                      <input
+                        type="number"
+                        min="0"
+                        max="32"
+                        className={inputCls}
+                        placeholder="auto (0)"
+                        value={speculativeDraftNMin}
+                        onChange={(e) => setSpeculativeDraftNMin(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft GPU layers (-ngld / --spec-draft-ngl)"
+                      help="Number of layers to offload to GPU for the draft model. Set to '99' or 'all' to fully offload, '0' to keep draft on CPU, or a specific layer count."
+                      hint="llama.cpp: -ngld N / --spec-draft-ngl N. Blank auto-offloads draft to GPU."
+                    >
+                      <input
+                        className={inputCls}
+                        placeholder="auto (e.g. 99, all, 0)"
+                        value={speculativeDraftNgl}
+                        onChange={(e) => setSpeculativeDraftNgl(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft hardware device (-devd / --spec-draft-device)"
+                      help="Target hardware device for draft model (e.g. CUDA0, CUDA1). Setting this to a secondary GPU isolates draft memory and execution from the main model."
+                      hint="llama.cpp: -devd <device> / --spec-draft-device <device>."
+                    >
+                      <input
+                        className={inputCls}
+                        list="llamacpp-draft-devices"
+                        placeholder="auto (same as main model)"
+                        value={speculativeDraftDevice}
+                        onChange={(e) => setSpeculativeDraftDevice(e.target.value)}
+                      />
+                      <datalist id="llamacpp-draft-devices">
+                        {devices.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name} ({d.backend})
+                          </option>
+                        ))}
+                      </datalist>
+                    </Field>
+
+                    <Field
+                      label="Min draft probability (--spec-draft-p-min)"
+                      help="Minimum acceptance probability for speculative draft tokens (0.0 to 1.0). Tokens with confidence below this threshold are pruned early to prevent wasted verification passes."
+                      hint="llama.cpp: --spec-draft-p-min P (fallback --draft-p-min P). e.g. 0.8"
+                    >
+                      <input
+                        type="number"
+                        step="0.05"
+                        min="0.0"
+                        max="1.0"
+                        className={inputCls}
+                        placeholder="auto (e.g. 0.8)"
+                        value={speculativeDraftPMin}
+                        onChange={(e) => setSpeculativeDraftPMin(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft split probability (--spec-draft-p-split)"
+                      help="Probability threshold to split speculative tree branches when using tree-based draft decoding."
+                      hint="llama.cpp: --spec-draft-p-split P (fallback --draft-p-split P). e.g. 0.1"
+                    >
+                      <input
+                        type="number"
+                        step="0.05"
+                        min="0.0"
+                        max="1.0"
+                        className={inputCls}
+                        placeholder="auto (e.g. 0.1)"
+                        value={speculativeDraftPSplit}
+                        onChange={(e) => setSpeculativeDraftPSplit(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft sampling mode (--spec-draft-sampling)"
+                      help="Token selection method used by the draft model. Greedy is standard and fastest; probabilistic matches the target sampling distribution."
+                      hint="llama.cpp: --spec-draft-sampling greedy | probabilistic"
+                    >
+                      <select
+                        className={inputCls}
+                        value={speculativeDraftSampling}
+                        onChange={(e) => setSpeculativeDraftSampling(e.target.value)}
+                      >
+                        <option value="">Default (greedy)</option>
+                        <option value="greedy">Greedy (standard, fastest)</option>
+                        <option value="probabilistic">Probabilistic</option>
+                      </select>
+                    </Field>
+
+                    <Field
+                      label="Draft backend sampling"
+                      help="Performs draft sampling directly on the GPU/backend instead of host CPU."
+                      hint="llama.cpp: --spec-draft-backend-sampling / --no-spec-draft-backend-sampling"
+                    >
+                      <select
+                        className={inputCls}
+                        value={speculativeDraftBackendSampling}
+                        onChange={(e) => setSpeculativeDraftBackendSampling(e.target.value)}
+                      >
+                        <option value="">Default (auto)</option>
+                        <option value="true">Enable (--spec-draft-backend-sampling)</option>
+                        <option value="false">Disable (--no-spec-draft-backend-sampling)</option>
+                      </select>
+                    </Field>
+
+                    <div className="sm:col-span-2 pt-2 border-t border-edge/60">
+                      <span className="text-xs font-semibold text-slate-300">
+                        Advanced Draft Performance &amp; Memory Flags
+                      </span>
+                    </div>
+
+                    <Field
+                      label="Draft KV cache type K (-ctkd / --spec-draft-type-k)"
+                      help="KV cache quantization format for draft model keys (e.g. f16, q8_0, q4_0). Lower precision saves draft VRAM/RAM."
+                      hint="llama.cpp: -ctkd format / --spec-draft-type-k format"
+                    >
+                      <input
+                        className={inputCls}
+                        placeholder="auto (e.g. q8_0, f16)"
+                        value={speculativeDraftCacheTypeK}
+                        onChange={(e) => setSpeculativeDraftCacheTypeK(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft KV cache type V (-ctvd / --spec-draft-type-v)"
+                      help="KV cache quantization format for draft model values (e.g. f16, q8_0, q4_0)."
+                      hint="llama.cpp: -ctvd format / --spec-draft-type-v format"
+                    >
+                      <input
+                        className={inputCls}
+                        placeholder="auto (e.g. q8_0, f16)"
+                        value={speculativeDraftCacheTypeV}
+                        onChange={(e) => setSpeculativeDraftCacheTypeV(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft physical micro-batch size (--spec-draft-n-ubatch)"
+                      help="Physical micro-batch size for draft model evaluation. Lower values reduce peak memory spikes."
+                      hint="llama.cpp: --spec-draft-n-ubatch N. Blank uses default."
+                    >
+                      <input
+                        type="number"
+                        min="1"
+                        className={inputCls}
+                        placeholder="auto"
+                        value={speculativeDraftNUbatch}
+                        onChange={(e) => setSpeculativeDraftNUbatch(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft CPU threads (-td / --spec-draft-threads)"
+                      help="CPU threads allocated to draft model inference. Blank uses auto-detection."
+                      hint="llama.cpp: -td N / --spec-draft-threads N"
+                    >
+                      <input
+                        type="number"
+                        min="1"
+                        className={inputCls}
+                        placeholder="auto"
+                        value={speculativeDraftThreads}
+                        onChange={(e) => setSpeculativeDraftThreads(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft batch threads (-tbd / --spec-draft-threads-batch)"
+                      help="CPU threads allocated to draft model batch processing."
+                      hint="llama.cpp: -tbd N / --spec-draft-threads-batch N"
+                    >
+                      <input
+                        type="number"
+                        min="1"
+                        className={inputCls}
+                        placeholder="auto"
+                        value={speculativeDraftThreadsBatch}
+                        onChange={(e) => setSpeculativeDraftThreadsBatch(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft CPU MoE offload (-cmoed)"
+                      help="Offload draft model Mixture-of-Experts weights to system CPU memory."
+                      hint="llama.cpp: -cmoed / --spec-draft-cpu-moe"
+                    >
+                      <label className="flex items-center gap-2 pt-2 text-xs text-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={speculativeDraftCpuMoe}
+                          onChange={(e) => setSpeculativeDraftCpuMoe(e.target.checked)}
+                        />
+                        Enable draft CPU MoE offload
+                      </label>
+                    </Field>
+
+                    <Field
+                      label="Draft CPU MoE layers (-ncmoed)"
+                      help="Number of draft model MoE layers to offload to CPU."
+                      hint="llama.cpp: -ncmoed N / --spec-draft-n-cpu-moe N"
+                    >
+                      <input
+                        type="number"
+                        min="0"
+                        className={inputCls}
+                        placeholder="auto"
+                        value={speculativeDraftNCpuMoe}
+                        onChange={(e) => setSpeculativeDraftNCpuMoe(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft process priority (--spec-draft-prio / --prio-draft)"
+                      help="Execution priority for draft model compute queue (0-3)."
+                      hint="llama.cpp: --spec-draft-prio N / --prio-draft N"
+                    >
+                      <input
+                        type="number"
+                        min="0"
+                        max="3"
+                        className={inputCls}
+                        placeholder="auto (0-3)"
+                        value={speculativeDraftPrio}
+                        onChange={(e) => setSpeculativeDraftPrio(e.target.value)}
+                      />
+                    </Field>
+
+                    <Field
+                      label="Draft polling mode (--spec-draft-poll / --poll-draft)"
+                      help="Polling level for draft worker completion (0-100)."
+                      hint="llama.cpp: --spec-draft-poll N / --poll-draft N"
+                    >
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        className={inputCls}
+                        placeholder="auto (0-100)"
+                        value={speculativeDraftPoll}
+                        onChange={(e) => setSpeculativeDraftPoll(e.target.value)}
+                      />
+                    </Field>
+                  </>
+                )}
               </>
             )}
           </div>

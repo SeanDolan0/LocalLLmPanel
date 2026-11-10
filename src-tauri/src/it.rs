@@ -77,6 +77,7 @@ fn llamacpp_it() {
         speculative_model_path: None,
         speculative_num_tokens: None,
         speculative_enabled: false,
+        ..ServerDef::default()
     };
     let mut child = crate::wsl::NativeChild::spawn(
         std::path::Path::new(&exe),
@@ -245,6 +246,7 @@ fn wsl_it() {
             speculative_model_path: None,
             speculative_num_tokens: None,
             speculative_enabled: false,
+            ..ServerDef::default()
         });
         cfg.servers.push(ServerDef {
             backend: "vllm".into(),
@@ -290,6 +292,7 @@ fn wsl_it() {
             speculative_model_path: None,
             speculative_num_tokens: None,
             speculative_enabled: false,
+            ..ServerDef::default()
         });
         cfg.save().expect("save config");
     }

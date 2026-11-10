@@ -988,12 +988,19 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         structured_flags.push("-lv");
     }
     if def.speculative_enabled {
-        if let Some(draft_model) = def
+        let is_ngram = def
+            .speculative_type
+            .as_deref()
+            .map(|t| t.contains("ngram"))
+            .unwrap_or(false);
+
+        let draft_model = def
             .speculative_model_path
             .as_deref()
             .or(def.speculative_model.as_deref())
-            .filter(|s| !s.trim().is_empty())
-        {
+            .filter(|s| !s.trim().is_empty());
+
+        if let Some(draft_model) = draft_model {
             let draft_flag = if help_supports_flag(help, "--model-draft") {
                 "--model-draft"
             } else if help_supports_flag(help, "--spec-draft-model") {
@@ -1005,7 +1012,9 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             };
             args.extend([draft_flag.into(), draft_model.into()]);
             structured_flags.extend(["--model-draft", "--spec-draft-model", "-md"]);
+        }
 
+        if draft_model.is_some() || is_ngram {
             let tokens = def.speculative_num_tokens.unwrap_or(5);
             let token_flag = if help_supports_flag(help, "--spec-draft-n-max") {
                 "--spec-draft-n-max"
@@ -1017,7 +1026,278 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                 "--spec-draft-n-max"
             };
             args.extend([token_flag.into(), tokens.to_string()]);
-            structured_flags.extend(["--spec-draft-n-max", "--draft-max", "--draft"]);
+            structured_flags.extend(["--spec-draft-n-max", "--draft-max", "--draft", "--draft-n"]);
+
+            if let Some(n_min) = def.speculative_draft_n_min {
+                let min_flag = if help_supports_flag(help, "--spec-draft-n-min") {
+                    "--spec-draft-n-min"
+                } else if help_supports_flag(help, "--draft-min") {
+                    "--draft-min"
+                } else {
+                    "--spec-draft-n-min"
+                };
+                args.extend([min_flag.into(), n_min.to_string()]);
+                structured_flags.extend(["--spec-draft-n-min", "--draft-min", "--draft-n-min"]);
+            }
+
+            if let Some(p_min) = def.speculative_draft_p_min {
+                let p_flag = if help_supports_flag(help, "--spec-draft-p-min") {
+                    "--spec-draft-p-min"
+                } else if help_supports_flag(help, "--draft-p-min") {
+                    "--draft-p-min"
+                } else {
+                    "--spec-draft-p-min"
+                };
+                args.extend([p_flag.into(), format!("{p_min}")]);
+                structured_flags.extend(["--spec-draft-p-min", "--draft-p-min"]);
+            }
+
+            if let Some(p_split) = def.speculative_draft_p_split {
+                let split_flag = if help_supports_flag(help, "--spec-draft-p-split") {
+                    "--spec-draft-p-split"
+                } else if help_supports_flag(help, "--draft-p-split") {
+                    "--draft-p-split"
+                } else {
+                    "--spec-draft-p-split"
+                };
+                args.extend([split_flag.into(), format!("{p_split}")]);
+                structured_flags.extend(["--spec-draft-p-split", "--draft-p-split"]);
+            }
+
+            if let Some(ref stype) = def.speculative_type {
+                let stype = stype.trim();
+                if !stype.is_empty() && (help_supports_flag(help, "--spec-type") || help.is_empty())
+                {
+                    args.extend(["--spec-type".into(), stype.to_string()]);
+                    structured_flags.push("--spec-type");
+                }
+            }
+
+            if let Some(ref ngl) = def.speculative_draft_ngl {
+                let ngl = ngl.trim();
+                if !ngl.is_empty() {
+                    let ngl_flag = if help_supports_flag(help, "--spec-draft-ngl") {
+                        "--spec-draft-ngl"
+                    } else if help_supports_flag(help, "-ngld") {
+                        "-ngld"
+                    } else if help_supports_flag(help, "--gpu-layers-draft") {
+                        "--gpu-layers-draft"
+                    } else if help_supports_flag(help, "--n-gpu-layers-draft") {
+                        "--n-gpu-layers-draft"
+                    } else {
+                        "--spec-draft-ngl"
+                    };
+                    args.extend([ngl_flag.into(), ngl.to_string()]);
+                    structured_flags.extend([
+                        "--spec-draft-ngl",
+                        "-ngld",
+                        "--gpu-layers-draft",
+                        "--n-gpu-layers-draft",
+                    ]);
+                }
+            }
+
+            if let Some(ref dev) = def.speculative_draft_device {
+                let dev = dev.trim();
+                if !dev.is_empty() {
+                    let dev_flag = if help_supports_flag(help, "--spec-draft-device") {
+                        "--spec-draft-device"
+                    } else if help_supports_flag(help, "-devd") {
+                        "-devd"
+                    } else if help_supports_flag(help, "--device-draft") {
+                        "--device-draft"
+                    } else {
+                        "--spec-draft-device"
+                    };
+                    args.extend([dev_flag.into(), dev.to_string()]);
+                    structured_flags.extend(["--spec-draft-device", "-devd", "--device-draft"]);
+                }
+            }
+
+            if let Some(ref sampling) = def.speculative_draft_sampling {
+                let sampling = sampling.trim();
+                if !sampling.is_empty()
+                    && (help_supports_flag(help, "--spec-draft-sampling") || help.is_empty())
+                {
+                    args.extend(["--spec-draft-sampling".into(), sampling.to_string()]);
+                    structured_flags.push("--spec-draft-sampling");
+                }
+            }
+
+            if let Some(backend_sampling) = def.speculative_draft_backend_sampling {
+                if backend_sampling {
+                    if help_supports_flag(help, "--spec-draft-backend-sampling") || help.is_empty()
+                    {
+                        args.push("--spec-draft-backend-sampling".into());
+                        structured_flags.extend([
+                            "--spec-draft-backend-sampling",
+                            "--no-spec-draft-backend-sampling",
+                        ]);
+                    }
+                } else if help_supports_flag(help, "--no-spec-draft-backend-sampling")
+                    || help.is_empty()
+                {
+                    args.push("--no-spec-draft-backend-sampling".into());
+                    structured_flags.extend([
+                        "--spec-draft-backend-sampling",
+                        "--no-spec-draft-backend-sampling",
+                    ]);
+                }
+            }
+
+            if let Some(ref ctk) = def.speculative_draft_cache_type_k {
+                let ctk = ctk.trim();
+                if !ctk.is_empty() {
+                    let ctk_flag = if help_supports_flag(help, "--spec-draft-type-k") {
+                        "--spec-draft-type-k"
+                    } else if help_supports_flag(help, "-ctkd") {
+                        "-ctkd"
+                    } else if help_supports_flag(help, "--cache-type-k-draft") {
+                        "--cache-type-k-draft"
+                    } else {
+                        "--spec-draft-type-k"
+                    };
+                    args.extend([ctk_flag.into(), ctk.to_string()]);
+                    structured_flags.extend([
+                        "--spec-draft-type-k",
+                        "-ctkd",
+                        "--cache-type-k-draft",
+                    ]);
+                }
+            }
+
+            if let Some(ref ctv) = def.speculative_draft_cache_type_v {
+                let ctv = ctv.trim();
+                if !ctv.is_empty() {
+                    let ctv_flag = if help_supports_flag(help, "--spec-draft-type-v") {
+                        "--spec-draft-type-v"
+                    } else if help_supports_flag(help, "-ctvd") {
+                        "-ctvd"
+                    } else if help_supports_flag(help, "--cache-type-v-draft") {
+                        "--cache-type-v-draft"
+                    } else {
+                        "--spec-draft-type-v"
+                    };
+                    args.extend([ctv_flag.into(), ctv.to_string()]);
+                    structured_flags.extend([
+                        "--spec-draft-type-v",
+                        "-ctvd",
+                        "--cache-type-v-draft",
+                    ]);
+                }
+            }
+
+            if let Some(ubatch) = def.speculative_draft_n_ubatch {
+                if ubatch > 0
+                    && (help_supports_flag(help, "--spec-draft-n-ubatch") || help.is_empty())
+                {
+                    args.extend(["--spec-draft-n-ubatch".into(), ubatch.to_string()]);
+                    structured_flags.push("--spec-draft-n-ubatch");
+                }
+            }
+
+            if let Some(threads) = def.speculative_draft_threads {
+                if threads > 0 {
+                    let th_flag = if help_supports_flag(help, "--spec-draft-threads") {
+                        "--spec-draft-threads"
+                    } else if help_supports_flag(help, "-td") {
+                        "-td"
+                    } else if help_supports_flag(help, "--threads-draft") {
+                        "--threads-draft"
+                    } else {
+                        "--spec-draft-threads"
+                    };
+                    args.extend([th_flag.into(), threads.to_string()]);
+                    structured_flags.extend(["--spec-draft-threads", "-td", "--threads-draft"]);
+                }
+            }
+
+            if let Some(threads_batch) = def.speculative_draft_threads_batch {
+                if threads_batch > 0 {
+                    let thb_flag = if help_supports_flag(help, "--spec-draft-threads-batch") {
+                        "--spec-draft-threads-batch"
+                    } else if help_supports_flag(help, "-tbd") {
+                        "-tbd"
+                    } else if help_supports_flag(help, "--threads-batch-draft") {
+                        "--threads-batch-draft"
+                    } else {
+                        "--spec-draft-threads-batch"
+                    };
+                    args.extend([thb_flag.into(), threads_batch.to_string()]);
+                    structured_flags.extend([
+                        "--spec-draft-threads-batch",
+                        "-tbd",
+                        "--threads-batch-draft",
+                    ]);
+                }
+            }
+
+            if let Some(cpu_moe) = def.speculative_draft_cpu_moe {
+                if cpu_moe {
+                    let moe_flag = if help_supports_flag(help, "--spec-draft-cpu-moe") {
+                        "--spec-draft-cpu-moe"
+                    } else if help_supports_flag(help, "-cmoed") {
+                        "-cmoed"
+                    } else if help_supports_flag(help, "--cpu-moe-draft") {
+                        "--cpu-moe-draft"
+                    } else {
+                        "--spec-draft-cpu-moe"
+                    };
+                    args.push(moe_flag.into());
+                    structured_flags.extend(["--spec-draft-cpu-moe", "-cmoed", "--cpu-moe-draft"]);
+                }
+            }
+
+            if let Some(n_cpu_moe) = def.speculative_draft_n_cpu_moe {
+                if n_cpu_moe > 0 {
+                    let ncmoe_flag = if help_supports_flag(help, "--spec-draft-n-cpu-moe") {
+                        "--spec-draft-n-cpu-moe"
+                    } else if help_supports_flag(help, "--spec-draft-ncmoe") {
+                        "--spec-draft-ncmoe"
+                    } else if help_supports_flag(help, "-ncmoed") {
+                        "-ncmoed"
+                    } else if help_supports_flag(help, "--n-cpu-moe-draft") {
+                        "--n-cpu-moe-draft"
+                    } else {
+                        "--spec-draft-n-cpu-moe"
+                    };
+                    args.extend([ncmoe_flag.into(), n_cpu_moe.to_string()]);
+                    structured_flags.extend([
+                        "--spec-draft-n-cpu-moe",
+                        "--spec-draft-ncmoe",
+                        "-ncmoed",
+                        "--n-cpu-moe-draft",
+                    ]);
+                }
+            }
+
+            if let Some(prio) = def.speculative_draft_prio {
+                if prio <= 3 {
+                    let prio_flag = if help_supports_flag(help, "--spec-draft-prio") {
+                        "--spec-draft-prio"
+                    } else if help_supports_flag(help, "--prio-draft") {
+                        "--prio-draft"
+                    } else {
+                        "--spec-draft-prio"
+                    };
+                    args.extend([prio_flag.into(), prio.to_string()]);
+                    structured_flags.extend(["--spec-draft-prio", "--prio-draft"]);
+                }
+            }
+
+            if let Some(poll) = def.speculative_draft_poll {
+                if poll <= 1 {
+                    let poll_flag = if help_supports_flag(help, "--spec-draft-poll") {
+                        "--spec-draft-poll"
+                    } else if help_supports_flag(help, "--poll-draft") {
+                        "--poll-draft"
+                    } else {
+                        "--spec-draft-poll"
+                    };
+                    args.extend([poll_flag.into(), poll.to_string()]);
+                    structured_flags.extend(["--spec-draft-poll", "--poll-draft"]);
+                }
+            }
         }
     }
 
@@ -1110,6 +1390,44 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                     | "--spec-draft-n-max"
                     | "--draft-max"
                     | "--draft"
+                    | "--draft-n"
+                    | "--spec-draft-n-min"
+                    | "--draft-min"
+                    | "--draft-n-min"
+                    | "--spec-draft-p-min"
+                    | "--draft-p-min"
+                    | "--spec-draft-p-split"
+                    | "--draft-p-split"
+                    | "--spec-type"
+                    | "--spec-draft-ngl"
+                    | "-ngld"
+                    | "--gpu-layers-draft"
+                    | "--n-gpu-layers-draft"
+                    | "--spec-draft-device"
+                    | "-devd"
+                    | "--device-draft"
+                    | "--spec-draft-sampling"
+                    | "--spec-draft-type-k"
+                    | "-ctkd"
+                    | "--cache-type-k-draft"
+                    | "--spec-draft-type-v"
+                    | "-ctvd"
+                    | "--cache-type-v-draft"
+                    | "--spec-draft-n-ubatch"
+                    | "--spec-draft-threads"
+                    | "-td"
+                    | "--threads-draft"
+                    | "--spec-draft-threads-batch"
+                    | "-tbd"
+                    | "--threads-batch-draft"
+                    | "--spec-draft-n-cpu-moe"
+                    | "--spec-draft-ncmoe"
+                    | "-ncmoed"
+                    | "--n-cpu-moe-draft"
+                    | "--spec-draft-prio"
+                    | "--prio-draft"
+                    | "--spec-draft-poll"
+                    | "--poll-draft"
             ) {
                 i += 1;
             }
@@ -1169,6 +1487,291 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             i += 1;
             continue;
         }
+        if (arg == "--model-draft" || arg == "--spec-draft-model") && !supports(arg) {
+            let target = if supports("--model-draft") {
+                Some("--model-draft")
+            } else if supports("--spec-draft-model") {
+                Some("--spec-draft-model")
+            } else if supports("-md") {
+                Some("-md")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-n-max" && !supports("--spec-draft-n-max") {
+            let target = if supports("--draft-max") {
+                Some("--draft-max")
+            } else if supports("--draft") {
+                Some("--draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-n-min" && !supports("--spec-draft-n-min") {
+            let target = if supports("--draft-min") {
+                Some("--draft-min")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-p-min" && !supports("--spec-draft-p-min") {
+            let target = if supports("--draft-p-min") {
+                Some("--draft-p-min")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-p-split" && !supports("--spec-draft-p-split") {
+            let target = if supports("--draft-p-split") {
+                Some("--draft-p-split")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-ngl" && !supports("--spec-draft-ngl") {
+            let target = if supports("-ngld") {
+                Some("-ngld")
+            } else if supports("--gpu-layers-draft") {
+                Some("--gpu-layers-draft")
+            } else if supports("--n-gpu-layers-draft") {
+                Some("--n-gpu-layers-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-device" && !supports("--spec-draft-device") {
+            let target = if supports("-devd") {
+                Some("-devd")
+            } else if supports("--device-draft") {
+                Some("--device-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-type-k" && !supports("--spec-draft-type-k") {
+            let target = if supports("-ctkd") {
+                Some("-ctkd")
+            } else if supports("--cache-type-k-draft") {
+                Some("--cache-type-k-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-type-v" && !supports("--spec-draft-type-v") {
+            let target = if supports("-ctvd") {
+                Some("-ctvd")
+            } else if supports("--cache-type-v-draft") {
+                Some("--cache-type-v-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-threads" && !supports("--spec-draft-threads") {
+            let target = if supports("-td") {
+                Some("-td")
+            } else if supports("--threads-draft") {
+                Some("--threads-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-threads-batch" && !supports("--spec-draft-threads-batch") {
+            let target = if supports("-tbd") {
+                Some("-tbd")
+            } else if supports("--threads-batch-draft") {
+                Some("--threads-batch-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-cpu-moe" && !supports("--spec-draft-cpu-moe") {
+            if supports("-cmoed") {
+                filtered.push("-cmoed".into());
+            } else if supports("--cpu-moe-draft") {
+                filtered.push("--cpu-moe-draft".into());
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-n-cpu-moe" && !supports("--spec-draft-n-cpu-moe") {
+            let target = if supports("--spec-draft-ncmoe") {
+                Some("--spec-draft-ncmoe")
+            } else if supports("-ncmoed") {
+                Some("-ncmoed")
+            } else if supports("--n-cpu-moe-draft") {
+                Some("--n-cpu-moe-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-prio" && !supports("--spec-draft-prio") {
+            let target = if supports("--prio-draft") {
+                Some("--prio-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--spec-draft-poll" && !supports("--spec-draft-poll") {
+            let target = if supports("--poll-draft") {
+                Some("--poll-draft")
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                filtered.push(t.into());
+            }
+            if let Some(value) = args.get(i + 1) {
+                if target.is_some() {
+                    filtered.push(value.clone());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
         let supported = match arg.as_str() {
             "--n-cpu-moe" => supports("--n-cpu-moe"),
             "--fit" => supports("--fit"),
@@ -1185,9 +1788,67 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             "--model-draft" | "--spec-draft-model" | "-md" => {
                 supports("--model-draft") || supports("--spec-draft-model") || supports("-md")
             }
-            "--spec-draft-n-max" | "--draft-max" | "--draft" => {
+            "--spec-draft-n-max" | "--draft-max" | "--draft" | "--draft-n" => {
                 supports("--spec-draft-n-max") || supports("--draft-max") || supports("--draft")
             }
+            "--spec-draft-n-min" | "--draft-min" | "--draft-n-min" => {
+                supports("--spec-draft-n-min") || supports("--draft-min")
+            }
+            "--spec-draft-p-min" | "--draft-p-min" => {
+                supports("--spec-draft-p-min") || supports("--draft-p-min")
+            }
+            "--spec-draft-p-split" | "--draft-p-split" => {
+                supports("--spec-draft-p-split") || supports("--draft-p-split")
+            }
+            "--spec-draft-ngl" | "-ngld" | "--gpu-layers-draft" | "--n-gpu-layers-draft" => {
+                supports("--spec-draft-ngl")
+                    || supports("-ngld")
+                    || supports("--gpu-layers-draft")
+                    || supports("--n-gpu-layers-draft")
+            }
+            "--spec-draft-device" | "-devd" | "--device-draft" => {
+                supports("--spec-draft-device") || supports("-devd") || supports("--device-draft")
+            }
+            "--spec-draft-type-k" | "-ctkd" | "--cache-type-k-draft" => {
+                supports("--spec-draft-type-k")
+                    || supports("-ctkd")
+                    || supports("--cache-type-k-draft")
+            }
+            "--spec-draft-type-v" | "-ctvd" | "--cache-type-v-draft" => {
+                supports("--spec-draft-type-v")
+                    || supports("-ctvd")
+                    || supports("--cache-type-v-draft")
+            }
+            "--spec-draft-threads" | "-td" | "--threads-draft" => {
+                supports("--spec-draft-threads") || supports("-td") || supports("--threads-draft")
+            }
+            "--spec-draft-threads-batch" | "-tbd" | "--threads-batch-draft" => {
+                supports("--spec-draft-threads-batch")
+                    || supports("-tbd")
+                    || supports("--threads-batch-draft")
+            }
+            "--spec-draft-cpu-moe" | "-cmoed" | "--cpu-moe-draft" => {
+                supports("--spec-draft-cpu-moe")
+                    || supports("-cmoed")
+                    || supports("--cpu-moe-draft")
+            }
+            "--spec-draft-n-cpu-moe" | "--spec-draft-ncmoe" | "-ncmoed" | "--n-cpu-moe-draft" => {
+                supports("--spec-draft-n-cpu-moe")
+                    || supports("--spec-draft-ncmoe")
+                    || supports("-ncmoed")
+                    || supports("--n-cpu-moe-draft")
+            }
+            "--spec-draft-prio" | "--prio-draft" => {
+                supports("--spec-draft-prio") || supports("--prio-draft")
+            }
+            "--spec-draft-poll" | "--poll-draft" => {
+                supports("--spec-draft-poll") || supports("--poll-draft")
+            }
+            "--spec-type"
+            | "--spec-draft-sampling"
+            | "--spec-draft-backend-sampling"
+            | "--no-spec-draft-backend-sampling"
+            | "--spec-draft-n-ubatch" => supports(arg),
             _ => true,
         };
         if supported {
@@ -1223,6 +1884,44 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "--spec-draft-n-max"
                     | "--draft-max"
                     | "--draft"
+                    | "--draft-n"
+                    | "--spec-draft-n-min"
+                    | "--draft-min"
+                    | "--draft-n-min"
+                    | "--spec-draft-p-min"
+                    | "--draft-p-min"
+                    | "--spec-draft-p-split"
+                    | "--draft-p-split"
+                    | "--spec-type"
+                    | "--spec-draft-ngl"
+                    | "-ngld"
+                    | "--gpu-layers-draft"
+                    | "--n-gpu-layers-draft"
+                    | "--spec-draft-device"
+                    | "-devd"
+                    | "--device-draft"
+                    | "--spec-draft-sampling"
+                    | "--spec-draft-type-k"
+                    | "-ctkd"
+                    | "--cache-type-k-draft"
+                    | "--spec-draft-type-v"
+                    | "-ctvd"
+                    | "--cache-type-v-draft"
+                    | "--spec-draft-n-ubatch"
+                    | "--spec-draft-threads"
+                    | "-td"
+                    | "--threads-draft"
+                    | "--spec-draft-threads-batch"
+                    | "-tbd"
+                    | "--threads-batch-draft"
+                    | "--spec-draft-n-cpu-moe"
+                    | "--spec-draft-ncmoe"
+                    | "-ncmoed"
+                    | "--n-cpu-moe-draft"
+                    | "--spec-draft-prio"
+                    | "--prio-draft"
+                    | "--spec-draft-poll"
+                    | "--poll-draft"
             ) {
                 if let Some(value) = args.get(i + 1) {
                     filtered.push(value.clone());
@@ -1254,6 +1953,49 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--spec-draft-n-max"
                 | "--draft-max"
                 | "--draft"
+                | "--draft-n"
+                | "--spec-draft-n-min"
+                | "--draft-min"
+                | "--draft-n-min"
+                | "--spec-draft-p-min"
+                | "--draft-p-min"
+                | "--spec-draft-p-split"
+                | "--draft-p-split"
+                | "--spec-type"
+                | "--spec-draft-ngl"
+                | "-ngld"
+                | "--gpu-layers-draft"
+                | "--n-gpu-layers-draft"
+                | "--spec-draft-device"
+                | "-devd"
+                | "--device-draft"
+                | "--spec-draft-sampling"
+                | "--spec-draft-backend-sampling"
+                | "--no-spec-draft-backend-sampling"
+                | "--spec-draft-type-k"
+                | "-ctkd"
+                | "--cache-type-k-draft"
+                | "--spec-draft-type-v"
+                | "-ctvd"
+                | "--cache-type-v-draft"
+                | "--spec-draft-n-ubatch"
+                | "--spec-draft-threads"
+                | "-td"
+                | "--threads-draft"
+                | "--spec-draft-threads-batch"
+                | "-tbd"
+                | "--threads-batch-draft"
+                | "--spec-draft-cpu-moe"
+                | "-cmoed"
+                | "--cpu-moe-draft"
+                | "--spec-draft-n-cpu-moe"
+                | "--spec-draft-ncmoe"
+                | "-ncmoed"
+                | "--n-cpu-moe-draft"
+                | "--spec-draft-prio"
+                | "--prio-draft"
+                | "--spec-draft-poll"
+                | "--poll-draft"
         ) && matches!(
             arg.as_str(),
             "--n-cpu-moe"
@@ -1275,6 +2017,44 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--spec-draft-n-max"
                 | "--draft-max"
                 | "--draft"
+                | "--draft-n"
+                | "--spec-draft-n-min"
+                | "--draft-min"
+                | "--draft-n-min"
+                | "--spec-draft-p-min"
+                | "--draft-p-min"
+                | "--spec-draft-p-split"
+                | "--draft-p-split"
+                | "--spec-type"
+                | "--spec-draft-ngl"
+                | "-ngld"
+                | "--gpu-layers-draft"
+                | "--n-gpu-layers-draft"
+                | "--spec-draft-device"
+                | "-devd"
+                | "--device-draft"
+                | "--spec-draft-sampling"
+                | "--spec-draft-type-k"
+                | "-ctkd"
+                | "--cache-type-k-draft"
+                | "--spec-draft-type-v"
+                | "-ctvd"
+                | "--cache-type-v-draft"
+                | "--spec-draft-n-ubatch"
+                | "--spec-draft-threads"
+                | "-td"
+                | "--threads-draft"
+                | "--spec-draft-threads-batch"
+                | "-tbd"
+                | "--threads-batch-draft"
+                | "--spec-draft-n-cpu-moe"
+                | "--spec-draft-ncmoe"
+                | "-ncmoed"
+                | "--n-cpu-moe-draft"
+                | "--spec-draft-prio"
+                | "--prio-draft"
+                | "--spec-draft-poll"
+                | "--poll-draft"
         ) {
             i += 1;
         }
@@ -1493,26 +2273,32 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 );
             }
             if def.speculative_enabled {
+                let is_ngram = def
+                    .speculative_type
+                    .as_deref()
+                    .map(|t| t.contains("ngram"))
+                    .unwrap_or(false);
                 let draft_raw = def
                     .speculative_model_path
                     .as_deref()
                     .or(def.speculative_model.as_deref())
                     .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Speculative decoding is enabled for server '{}' but no draft model was specified. Please select a draft GGUF model file.",
-                            def.name
-                        )
-                    })?;
-                if let Some(resolved) = resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro) {
-                    let path_str = resolved.to_string_lossy().into_owned();
-                    def.speculative_model_path = Some(path_str.clone());
-                    def.speculative_model = Some(path_str);
-                } else if !std::path::Path::new(draft_raw).is_file() {
+                    .filter(|s| !s.is_empty());
+                if let Some(draft_raw) = draft_raw {
+                    if let Some(resolved) = resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro) {
+                        let path_str = resolved.to_string_lossy().into_owned();
+                        def.speculative_model_path = Some(path_str.clone());
+                        def.speculative_model = Some(path_str);
+                    } else if !std::path::Path::new(draft_raw).is_file() {
+                        bail!(
+                            "Speculative decoding draft GGUF model file not found for '{draft_raw}'. Please provide a valid path to a .gguf file or ensure the draft model is downloaded to your GGUF directory ({}).",
+                            cfg.gguf_dir
+                        );
+                    }
+                } else if !is_ngram {
                     bail!(
-                        "Speculative decoding draft GGUF model file not found for '{draft_raw}'. Please provide a valid path to a .gguf file or ensure the draft model is downloaded to your GGUF directory ({}).",
-                        cfg.gguf_dir
+                        "Speculative decoding is enabled for server '{}' but no draft model was specified. Please select a draft GGUF model file.",
+                        def.name
                     );
                 }
             }
@@ -1526,6 +2312,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             if def.speculative_enabled {
                 let has_draft_support = help_supports_flag(&help, "--model-draft")
                     || help_supports_flag(&help, "--spec-draft-model")
+                    || help_supports_flag(&help, "--spec-type")
                     || help_supports_flag(&help, "-md");
                 if !has_draft_support {
                     bail!(
@@ -1539,8 +2326,22 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     .or(def.speculative_model.as_deref())
                     .unwrap_or("none");
                 let tokens = def.speculative_num_tokens.unwrap_or(5);
+                let mut parts = vec![
+                    format!("draft model = {draft_display}"),
+                    format!("speculative tokens = {tokens}"),
+                ];
+                if let Some(ref stype) = def.speculative_type {
+                    parts.push(format!("type = {stype}"));
+                }
+                if let Some(ref ngl) = def.speculative_draft_ngl {
+                    parts.push(format!("ngl = {ngl}"));
+                }
+                if let Some(pmin) = def.speculative_draft_p_min {
+                    parts.push(format!("p-min = {pmin}"));
+                }
                 log_cb(format!(
-                    "[LocalLLmPanel] Speculative decoding enabled: draft model = {draft_display}, speculative tokens = {tokens}"
+                    "[LocalLLmPanel] Speculative decoding enabled: {}",
+                    parts.join(", ")
                 ));
             }
             // Apply global API key if per-server key is not set (D3)
@@ -3865,6 +4666,7 @@ mod tests {
             speculative_model_path: None,
             speculative_num_tokens: None,
             speculative_enabled: false,
+            ..ServerDef::default()
         }
     }
 
@@ -4873,6 +5675,89 @@ vllm:num_preemptions_total{model_name="my model"} 5
         assert!(args_legacy.contains(&"-md".to_string()));
         assert!(args_legacy.contains(&"--draft-max".to_string()));
         assert!(args_legacy.contains(&"4".to_string()));
+    }
+
+    #[test]
+    fn test_llamacpp_all_speculative_flags() {
+        let mut d = def("llama-7b", "instruct", 8000, "GGUF", None);
+        d.backend = "llamacpp".into();
+        d.speculative_enabled = true;
+        d.speculative_model_path = Some("C:\\models\\draft-0.5b.gguf".into());
+        d.speculative_num_tokens = Some(8);
+        d.speculative_draft_ngl = Some("auto".into());
+        d.speculative_draft_n_min = Some(2);
+        d.speculative_draft_p_min = Some(0.85);
+        d.speculative_draft_p_split = Some(0.1);
+        d.speculative_type = Some("draft-simple".into());
+        d.speculative_draft_device = Some("CUDA0".into());
+        d.speculative_draft_sampling = Some("greedy".into());
+        d.speculative_draft_backend_sampling = Some(true);
+        d.speculative_draft_cache_type_k = Some("q8_0".into());
+        d.speculative_draft_cache_type_v = Some("q8_0".into());
+        d.speculative_draft_n_ubatch = Some(256);
+        d.speculative_draft_threads = Some(8);
+        d.speculative_draft_threads_batch = Some(4);
+        d.speculative_draft_cpu_moe = Some(true);
+        d.speculative_draft_n_cpu_moe = Some(16);
+        d.speculative_draft_prio = Some(2);
+        d.speculative_draft_poll = Some(1);
+
+        let modern_help = "--model-draft FNAME  --spec-draft-n-max N  --spec-draft-n-min N  --spec-draft-p-min P  --spec-draft-p-split P  --spec-type TYPE  --spec-draft-ngl N  --spec-draft-device D  --spec-draft-sampling S  --spec-draft-backend-sampling  --spec-draft-type-k K  --spec-draft-type-v V  --spec-draft-n-ubatch N  --spec-draft-threads N  --spec-draft-threads-batch N  --spec-draft-cpu-moe  --spec-draft-n-cpu-moe N  --spec-draft-prio N  --spec-draft-poll N";
+        let args = build_llamacpp_args_with_help(&d, modern_help);
+        assert!(args.contains(&"--model-draft".to_string()));
+        assert!(args.contains(&"C:\\models\\draft-0.5b.gguf".to_string()));
+        assert!(args.contains(&"--spec-draft-n-max".to_string()));
+        assert!(args.contains(&"8".to_string()));
+        assert!(args.contains(&"--spec-draft-n-min".to_string()));
+        assert!(args.contains(&"2".to_string()));
+        assert!(args.contains(&"--spec-draft-p-min".to_string()));
+        assert!(args.contains(&"0.85".to_string()));
+        assert!(args.contains(&"--spec-draft-p-split".to_string()));
+        assert!(args.contains(&"0.1".to_string()));
+        assert!(args.contains(&"--spec-type".to_string()));
+        assert!(args.contains(&"draft-simple".to_string()));
+        assert!(args.contains(&"--spec-draft-ngl".to_string()));
+        assert!(args.contains(&"auto".to_string()));
+        assert!(args.contains(&"--spec-draft-device".to_string()));
+        assert!(args.contains(&"CUDA0".to_string()));
+        assert!(args.contains(&"--spec-draft-sampling".to_string()));
+        assert!(args.contains(&"greedy".to_string()));
+        assert!(args.contains(&"--spec-draft-backend-sampling".to_string()));
+        assert!(args.contains(&"--spec-draft-type-k".to_string()));
+        assert!(args.contains(&"q8_0".to_string()));
+        assert!(args.contains(&"--spec-draft-type-v".to_string()));
+        assert!(args.contains(&"--spec-draft-n-ubatch".to_string()));
+        assert!(args.contains(&"256".to_string()));
+        assert!(args.contains(&"--spec-draft-threads".to_string()));
+        assert!(args.contains(&"8".to_string()));
+        assert!(args.contains(&"--spec-draft-threads-batch".to_string()));
+        assert!(args.contains(&"4".to_string()));
+        assert!(args.contains(&"--spec-draft-cpu-moe".to_string()));
+        assert!(args.contains(&"--spec-draft-n-cpu-moe".to_string()));
+        assert!(args.contains(&"16".to_string()));
+        assert!(args.contains(&"--spec-draft-prio".to_string()));
+        assert!(args.contains(&"2".to_string()));
+        assert!(args.contains(&"--spec-draft-poll".to_string()));
+        assert!(args.contains(&"1".to_string()));
+
+        // Filter against legacy help maps flags to legacy names
+        let legacy_help = "-md FNAME  --draft-max N  --draft-min N  --draft-p-min P  --draft-p-split P  -ngld N  -devd D  -ctkd K  -ctvd V  -td N  -tbd N  -cmoed  -ncmoed N  --prio-draft N  --poll-draft N";
+        let filtered = filter_llamacpp_args(args.clone(), legacy_help);
+        assert!(filtered.contains(&"-md".to_string()));
+        assert!(filtered.contains(&"--draft-max".to_string()));
+        assert!(filtered.contains(&"--draft-min".to_string()));
+        assert!(filtered.contains(&"--draft-p-min".to_string()));
+        assert!(filtered.contains(&"--draft-p-split".to_string()));
+        assert!(filtered.contains(&"-ngld".to_string()));
+        assert!(filtered.contains(&"-devd".to_string()));
+        assert!(filtered.contains(&"-ctkd".to_string()));
+        assert!(filtered.contains(&"-ctvd".to_string()));
+        assert!(filtered.contains(&"-td".to_string()));
+        assert!(filtered.contains(&"-tbd".to_string()));
+        assert!(filtered.contains(&"-cmoed".to_string()));
+        assert!(filtered.contains(&"-ncmoed".to_string()));
+        assert!(filtered.contains(&"--prio-draft".to_string()));
+        assert!(filtered.contains(&"--poll-draft".to_string()));
     }
 
     #[test]

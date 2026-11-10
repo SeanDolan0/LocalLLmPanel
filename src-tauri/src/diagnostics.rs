@@ -1,5 +1,6 @@
 //! Unified first-run diagnostics, Windows support verification, and redacted diagnostic bundle export.
 
+use crate::server::{apply_vllm_auth, server_api_key};
 use crate::state::AppState;
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
@@ -982,7 +983,10 @@ pub async fn run_server_compatibility_test(
     state: &Arc<AppState>,
     server_id: &str,
 ) -> Result<CompatibilityTestReport, String> {
-    let (port, model, backend) = {
+    // Use the same effective API key (per-server override, else global,
+    // DPAPI-decrypted) that the running server was launched with, so the
+    // compatibility probes don't fail with 401 on key-protected servers.
+    let (port, model, backend, def) = {
         let servers = state.servers.lock().unwrap();
         let ls = servers
             .get(server_id)
@@ -997,8 +1001,10 @@ pub async fn run_server_compatibility_test(
             ls.def.port,
             ls.def.backend_model_name(),
             ls.def.backend.clone(),
+            ls.def.clone(),
         )
     };
+    let api_key = server_api_key(state, &def);
 
     let base_url = format!("http://127.0.0.1:{port}");
     let mut items = Vec::new();
@@ -1013,12 +1019,15 @@ pub async fn run_server_compatibility_test(
             "max_tokens": 32,
             "stream": false,
         });
-        let resp = client
-            .post(format!("{base_url}/v1/chat/completions"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let resp = apply_vllm_auth(
+            client
+                .post(format!("{base_url}/v1/chat/completions"))
+                .json(&body),
+            api_key.as_deref(),
+        )
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
@@ -1054,12 +1063,15 @@ pub async fn run_server_compatibility_test(
             "max_tokens": 64,
             "stream": true,
         });
-        let resp = client
-            .post(format!("{base_url}/v1/chat/completions"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let resp = apply_vllm_auth(
+            client
+                .post(format!("{base_url}/v1/chat/completions"))
+                .json(&body),
+            api_key.as_deref(),
+        )
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
@@ -1104,7 +1116,13 @@ pub async fn run_server_compatibility_test(
             "tool_choice": "auto",
             "max_tokens": 256,
         });
-        let resp = client.post(format!("{base_url}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
+        let resp = apply_vllm_auth(
+            client.post(format!("{base_url}/v1/chat/completions")).json(&body),
+            api_key.as_deref(),
+        )
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
@@ -1142,7 +1160,13 @@ pub async fn run_server_compatibility_test(
             "response_format": {"type": "json_object"},
             "max_tokens": 64,
         });
-        let resp = client.post(format!("{base_url}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
+        let resp = apply_vllm_auth(
+            client.post(format!("{base_url}/v1/chat/completions")).json(&body),
+            api_key.as_deref(),
+        )
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             let fallback_body = serde_json::json!({
                 "model": model,
@@ -1152,7 +1176,15 @@ pub async fn run_server_compatibility_test(
                 ],
                 "max_tokens": 64,
             });
-            let fallback_resp = client.post(format!("{base_url}/v1/chat/completions")).json(&fallback_body).send().await.map_err(|e| e.to_string())?;
+            let fallback_resp = apply_vllm_auth(
+                client
+                    .post(format!("{base_url}/v1/chat/completions"))
+                    .json(&fallback_body),
+                api_key.as_deref(),
+            )
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
             if !fallback_resp.status().is_success() {
                 return Err(format!("HTTP {}", fallback_resp.status()));
             }
@@ -1189,7 +1221,13 @@ pub async fn run_server_compatibility_test(
             ],
             "max_tokens": 32,
         });
-        let resp = client.post(format!("{base_url}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
+        let resp = apply_vllm_auth(
+            client.post(format!("{base_url}/v1/chat/completions")).json(&body),
+            api_key.as_deref(),
+        )
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }

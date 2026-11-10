@@ -2163,6 +2163,40 @@ pub struct ServerInput {
     #[serde(default)]
     pub speculative_num_tokens: OptionalField<usize>,
     pub speculative_enabled: Option<bool>,
+    #[serde(default)]
+    pub speculative_draft_ngl: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_draft_n_min: OptionalField<usize>,
+    #[serde(default)]
+    pub speculative_draft_p_min: OptionalField<f64>,
+    #[serde(default)]
+    pub speculative_draft_p_split: OptionalField<f64>,
+    #[serde(default)]
+    pub speculative_type: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_draft_device: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_draft_sampling: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_draft_backend_sampling: Option<bool>,
+    #[serde(default)]
+    pub speculative_draft_cache_type_k: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_draft_cache_type_v: OptionalField<String>,
+    #[serde(default)]
+    pub speculative_draft_n_ubatch: OptionalField<usize>,
+    #[serde(default)]
+    pub speculative_draft_threads: OptionalField<usize>,
+    #[serde(default)]
+    pub speculative_draft_threads_batch: OptionalField<usize>,
+    #[serde(default)]
+    pub speculative_draft_cpu_moe: Option<bool>,
+    #[serde(default)]
+    pub speculative_draft_n_cpu_moe: OptionalField<usize>,
+    #[serde(default)]
+    pub speculative_draft_prio: OptionalField<u8>,
+    #[serde(default)]
+    pub speculative_draft_poll: OptionalField<u8>,
     pub restart: Option<bool>,
     pub llamacpp_channel: Option<String>,
 }
@@ -2439,6 +2473,69 @@ pub async fn servers_create(
             .into_inner()
             .filter(|value| *value > 0),
         speculative_enabled: input.speculative_enabled.unwrap_or(false),
+        speculative_draft_ngl: input
+            .speculative_draft_ngl
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        speculative_draft_n_min: input.speculative_draft_n_min.clone().into_inner(),
+        speculative_draft_p_min: input.speculative_draft_p_min.clone().into_inner(),
+        speculative_draft_p_split: input.speculative_draft_p_split.clone().into_inner(),
+        speculative_type: input
+            .speculative_type
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        speculative_draft_device: input
+            .speculative_draft_device
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        speculative_draft_sampling: input
+            .speculative_draft_sampling
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        speculative_draft_backend_sampling: input.speculative_draft_backend_sampling,
+        speculative_draft_cache_type_k: input
+            .speculative_draft_cache_type_k
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        speculative_draft_cache_type_v: input
+            .speculative_draft_cache_type_v
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        speculative_draft_n_ubatch: input
+            .speculative_draft_n_ubatch
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0),
+        speculative_draft_threads: input
+            .speculative_draft_threads
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0),
+        speculative_draft_threads_batch: input
+            .speculative_draft_threads_batch
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0),
+        speculative_draft_cpu_moe: input.speculative_draft_cpu_moe,
+        speculative_draft_n_cpu_moe: input
+            .speculative_draft_n_cpu_moe
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0),
+        speculative_draft_prio: input.speculative_draft_prio.clone().into_inner(),
+        speculative_draft_poll: input.speculative_draft_poll.clone().into_inner(),
     };
     for (name, value) in &def.env {
         server::validate_env_name(name)?;
@@ -2768,6 +2865,73 @@ pub async fn servers_update(
             .clone()
             .into_inner()
             .filter(|value| *value > 0);
+        updated.speculative_draft_ngl = input
+            .speculative_draft_ngl
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        updated.speculative_draft_n_min = input.speculative_draft_n_min.clone().into_inner();
+        updated.speculative_draft_p_min = input.speculative_draft_p_min.clone().into_inner();
+        updated.speculative_draft_p_split = input.speculative_draft_p_split.clone().into_inner();
+        updated.speculative_type = input
+            .speculative_type
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        updated.speculative_draft_device = input
+            .speculative_draft_device
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        updated.speculative_draft_sampling = input
+            .speculative_draft_sampling
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(backend_sampling) = input.speculative_draft_backend_sampling {
+            updated.speculative_draft_backend_sampling = Some(backend_sampling);
+        }
+        updated.speculative_draft_cache_type_k = input
+            .speculative_draft_cache_type_k
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        updated.speculative_draft_cache_type_v = input
+            .speculative_draft_cache_type_v
+            .clone()
+            .into_inner()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        updated.speculative_draft_n_ubatch = input
+            .speculative_draft_n_ubatch
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0);
+        updated.speculative_draft_threads = input
+            .speculative_draft_threads
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0);
+        updated.speculative_draft_threads_batch = input
+            .speculative_draft_threads_batch
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0);
+        if let Some(cpu_moe) = input.speculative_draft_cpu_moe {
+            updated.speculative_draft_cpu_moe = Some(cpu_moe);
+        }
+        updated.speculative_draft_n_cpu_moe = input
+            .speculative_draft_n_cpu_moe
+            .clone()
+            .into_inner()
+            .filter(|&v| v > 0);
+        updated.speculative_draft_prio = input.speculative_draft_prio.clone().into_inner();
+        updated.speculative_draft_poll = input.speculative_draft_poll.clone().into_inner();
         updated.normalize_for_backend()?;
 
         let mut next = cfg.clone();
@@ -3103,6 +3267,7 @@ pub struct SettingsPatch {
     pub llamacpp_executable: Option<String>,
     pub llamacpp_channels:
         Option<std::collections::BTreeMap<String, crate::state::LlamaCppChannelConfig>>,
+    pub llamacpp_forks: Option<Vec<crate::state::LlamaCppFork>>,
     pub hf_token: Option<String>,
     pub github_token: Option<String>,
     pub clear_hf_token: Option<bool>,
@@ -3250,6 +3415,18 @@ pub fn settings_set(
             next.llamacpp_help = upstream.help.clone();
             next.llamacpp_installed_tag = upstream.installed_tag.clone();
         }
+    }
+    if let Some(forks) = patch.llamacpp_forks {
+        let mut merged = crate::state::builtin_llamacpp_forks();
+        for fork in forks {
+            if merged.iter().any(|b| b.id == fork.id) {
+                continue;
+            }
+            if crate::state::validate_llamacpp_fork(&fork).is_ok() {
+                merged.push(fork);
+            }
+        }
+        next.llamacpp_forks = merged;
     }
     if let Some(t) = patch.hf_token {
         if t != crate::state::SECRET_PLACEHOLDER {

@@ -75,6 +75,7 @@ pub struct LlamaCppFork {
     pub kind: String,
     /// GitHub repository as "owner/name"; used for the releases API and the release-notes link.
     /// Required for "github" forks; ignored for "local" forks.
+    #[serde(default)]
     pub repo: String,
     /// Absolute path to a locally built `llama-server.exe`.
     /// Required for "local" forks; ignored for "github" forks.
@@ -86,12 +87,14 @@ pub struct LlamaCppFork {
     /// Regex the main Windows x64 CUDA asset must match. Must capture the CUDA
     /// major/minor versions in capture groups 1 and 2.
     /// Required for "github" forks; ignored for "local" forks.
+    #[serde(default = "default_fork_asset_regex")]
     pub asset_regex: String,
     /// Regex for the matching CUDA runtime (cudart) asset. Empty disables the runtime download.
     #[serde(default)]
     pub runtime_regex: String,
     /// Prefix stripped from the main asset name to derive the install tag
     /// (e.g. "llama-", or "llama-prism-" for the PrismML fork).
+    #[serde(default = "default_fork_main_prefix")]
     pub main_prefix: String,
     /// Built-in forks are managed by the app and cannot be edited or removed.
     #[serde(default)]
@@ -100,6 +103,14 @@ pub struct LlamaCppFork {
 
 fn default_fork_kind() -> String {
     "github".to_string()
+}
+
+fn default_fork_asset_regex() -> String {
+    DEFAULT_FORK_ASSET_REGEX.to_string()
+}
+
+fn default_fork_main_prefix() -> String {
+    "llama-".to_string()
 }
 
 impl LlamaCppFork {
@@ -148,6 +159,194 @@ pub fn builtin_llamacpp_forks() -> Vec<LlamaCppFork> {
 
 pub fn default_llamacpp_forks() -> Vec<LlamaCppFork> {
     builtin_llamacpp_forks()
+}
+
+pub fn custom_forks_path() -> PathBuf {
+    #[cfg(test)]
+    if let Ok(test_root) = std::env::var("LLM_TEST_CONFIG_DIR") {
+        if !test_root.trim().is_empty() {
+            return PathBuf::from(test_root).join(CUSTOM_FORKS_FILE_NAME);
+        }
+    }
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CONFIG_DIR_NAME)
+        .join(CUSTOM_FORKS_FILE_NAME)
+}
+
+pub fn save_custom_forks(forks: &[LlamaCppFork]) -> Result<(), String> {
+    let path = custom_forks_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    }
+    let custom: Vec<LlamaCppFork> = forks
+        .iter()
+        .filter(|f| !f.builtin && f.id != "upstream")
+        .cloned()
+        .collect();
+    let text = serde_json::to_string_pretty(&custom)
+        .map_err(|e| format!("serialize custom forks: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    replace_file_atomic(&tmp, &path)?;
+    Ok(())
+}
+
+fn extract_forks_from_json(text: &str) -> Vec<LlamaCppFork> {
+    if let Ok(cfg) = serde_json::from_str::<PersistedConfig>(text) {
+        return cfg.llamacpp_forks;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(forks_val) = val.get("llamacpp_forks") {
+            if let Ok(forks) = serde_json::from_value::<Vec<LlamaCppFork>>(forks_val.clone()) {
+                return forks;
+            }
+        }
+    }
+    Vec::new()
+}
+
+pub fn load_custom_forks() -> Vec<LlamaCppFork> {
+    let mut custom_forks: Vec<LlamaCppFork> = Vec::new();
+    let path = custom_forks_path();
+
+    if path.exists() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(forks) = serde_json::from_str::<Vec<LlamaCppFork>>(&text) {
+                for fork in forks {
+                    if !fork.builtin
+                        && fork.id != "upstream"
+                        && !custom_forks.iter().any(|f| f.id == fork.id)
+                    {
+                        custom_forks.push(fork);
+                    }
+                }
+            }
+        }
+        if !custom_forks.is_empty() {
+            return custom_forks;
+        }
+    }
+
+    // If custom_forks.json does not exist yet or is empty, rescue custom forks from config.json.bak and config.json
+    let config_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let bak_path = config_dir.join("config.json.bak");
+    if bak_path.exists() {
+        if let Ok(bak_text) = std::fs::read_to_string(&bak_path) {
+            let rescued = extract_forks_from_json(&bak_text);
+            for fork in rescued {
+                if !fork.builtin
+                    && fork.id != "upstream"
+                    && !custom_forks.iter().any(|f| f.id == fork.id)
+                {
+                    eprintln!(
+                        "[config] Rescued custom fork '{}' from config.json.bak",
+                        fork.id
+                    );
+                    custom_forks.push(fork);
+                }
+            }
+        }
+    }
+
+    let active_config_path = config_dir.join(CONFIG_FILE_NAME);
+    if active_config_path.exists() {
+        if let Ok(cfg_text) = std::fs::read_to_string(&active_config_path) {
+            let active_forks = extract_forks_from_json(&cfg_text);
+            for fork in active_forks {
+                if !fork.builtin
+                    && fork.id != "upstream"
+                    && !custom_forks.iter().any(|f| f.id == fork.id)
+                {
+                    custom_forks.push(fork);
+                }
+            }
+        }
+    }
+
+    // If we rescued any forks, persist them to custom_forks.json immediately
+    if !custom_forks.is_empty() {
+        let _ = save_custom_forks(&custom_forks);
+    }
+
+    custom_forks
+}
+
+pub fn auto_discover_disk_forks(
+    llamacpp_dir: &str,
+    forks: &mut Vec<LlamaCppFork>,
+    channels: &mut BTreeMap<String, LlamaCppChannelConfig>,
+) {
+    let root = PathBuf::from(llamacpp_dir);
+    if !root.is_dir() {
+        return;
+    }
+    let entries = match std::fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let exe = path.join("llama-server.exe");
+        if !exe.is_file() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let fork_id = if dir_name.starts_with("prismml-") {
+            "prismml".to_string()
+        } else if dir_name.starts_with("prism-") {
+            "prism".to_string()
+        } else if dir_name.starts_with("upstream-") {
+            "upstream".to_string()
+        } else if let Some((prefix, _)) = dir_name.split_once('-') {
+            prefix.to_string()
+        } else {
+            continue;
+        };
+
+        if fork_id == "upstream" {
+            continue;
+        }
+
+        if !forks.iter().any(|f| f.id == fork_id) {
+            let (repo, name) = if fork_id == "prismml" || fork_id == "prism" {
+                ("PrismML-Eng/llama.cpp".to_string(), "PrismML".to_string())
+            } else {
+                (format!("custom/{fork_id}"), fork_id.clone())
+            };
+            forks.push(LlamaCppFork {
+                id: fork_id.clone(),
+                name,
+                kind: "github".to_string(),
+                repo,
+                local_executable: None,
+                description: format!("Discovered installed fork {fork_id}"),
+                asset_regex: DEFAULT_FORK_ASSET_REGEX.to_string(),
+                runtime_regex: DEFAULT_FORK_RUNTIME_REGEX.to_string(),
+                main_prefix: "llama-".to_string(),
+                builtin: false,
+            });
+        }
+
+        let ch = channels
+            .entry(fork_id.clone())
+            .or_insert_with(LlamaCppChannelConfig::default);
+        if ch.executable.is_none() || ch.installed_tag.is_none() {
+            ch.dir = path.to_string_lossy().into_owned();
+            ch.executable = Some(exe.to_string_lossy().into_owned());
+            if let Some((_, rest)) = dir_name.split_once(&format!("{fork_id}-")) {
+                if let Some((tag, _)) = rest.split_once("-cuda-") {
+                    ch.installed_tag = Some(tag.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Validate a fork definition; returns a user-facing error message on failure.
@@ -229,6 +428,7 @@ fn default_llamacpp_channel() -> String {
 
 pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
 pub const CONFIG_FILE_NAME: &str = "config.json";
+pub const CUSTOM_FORKS_FILE_NAME: &str = "custom_forks.json";
 pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
 pub const BENCHMARKS_FILE_NAME: &str = "benchmarks.json";
 
@@ -359,6 +559,7 @@ pub struct CachedQuants {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ServerDef {
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -460,6 +661,57 @@ pub struct ServerDef {
     /// Whether speculative decoding is enabled for this server.
     #[serde(default)]
     pub speculative_enabled: bool,
+    /// Optional draft model GPU layers (-ngld / --gpu-layers-draft).
+    #[serde(default)]
+    pub speculative_draft_ngl: Option<String>,
+    /// Optional minimum speculative draft tokens (--spec-draft-n-min).
+    #[serde(default)]
+    pub speculative_draft_n_min: Option<usize>,
+    /// Optional minimum draft probability threshold (--spec-draft-p-min).
+    #[serde(default)]
+    pub speculative_draft_p_min: Option<f64>,
+    /// Optional speculative split probability (--spec-draft-p-split).
+    #[serde(default)]
+    pub speculative_draft_p_split: Option<f64>,
+    /// Optional speculative decoding strategy / type (--spec-type).
+    #[serde(default)]
+    pub speculative_type: Option<String>,
+    /// Optional device placement for draft model (-devd / --device-draft).
+    #[serde(default)]
+    pub speculative_draft_device: Option<String>,
+    /// Optional sampling mode for draft model (--spec-draft-sampling).
+    #[serde(default)]
+    pub speculative_draft_sampling: Option<String>,
+    /// Optional toggle to offload draft sampling to backend (--spec-draft-backend-sampling).
+    #[serde(default)]
+    pub speculative_draft_backend_sampling: Option<bool>,
+    /// Optional draft KV cache type K (--spec-draft-type-k).
+    #[serde(default)]
+    pub speculative_draft_cache_type_k: Option<String>,
+    /// Optional draft KV cache type V (--spec-draft-type-v).
+    #[serde(default)]
+    pub speculative_draft_cache_type_v: Option<String>,
+    /// Optional physical maximum micro-batch size for draft context (--spec-draft-n-ubatch).
+    #[serde(default)]
+    pub speculative_draft_n_ubatch: Option<usize>,
+    /// Optional CPU threads for draft model generation (--spec-draft-threads).
+    #[serde(default)]
+    pub speculative_draft_threads: Option<usize>,
+    /// Optional CPU threads for draft model batch processing (--spec-draft-threads-batch).
+    #[serde(default)]
+    pub speculative_draft_threads_batch: Option<usize>,
+    /// Optional toggle to keep draft MoE weights on CPU (--spec-draft-cpu-moe).
+    #[serde(default)]
+    pub speculative_draft_cpu_moe: Option<bool>,
+    /// Optional number of draft MoE layers to keep on CPU (--spec-draft-n-cpu-moe).
+    #[serde(default)]
+    pub speculative_draft_n_cpu_moe: Option<usize>,
+    /// Optional draft process/thread priority (--spec-draft-prio: 0-normal, 1-medium, 2-high, 3-realtime).
+    #[serde(default)]
+    pub speculative_draft_prio: Option<u8>,
+    /// Optional polling for draft work (--spec-draft-poll: 0 or 1).
+    #[serde(default)]
+    pub speculative_draft_poll: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -496,6 +748,73 @@ fn default_true() -> bool {
     true
 }
 
+impl Default for ServerDef {
+    fn default() -> Self {
+        Self {
+            backend: default_backend(),
+            id: String::new(),
+            name: String::new(),
+            model_id: String::new(),
+            task: "instruct".to_string(),
+            port: 8000,
+            gpu_mem_util: 0.85,
+            max_model_len: None,
+            quant: "auto".to_string(),
+            served_model_name: None,
+            kv_cache_dtype: None,
+            llamacpp_channel: default_llamacpp_channel(),
+            enforce_eager: true,
+            params_b: None,
+            swap_space_gb: None,
+            cpu_offload_gb: None,
+            was_running: false,
+            model_path: None,
+            mmproj_path: None,
+            ctx_size: None,
+            n_gpu_layers: None,
+            n_cpu_moe: None,
+            fit: true,
+            fit_target: None,
+            device: None,
+            api_key: None,
+            log_verbosity: None,
+            flash_attn: true,
+            cache_type_k: default_cache_type(),
+            cache_type_v: default_cache_type(),
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            parallel: default_parallel(),
+            jinja: true,
+            no_kv_offload: false,
+            metrics: true,
+            extra_args: Vec::new(),
+            env: BTreeMap::new(),
+            speculative_model: None,
+            speculative_model_path: None,
+            speculative_num_tokens: None,
+            speculative_enabled: false,
+            speculative_draft_ngl: None,
+            speculative_draft_n_min: None,
+            speculative_draft_p_min: None,
+            speculative_draft_p_split: None,
+            speculative_type: None,
+            speculative_draft_device: None,
+            speculative_draft_sampling: None,
+            speculative_draft_backend_sampling: None,
+            speculative_draft_cache_type_k: None,
+            speculative_draft_cache_type_v: None,
+            speculative_draft_n_ubatch: None,
+            speculative_draft_threads: None,
+            speculative_draft_threads_batch: None,
+            speculative_draft_cpu_moe: None,
+            speculative_draft_n_cpu_moe: None,
+            speculative_draft_prio: None,
+            speculative_draft_poll: None,
+        }
+    }
+}
+
 impl ServerDef {
     pub fn backend_kind(&self) -> Result<ServerBackend, String> {
         self.backend.parse()
@@ -510,6 +829,23 @@ impl ServerDef {
             self.speculative_model = None;
             self.speculative_model_path = None;
             self.speculative_num_tokens = None;
+            self.speculative_draft_ngl = None;
+            self.speculative_draft_n_min = None;
+            self.speculative_draft_p_min = None;
+            self.speculative_draft_p_split = None;
+            self.speculative_type = None;
+            self.speculative_draft_device = None;
+            self.speculative_draft_sampling = None;
+            self.speculative_draft_backend_sampling = None;
+            self.speculative_draft_cache_type_k = None;
+            self.speculative_draft_cache_type_v = None;
+            self.speculative_draft_n_ubatch = None;
+            self.speculative_draft_threads = None;
+            self.speculative_draft_threads_batch = None;
+            self.speculative_draft_cpu_moe = None;
+            self.speculative_draft_n_cpu_moe = None;
+            self.speculative_draft_prio = None;
+            self.speculative_draft_poll = None;
         } else {
             if let Some(m) = &self.speculative_model {
                 if m.trim().is_empty() {
@@ -526,7 +862,45 @@ impl ServerDef {
                     self.speculative_num_tokens = None;
                 }
             }
-            if self.speculative_model.is_none() && self.speculative_model_path.is_none() {
+            if let Some(ngl) = &self.speculative_draft_ngl {
+                if ngl.trim().is_empty() {
+                    self.speculative_draft_ngl = None;
+                }
+            }
+            if let Some(stype) = &self.speculative_type {
+                if stype.trim().is_empty() {
+                    self.speculative_type = None;
+                }
+            }
+            if let Some(dev) = &self.speculative_draft_device {
+                if dev.trim().is_empty() {
+                    self.speculative_draft_device = None;
+                }
+            }
+            if let Some(sampling) = &self.speculative_draft_sampling {
+                if sampling.trim().is_empty() {
+                    self.speculative_draft_sampling = None;
+                }
+            }
+            if let Some(ctk) = &self.speculative_draft_cache_type_k {
+                if ctk.trim().is_empty() {
+                    self.speculative_draft_cache_type_k = None;
+                }
+            }
+            if let Some(ctv) = &self.speculative_draft_cache_type_v {
+                if ctv.trim().is_empty() {
+                    self.speculative_draft_cache_type_v = None;
+                }
+            }
+            let is_ngram = self
+                .speculative_type
+                .as_deref()
+                .map(|t| t.contains("ngram"))
+                .unwrap_or(false);
+            if self.speculative_model.is_none()
+                && self.speculative_model_path.is_none()
+                && !is_ngram
+            {
                 self.speculative_enabled = false;
                 self.speculative_num_tokens = None;
             }
@@ -555,6 +929,23 @@ impl ServerDef {
                 self.no_kv_offload = false;
                 self.extra_args.clear();
                 self.speculative_model_path = None;
+                self.speculative_draft_ngl = None;
+                self.speculative_draft_n_min = None;
+                self.speculative_draft_p_min = None;
+                self.speculative_draft_p_split = None;
+                self.speculative_type = None;
+                self.speculative_draft_device = None;
+                self.speculative_draft_sampling = None;
+                self.speculative_draft_backend_sampling = None;
+                self.speculative_draft_cache_type_k = None;
+                self.speculative_draft_cache_type_v = None;
+                self.speculative_draft_n_ubatch = None;
+                self.speculative_draft_threads = None;
+                self.speculative_draft_threads_batch = None;
+                self.speculative_draft_cpu_moe = None;
+                self.speculative_draft_n_cpu_moe = None;
+                self.speculative_draft_prio = None;
+                self.speculative_draft_poll = None;
                 if self
                     .speculative_model
                     .as_deref()
@@ -739,6 +1130,7 @@ pub fn merge_server_secret_placeholders(incoming: &mut ServerDef, existing: Opti
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MeasuredStats {
     pub tokens_per_sec: Option<f64>,
     pub prompt_tokens_per_sec: Option<f64>,
@@ -932,15 +1324,24 @@ pub(crate) fn migrate_llamacpp_config(cfg: &mut PersistedConfig) {
             cfg.llamacpp_forks.push(builtin);
         }
     }
-    let fork_ids: Vec<String> = cfg
-        .llamacpp_forks
-        .iter()
-        .map(|fork| fork.id.clone())
-        .collect();
-    for fork_id in fork_ids {
-        cfg.llamacpp_channels
-            .entry(fork_id)
+
+    for fork in &cfg.llamacpp_forks {
+        let ch = cfg
+            .llamacpp_channels
+            .entry(fork.id.clone())
             .or_insert_with(LlamaCppChannelConfig::default);
+        if fork.is_local() {
+            if ch.executable.is_none() {
+                ch.executable = fork.local_executable.clone();
+            }
+            if let Some(ref exe) = fork.local_executable {
+                if let Some(parent) = PathBuf::from(exe).parent() {
+                    if ch.dir.trim().is_empty() {
+                        ch.dir = parent.to_string_lossy().into_owned();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1153,10 +1554,50 @@ impl PersistedConfig {
         let mut cfg = match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<PersistedConfig>(&text) {
                 Ok(cfg) => cfg,
-                Err(_) => {
-                    // Corrupt config: back it up and start fresh.
-                    let _ = std::fs::rename(&path, path.with_extension("json.bak"));
-                    Self::default()
+                Err(err) => {
+                    eprintln!(
+                        "[config] failed to parse {}: {err}; attempting recovery",
+                        path.display()
+                    );
+                    let bak = path.with_extension("json.bak");
+                    if !bak.exists() {
+                        let _ = std::fs::copy(&path, &bak);
+                    }
+                    let mut recovered = Self::default();
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(forks_val) = val.get("llamacpp_forks") {
+                            if let Ok(forks) =
+                                serde_json::from_value::<Vec<LlamaCppFork>>(forks_val.clone())
+                            {
+                                for fork in forks {
+                                    if !fork.builtin
+                                        && fork.id != "upstream"
+                                        && !recovered.llamacpp_forks.iter().any(|f| f.id == fork.id)
+                                    {
+                                        recovered.llamacpp_forks.push(fork);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(channels_val) = val.get("llamacpp_channels") {
+                            if let Ok(channels) = serde_json::from_value::<
+                                BTreeMap<String, LlamaCppChannelConfig>,
+                            >(channels_val.clone())
+                            {
+                                for (k, v) in channels {
+                                    recovered.llamacpp_channels.insert(k, v);
+                                }
+                            }
+                        }
+                        if let Some(servers_val) = val.get("servers") {
+                            if let Ok(servers) =
+                                serde_json::from_value::<Vec<ServerDef>>(servers_val.clone())
+                            {
+                                recovered.servers = servers;
+                            }
+                        }
+                    }
+                    recovered
                 }
             },
             Err(_) => Self::default(),
@@ -1187,7 +1628,32 @@ impl PersistedConfig {
             cfg.default_env
                 .insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         }
+        // Merge custom forks from persistent custom_forks.json / config.json.bak
+        let custom = load_custom_forks();
+        for fork in custom {
+            if let Some(existing) = cfg.llamacpp_forks.iter_mut().find(|f| f.id == fork.id) {
+                if !existing.builtin
+                    && existing.local_executable.is_none()
+                    && fork.local_executable.is_some()
+                {
+                    existing.local_executable = fork.local_executable.clone();
+                }
+            } else {
+                cfg.llamacpp_forks.push(fork);
+            }
+        }
+
+        // Auto-discover any installed fork directories on disk
+        auto_discover_disk_forks(
+            &cfg.llamacpp_dir,
+            &mut cfg.llamacpp_forks,
+            &mut cfg.llamacpp_channels,
+        );
+
         migrate_llamacpp_config(&mut cfg);
+
+        // Synchronize the complete custom fork set to custom_forks.json
+        let _ = save_custom_forks(&cfg.llamacpp_forks);
         // Automatically migrate existing plaintext API keys to DPAPI-encrypted values on load
         let mut needs_save = false;
         if let Some(ref key) = cfg.advanced_settings.api_key {
@@ -1283,6 +1749,7 @@ impl PersistedConfig {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         replace_file_atomic(&tmp, &path)?;
+        let _ = save_custom_forks(&self.llamacpp_forks);
         Ok(())
     }
 
@@ -1324,6 +1791,40 @@ pub struct ServerRecipe {
     pub speculative_num_tokens: Option<usize>,
     #[serde(default)]
     pub speculative_enabled: bool,
+    #[serde(default)]
+    pub speculative_draft_ngl: Option<String>,
+    #[serde(default)]
+    pub speculative_draft_n_min: Option<usize>,
+    #[serde(default)]
+    pub speculative_draft_p_min: Option<f64>,
+    #[serde(default)]
+    pub speculative_draft_p_split: Option<f64>,
+    #[serde(default)]
+    pub speculative_type: Option<String>,
+    #[serde(default)]
+    pub speculative_draft_device: Option<String>,
+    #[serde(default)]
+    pub speculative_draft_sampling: Option<String>,
+    #[serde(default)]
+    pub speculative_draft_backend_sampling: Option<bool>,
+    #[serde(default)]
+    pub speculative_draft_cache_type_k: Option<String>,
+    #[serde(default)]
+    pub speculative_draft_cache_type_v: Option<String>,
+    #[serde(default)]
+    pub speculative_draft_n_ubatch: Option<usize>,
+    #[serde(default)]
+    pub speculative_draft_threads: Option<usize>,
+    #[serde(default)]
+    pub speculative_draft_threads_batch: Option<usize>,
+    #[serde(default)]
+    pub speculative_draft_cpu_moe: Option<bool>,
+    #[serde(default)]
+    pub speculative_draft_n_cpu_moe: Option<usize>,
+    #[serde(default)]
+    pub speculative_draft_prio: Option<u8>,
+    #[serde(default)]
+    pub speculative_draft_poll: Option<u8>,
 }
 
 fn default_recipe_schema() -> String {
@@ -1349,6 +1850,23 @@ impl ServerRecipe {
             speculative_model_path: def.speculative_model_path.clone(),
             speculative_num_tokens: def.speculative_num_tokens,
             speculative_enabled: def.speculative_enabled,
+            speculative_draft_ngl: def.speculative_draft_ngl.clone(),
+            speculative_draft_n_min: def.speculative_draft_n_min,
+            speculative_draft_p_min: def.speculative_draft_p_min,
+            speculative_draft_p_split: def.speculative_draft_p_split,
+            speculative_type: def.speculative_type.clone(),
+            speculative_draft_device: def.speculative_draft_device.clone(),
+            speculative_draft_sampling: def.speculative_draft_sampling.clone(),
+            speculative_draft_backend_sampling: def.speculative_draft_backend_sampling,
+            speculative_draft_cache_type_k: def.speculative_draft_cache_type_k.clone(),
+            speculative_draft_cache_type_v: def.speculative_draft_cache_type_v.clone(),
+            speculative_draft_n_ubatch: def.speculative_draft_n_ubatch,
+            speculative_draft_threads: def.speculative_draft_threads,
+            speculative_draft_threads_batch: def.speculative_draft_threads_batch,
+            speculative_draft_cpu_moe: def.speculative_draft_cpu_moe,
+            speculative_draft_n_cpu_moe: def.speculative_draft_n_cpu_moe,
+            speculative_draft_prio: def.speculative_draft_prio,
+            speculative_draft_poll: def.speculative_draft_poll,
         }
     }
 }
@@ -1822,6 +2340,7 @@ mod tests {
             speculative_model_path: None,
             speculative_num_tokens: None,
             speculative_enabled: false,
+            ..Default::default()
         });
         cfg.measured.insert(
             "Qwen/Qwen2.5-0.5B-Instruct".into(),
@@ -2455,6 +2974,7 @@ mod tests {
             speculative_model_path: None,
             speculative_num_tokens: None,
             speculative_enabled: false,
+            ..Default::default()
         });
 
         let text = serde_json::to_string(&cfg).unwrap();
@@ -2511,6 +3031,7 @@ mod tests {
             speculative_model_path: None,
             speculative_num_tokens: Some(5),
             speculative_enabled: true,
+            ..Default::default()
         };
 
         let recipe = ServerRecipe::from_server_def(&def);
@@ -2853,6 +3374,23 @@ mod tests {
         assert_eq!(s.speculative_model, None);
         assert_eq!(s.speculative_model_path, None);
         assert_eq!(s.speculative_num_tokens, None);
+        assert_eq!(s.speculative_draft_ngl, None);
+        assert_eq!(s.speculative_draft_n_min, None);
+        assert_eq!(s.speculative_draft_p_min, None);
+        assert_eq!(s.speculative_draft_p_split, None);
+        assert_eq!(s.speculative_type, None);
+        assert_eq!(s.speculative_draft_device, None);
+        assert_eq!(s.speculative_draft_sampling, None);
+        assert_eq!(s.speculative_draft_backend_sampling, None);
+        assert_eq!(s.speculative_draft_cache_type_k, None);
+        assert_eq!(s.speculative_draft_cache_type_v, None);
+        assert_eq!(s.speculative_draft_n_ubatch, None);
+        assert_eq!(s.speculative_draft_threads, None);
+        assert_eq!(s.speculative_draft_threads_batch, None);
+        assert_eq!(s.speculative_draft_cpu_moe, None);
+        assert_eq!(s.speculative_draft_n_cpu_moe, None);
+        assert_eq!(s.speculative_draft_prio, None);
+        assert_eq!(s.speculative_draft_poll, None);
     }
 
     #[test]
@@ -2902,10 +3440,14 @@ mod tests {
             speculative_model_path: Some("/tmp/draft.gguf".into()),
             speculative_num_tokens: Some(5),
             speculative_enabled: true,
+            speculative_draft_ngl: Some("99".into()),
+            speculative_draft_p_min: Some(0.8),
+            speculative_type: Some("draft-simple".into()),
+            ..Default::default()
         };
 
         // vLLM instruct with speculative decoding enabled:
-        // clears speculative_model_path (GGUF only) and retains speculative_model and tokens
+        // clears speculative_model_path and llama.cpp-specific flags, retains speculative_model and tokens
         def.normalize_for_backend().unwrap();
         assert!(def.speculative_enabled);
         assert_eq!(
@@ -2914,6 +3456,53 @@ mod tests {
         );
         assert_eq!(def.speculative_model_path, None);
         assert_eq!(def.speculative_num_tokens, Some(5));
+        assert_eq!(def.speculative_draft_ngl, None);
+        assert_eq!(def.speculative_draft_p_min, None);
+        assert_eq!(def.speculative_type, None);
+
+        // Llamacpp with speculative decoding preserves all spec flags
+        def.backend = "llamacpp".into();
+        def.speculative_model_path = Some("C:\\models\\draft.gguf".into());
+        def.speculative_draft_ngl = Some("auto".into());
+        def.speculative_draft_n_min = Some(1);
+        def.speculative_draft_p_min = Some(0.8);
+        def.speculative_draft_p_split = Some(0.1);
+        def.speculative_type = Some("draft-simple".into());
+        def.speculative_draft_device = Some("CUDA0".into());
+        def.speculative_draft_sampling = Some("greedy".into());
+        def.speculative_draft_backend_sampling = Some(true);
+        def.speculative_draft_cache_type_k = Some("q8_0".into());
+        def.speculative_draft_cache_type_v = Some("q8_0".into());
+        def.speculative_draft_n_ubatch = Some(512);
+        def.speculative_draft_threads = Some(4);
+        def.speculative_draft_threads_batch = Some(4);
+        def.speculative_draft_cpu_moe = Some(true);
+        def.speculative_draft_n_cpu_moe = Some(12);
+        def.speculative_draft_prio = Some(2);
+        def.speculative_draft_poll = Some(1);
+        def.normalize_for_backend().unwrap();
+        assert!(def.speculative_enabled);
+        assert_eq!(
+            def.speculative_model_path.as_deref(),
+            Some("C:\\models\\draft.gguf")
+        );
+        assert_eq!(def.speculative_draft_ngl.as_deref(), Some("auto"));
+        assert_eq!(def.speculative_draft_n_min, Some(1));
+        assert_eq!(def.speculative_draft_p_min, Some(0.8));
+        assert_eq!(def.speculative_draft_p_split, Some(0.1));
+        assert_eq!(def.speculative_type.as_deref(), Some("draft-simple"));
+        assert_eq!(def.speculative_draft_device.as_deref(), Some("CUDA0"));
+        assert_eq!(def.speculative_draft_sampling.as_deref(), Some("greedy"));
+        assert_eq!(def.speculative_draft_backend_sampling, Some(true));
+        assert_eq!(def.speculative_draft_cache_type_k.as_deref(), Some("q8_0"));
+        assert_eq!(def.speculative_draft_cache_type_v.as_deref(), Some("q8_0"));
+        assert_eq!(def.speculative_draft_n_ubatch, Some(512));
+        assert_eq!(def.speculative_draft_threads, Some(4));
+        assert_eq!(def.speculative_draft_threads_batch, Some(4));
+        assert_eq!(def.speculative_draft_cpu_moe, Some(true));
+        assert_eq!(def.speculative_draft_n_cpu_moe, Some(12));
+        assert_eq!(def.speculative_draft_prio, Some(2));
+        assert_eq!(def.speculative_draft_poll, Some(1));
 
         // When disabled, all speculative fields are cleared
         def.speculative_enabled = false;
@@ -2922,6 +3511,8 @@ mod tests {
         assert_eq!(def.speculative_model, None);
         assert_eq!(def.speculative_model_path, None);
         assert_eq!(def.speculative_num_tokens, None);
+        assert_eq!(def.speculative_draft_ngl, None);
+        assert_eq!(def.speculative_draft_p_min, None);
 
         // When task is embed, speculative decoding is cleared even if enabled was true
         def.task = "embed".into();
@@ -2932,5 +3523,109 @@ mod tests {
         assert!(!def.speculative_enabled);
         assert_eq!(def.speculative_model, None);
         assert_eq!(def.speculative_num_tokens, None);
+    }
+
+    static TEST_CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_custom_forks_persistence_and_rescue_from_bak() {
+        let _lock = TEST_CONFIG_MUTEX.lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("llp-test-fork-rescue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::env::set_var("LLM_TEST_CONFIG_DIR", &temp_dir);
+
+        let bak_path = temp_dir.join("config.json.bak");
+        let bak_content = r#"{
+            "llamacpp_forks": [
+                {
+                    "id": "upstream",
+                    "name": "Upstream",
+                    "builtin": true
+                },
+                {
+                    "id": "xhtoken",
+                    "name": "XHToken",
+                    "kind": "local",
+                    "local_executable": "C:\\build\\llama-server.exe",
+                    "builtin": false
+                }
+            ]
+        }"#;
+        std::fs::write(&bak_path, bak_content).unwrap();
+
+        let cfg = PersistedConfig::load();
+        assert!(cfg.llamacpp_forks.iter().any(|f| f.id == "xhtoken"));
+        assert!(cfg.llamacpp_forks.iter().any(|f| f.id == "upstream"));
+
+        let custom_forks_file = temp_dir.join(CUSTOM_FORKS_FILE_NAME);
+        assert!(custom_forks_file.exists());
+        let saved_custom = load_custom_forks();
+        assert!(saved_custom.iter().any(|f| f.id == "xhtoken"));
+        assert!(!saved_custom.iter().any(|f| f.id == "upstream"));
+
+        std::env::remove_var("LLM_TEST_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_custom_forks_survive_corrupt_config() {
+        let _lock = TEST_CONFIG_MUTEX.lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("llp-test-corrupt-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::env::set_var("LLM_TEST_CONFIG_DIR", &temp_dir);
+
+        let custom_forks = vec![LlamaCppFork {
+            id: "llamadspline".to_string(),
+            name: "Llama DSpline".to_string(),
+            kind: "local".to_string(),
+            repo: "".to_string(),
+            local_executable: Some("C:\\dspline\\llama-server.exe".to_string()),
+            description: "".to_string(),
+            asset_regex: "".to_string(),
+            runtime_regex: "".to_string(),
+            main_prefix: "".to_string(),
+            builtin: false,
+        }];
+        save_custom_forks(&custom_forks).unwrap();
+
+        // Write an unparseable config.json
+        let cfg_path = temp_dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&cfg_path, "{ broken invalid json").unwrap();
+
+        let loaded = PersistedConfig::load();
+        assert!(loaded.llamacpp_forks.iter().any(|f| f.id == "llamadspline"));
+        assert!(loaded.llamacpp_forks.iter().any(|f| f.id == "upstream"));
+
+        std::env::remove_var("LLM_TEST_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_auto_discover_disk_forks() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("llp-test-discover-forks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let fork_dir = temp_dir.join("prismml-prism-b12128-d7b2896-cuda-13.3");
+        std::fs::create_dir_all(&fork_dir).unwrap();
+        std::fs::write(fork_dir.join("llama-server.exe"), b"binary").unwrap();
+
+        let mut forks = builtin_llamacpp_forks();
+        let mut channels = BTreeMap::new();
+        auto_discover_disk_forks(temp_dir.to_str().unwrap(), &mut forks, &mut channels);
+
+        assert!(forks.iter().any(|f| f.id == "prismml"));
+        let ch = channels.get("prismml").expect("prismml channel created");
+        assert_eq!(ch.installed_tag.as_deref(), Some("prism-b12128-d7b2896"));
+        assert!(ch
+            .executable
+            .as_ref()
+            .unwrap()
+            .ends_with("llama-server.exe"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

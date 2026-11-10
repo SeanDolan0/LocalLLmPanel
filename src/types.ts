@@ -164,6 +164,23 @@ export interface ServerDef {
   speculative_model_path?: string | null;
   speculative_num_tokens?: number | null;
   speculative_enabled?: boolean;
+  speculative_draft_ngl?: string | null;
+  speculative_draft_n_min?: number | null;
+  speculative_draft_p_min?: number | null;
+  speculative_draft_p_split?: number | null;
+  speculative_type?: string | null;
+  speculative_draft_device?: string | null;
+  speculative_draft_sampling?: string | null;
+  speculative_draft_backend_sampling?: boolean | null;
+  speculative_draft_cache_type_k?: string | null;
+  speculative_draft_cache_type_v?: string | null;
+  speculative_draft_n_ubatch?: number | null;
+  speculative_draft_threads?: number | null;
+  speculative_draft_threads_batch?: number | null;
+  speculative_draft_cpu_moe?: boolean | null;
+  speculative_draft_n_cpu_moe?: number | null;
+  speculative_draft_prio?: number | null;
+  speculative_draft_poll?: number | null;
 }
 
 export function effectiveModelName(def: ServerDef): string {
@@ -271,6 +288,23 @@ export interface ContextFitRequest {
   speculative_model_path?: string | null;
   speculative_num_tokens?: number | null;
   speculative_enabled?: boolean | null;
+  speculative_draft_ngl?: string | null;
+  speculative_draft_n_min?: number | null;
+  speculative_draft_p_min?: number | null;
+  speculative_draft_p_split?: number | null;
+  speculative_type?: string | null;
+  speculative_draft_device?: string | null;
+  speculative_draft_sampling?: string | null;
+  speculative_draft_backend_sampling?: boolean | null;
+  speculative_draft_cache_type_k?: string | null;
+  speculative_draft_cache_type_v?: string | null;
+  speculative_draft_n_ubatch?: number | null;
+  speculative_draft_threads?: number | null;
+  speculative_draft_threads_batch?: number | null;
+  speculative_draft_cpu_moe?: boolean | null;
+  speculative_draft_n_cpu_moe?: number | null;
+  speculative_draft_prio?: number | null;
+  speculative_draft_poll?: number | null;
 }
 
 export interface MetricsSnapshot {
@@ -461,6 +495,23 @@ export interface CreateServerInput {
   speculative_model_path?: string | null;
   speculative_num_tokens?: number | null;
   speculative_enabled?: boolean;
+  speculative_draft_ngl?: string | null;
+  speculative_draft_n_min?: number | null;
+  speculative_draft_p_min?: number | null;
+  speculative_draft_p_split?: number | null;
+  speculative_type?: string | null;
+  speculative_draft_device?: string | null;
+  speculative_draft_sampling?: string | null;
+  speculative_draft_backend_sampling?: boolean | null;
+  speculative_draft_cache_type_k?: string | null;
+  speculative_draft_cache_type_v?: string | null;
+  speculative_draft_n_ubatch?: number | null;
+  speculative_draft_threads?: number | null;
+  speculative_draft_threads_batch?: number | null;
+  speculative_draft_cpu_moe?: boolean | null;
+  speculative_draft_n_cpu_moe?: number | null;
+  speculative_draft_prio?: number | null;
+  speculative_draft_poll?: number | null;
 }
 
 export interface WslConfigInfo {
@@ -707,6 +758,23 @@ export interface ServerRecipe {
   speculative_model_path?: string | null;
   speculative_num_tokens?: number | null;
   speculative_enabled?: boolean;
+  speculative_draft_ngl?: string | null;
+  speculative_draft_n_min?: number | null;
+  speculative_draft_p_min?: number | null;
+  speculative_draft_p_split?: number | null;
+  speculative_type?: string | null;
+  speculative_draft_device?: string | null;
+  speculative_draft_sampling?: string | null;
+  speculative_draft_backend_sampling?: boolean | null;
+  speculative_draft_cache_type_k?: string | null;
+  speculative_draft_cache_type_v?: string | null;
+  speculative_draft_n_ubatch?: number | null;
+  speculative_draft_threads?: number | null;
+  speculative_draft_threads_batch?: number | null;
+  speculative_draft_cpu_moe?: boolean | null;
+  speculative_draft_n_cpu_moe?: number | null;
+  speculative_draft_prio?: number | null;
+  speculative_draft_poll?: number | null;
 }
 
 export interface ConfigExportPackage {

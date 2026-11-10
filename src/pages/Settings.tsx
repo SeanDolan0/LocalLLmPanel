@@ -448,6 +448,7 @@ export default function Settings() {
         gguf_dir: s.gguf_dir,
         llamacpp_executable: s.llamacpp_executable,
         llamacpp_channels: s.llamacpp_channels,
+        llamacpp_forks: s.llamacpp_forks,
         default_quant: s.default_quant,
         advanced_settings: s.advanced_settings,
         minimize_to_tray: s.minimize_to_tray,

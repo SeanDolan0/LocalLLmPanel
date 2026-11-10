@@ -5738,6 +5738,7 @@ mod tests {
                 speculative_model_path: None,
                 speculative_num_tokens: None,
                 speculative_enabled: false,
+                ..ServerDef::default()
             },
             status,
             error: None,

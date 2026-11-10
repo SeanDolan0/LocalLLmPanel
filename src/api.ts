@@ -177,6 +177,7 @@ export const api = {
         | "gguf_dir"
         | "llamacpp_executable"
         | "llamacpp_channels"
+        | "llamacpp_forks"
         | "hf_token"
         | "github_token"
         | "default_quant"

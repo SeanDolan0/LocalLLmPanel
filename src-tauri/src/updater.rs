@@ -547,6 +547,17 @@ pub async fn download_and_install_update(
         let _ = window.hide();
     }
 
+    // Flush config and custom forks to disk before updater installer executes
+    {
+        let cfg = state.config.lock().unwrap();
+        if let Err(e) = cfg.save() {
+            eprintln!("[updater] warning: failed to save config before update: {e}");
+        }
+        if let Err(e) = crate::state::save_custom_forks(&cfg.llamacpp_forks) {
+            eprintln!("[updater] warning: failed to save custom forks before update: {e}");
+        }
+    }
+
     // 5. Install the update using official Tauri updater mechanics
     if let Err(e) = update.install(bytes) {
         clear_pending_update_marker();
