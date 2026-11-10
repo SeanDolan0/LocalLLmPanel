@@ -107,6 +107,12 @@ export function checkNpmAudit(rootDir, allowlist) {
 
 export function checkCargoAudit(rootDir, allowlist) {
   console.log("[audit] Checking Rust dependencies with cargo audit...");
+  try {
+    execSync("cargo audit --version", { stdio: "ignore" });
+  } catch {
+    console.warn("[audit] Warning: cargo-audit subcommand not installed; skipping local Rust advisory check (covered by CI Linux audit job).");
+    return { ok: true, skipped: true };
+  }
   const tauriDir = path.join(rootDir, "src-tauri");
   const lockFile = path.join(tauriDir, "Cargo.lock");
   const ignoreArgs = getCargoIgnoreFlags(allowlist).join(" ");

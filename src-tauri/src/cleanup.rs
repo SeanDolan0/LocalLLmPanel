@@ -91,7 +91,10 @@ pub fn find_partial_downloads(root: &Path) -> (Vec<PathBuf>, u64) {
                 files.extend(sub_files);
                 bytes += sub_bytes;
             } else if p.extension().and_then(|e| e.to_str()) == Some("part")
-                || p.file_name().and_then(|n| n.to_str()).map(|n| n.ends_with(".part")).unwrap_or(false)
+                || p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".part"))
+                    .unwrap_or(false)
             {
                 let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 bytes += len;
@@ -129,7 +132,11 @@ pub fn inspect_cleanup(state: &AppState) -> CleanupPlan {
 
     // 2. Local GGUF Directory
     let gguf_exists = gguf_path.exists();
-    let gguf_bytes = if gguf_exists { calculate_dir_size(&gguf_path) } else { 0 };
+    let gguf_bytes = if gguf_exists {
+        calculate_dir_size(&gguf_path)
+    } else {
+        0
+    };
     items.push(CleanupItem {
         target: CleanupTarget::GgufDir,
         label: "Local GGUF Models".to_string(),
@@ -143,13 +150,15 @@ pub fn inspect_cleanup(state: &AppState) -> CleanupPlan {
 
     // Check WSL items if distro is reachable
     let distros = wsl::installed_distros();
-    let distro_exists = !distro.is_empty() && distros.iter().any(|d| d.eq_ignore_ascii_case(&distro));
+    let distro_exists =
+        !distro.is_empty() && distros.iter().any(|d| d.eq_ignore_ascii_case(&distro));
 
     // 3. WSL Distro
     items.push(CleanupItem {
         target: CleanupTarget::WslDistro,
         label: format!("WSL2 Distribution ({distro})"),
-        description: "Entire dedicated WSL2 Ubuntu environment (destroys all Linux files)".to_string(),
+        description: "Entire dedicated WSL2 Ubuntu environment (destroys all Linux files)"
+            .to_string(),
         path_or_target: distro.clone(),
         exists: distro_exists,
         estimated_bytes: 0, // Managed by virtual disk (vhdx)
@@ -160,7 +169,10 @@ pub fn inspect_cleanup(state: &AppState) -> CleanupPlan {
     let mut venv_exists = false;
     let mut venv_bytes: u64 = 0;
     if distro_exists {
-        let check = wsl::run_script(&distro, "[ -d ~/llm-lp ] && du -sb ~/llm-lp 2>/dev/null | awk '{print $1}'");
+        let check = wsl::run_script(
+            &distro,
+            "[ -d ~/llm-lp ] && du -sb ~/llm-lp 2>/dev/null | awk '{print $1}'",
+        );
         if check.ok && !check.stdout.trim().is_empty() {
             if let Ok(b) = check.stdout.trim().parse::<u64>() {
                 venv_exists = true;
@@ -194,7 +206,8 @@ pub fn inspect_cleanup(state: &AppState) -> CleanupPlan {
     items.push(CleanupItem {
         target: CleanupTarget::HfCache,
         label: "Hugging Face Model Cache".to_string(),
-        description: "Downloaded Hugging Face model snapshots and weights (~/.cache/huggingface)".to_string(),
+        description: "Downloaded Hugging Face model snapshots and weights (~/.cache/huggingface)"
+            .to_string(),
         path_or_target: "~/.cache/huggingface".to_string(),
         exists: hf_exists,
         estimated_bytes: hf_bytes,
@@ -205,7 +218,10 @@ pub fn inspect_cleanup(state: &AppState) -> CleanupPlan {
     // 6. Sudoers Rule inside WSL (/etc/sudoers.d/llm-panel-*)
     let mut sudoers_exists = false;
     if distro_exists {
-        let check = wsl::run_script_root(&distro, "ls /etc/sudoers.d/llm-panel-* /etc/sudoers.d/99-llm-lp 2>/dev/null && echo found");
+        let check = wsl::run_script_root(
+            &distro,
+            "ls /etc/sudoers.d/llm-panel-* /etc/sudoers.d/99-llm-lp 2>/dev/null && echo found",
+        );
         if check.ok && check.stdout.contains("found") {
             sudoers_exists = true;
         }
@@ -263,7 +279,10 @@ pub fn execute_cleanup(
         results.push(CleanupItemResult {
             target: CleanupTarget::PartialDownloads,
             success: !failed,
-            message: format!("Removed {deleted_count} of {} partial download file(s)", part_files.len()),
+            message: format!(
+                "Removed {deleted_count} of {} partial download file(s)",
+                part_files.len()
+            ),
             freed_bytes: part_bytes,
         });
     }
@@ -305,14 +324,18 @@ pub fn execute_cleanup(
 
     // WSL targets
     let distros = wsl::installed_distros();
-    let distro_exists = !distro.is_empty() && distros.iter().any(|d| d.eq_ignore_ascii_case(&distro));
+    let distro_exists =
+        !distro.is_empty() && distros.iter().any(|d| d.eq_ignore_ascii_case(&distro));
 
     // 3. Sudoers Rule
     if confirmed_targets.contains(&CleanupTarget::SudoersRule) {
         let mut ok = true;
         let mut msg = "Sudoers rule removed".to_string();
         if distro_exists {
-            let out = wsl::run_script_root(&distro, "rm -f /etc/sudoers.d/llm-panel-* /etc/sudoers.d/99-llm-lp && echo ok");
+            let out = wsl::run_script_root(
+                &distro,
+                "rm -f /etc/sudoers.d/llm-panel-* /etc/sudoers.d/99-llm-lp && echo ok",
+            );
             if !out.ok || !out.stdout.contains("ok") {
                 ok = false;
                 msg = format!("Failed to remove sudoers rule: {}", out.combined());
@@ -362,7 +385,10 @@ pub fn execute_cleanup(
         let mut msg = "Hugging Face cache (~/.cache/huggingface) removed".to_string();
         let mut size = 0;
         if distro_exists {
-            let du = wsl::run_script(&distro, "du -sb ~/.cache/huggingface 2>/dev/null | awk '{print $1}'");
+            let du = wsl::run_script(
+                &distro,
+                "du -sb ~/.cache/huggingface 2>/dev/null | awk '{print $1}'",
+            );
             if let Ok(b) = du.stdout.trim().parse::<u64>() {
                 size = b;
             }
@@ -455,20 +481,31 @@ mod tests {
 
     #[test]
     fn test_cleanup_execute_selective_partial_downloads() {
-        let dir_path = std::env::temp_dir().join(format!("llp-cleanup-test-{}", std::process::id()));
+        let dir_path =
+            std::env::temp_dir().join(format!("llp-cleanup-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir_path);
         let valid_file = dir_path.join("model-q4.gguf");
         let part_file = dir_path.join("model-q8.gguf.part");
 
-        File::create(&valid_file).unwrap().write_all(b"valid content").unwrap();
-        File::create(&part_file).unwrap().write_all(b"partial chunk").unwrap();
+        File::create(&valid_file)
+            .unwrap()
+            .write_all(b"valid content")
+            .unwrap();
+        File::create(&part_file)
+            .unwrap()
+            .write_all(b"partial chunk")
+            .unwrap();
 
         let state = AppState::default();
         state.config.lock().unwrap().gguf_dir = dir_path.to_string_lossy().to_string();
 
         // Dry-run inspection should detect the .part file
         let plan = inspect_cleanup(&state);
-        let part_item = plan.items.iter().find(|i| i.target == CleanupTarget::PartialDownloads).unwrap();
+        let part_item = plan
+            .items
+            .iter()
+            .find(|i| i.target == CleanupTarget::PartialDownloads)
+            .unwrap();
         assert!(part_item.exists);
         assert_eq!(part_item.estimated_bytes, 13); // "partial chunk" len = 13
 

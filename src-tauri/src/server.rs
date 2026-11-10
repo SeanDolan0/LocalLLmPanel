@@ -3,10 +3,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::estimate;
@@ -926,7 +926,11 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
         structured_flags.push("--device");
         structured_flags.push("-dev");
     }
-    let api_key = def.api_key.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let api_key = def
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let decrypted_key = api_key.and_then(|k| crate::security::decrypt_token(k).ok());
     if let Some(ref key) = decrypted_key {
         let trimmed = key.trim();
@@ -1232,7 +1236,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--fit-target"
                 | "--device"
                 | "--api-key"
-                    | "--api-key-file"
+                | "--api-key-file"
                 | "--alias"
                 | "-a"
                 | "--log-verbosity"
@@ -1257,7 +1261,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                 | "--fit-target"
                 | "--device"
                 | "--api-key"
-                    | "--api-key-file"
+                | "--api-key-file"
                 | "--alias"
                 | "-a"
                 | "--log-verbosity"
@@ -1396,7 +1400,9 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         if let Some(snap) = crate::wsl::gpu_snapshot(&distro) {
             if snap.vram_total_mb > 0 && snap.vram_free_mb > 0 {
                 let startup_overhead_mb = 1400.0;
-                let effective_free = (snap.vram_free_mb.saturating_sub(prior_reserved) as f64 - startup_overhead_mb).max(0.0);
+                let effective_free = (snap.vram_free_mb.saturating_sub(prior_reserved) as f64
+                    - startup_overhead_mb)
+                    .max(0.0);
                 if effective_free == 0.0 && prior_reserved > 0 {
                     bail!(
                         "insufficient GPU VRAM: {} MB free on GPU, but {} MB is reserved by other servers; cannot safely launch server {}",
@@ -1554,7 +1560,13 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     let safe_id: String = def
                         .id
                         .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                        .map(|c| {
+                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                                c
+                            } else {
+                                '_'
+                            }
+                        })
                         .collect();
                     let key_path = run_dir.join(format!("{safe_id}.key"));
                     if std::fs::write(&key_path, format!("{key}\n")).is_ok() {
@@ -1638,7 +1650,13 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
     if let Some(mut vg) = vram_guard {
         vg.disarm();
     }
-    set_server_health(id, ServerHealthState { process_alive: true, http_healthy: false });
+    set_server_health(
+        id,
+        ServerHealthState {
+            process_alive: true,
+            http_healthy: false,
+        },
+    );
 
     let persist_error = {
         let mut cfg = state.config.lock().unwrap();
@@ -1740,8 +1758,21 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 ls.crash_retry_count = 0;
             }
         }
-        set_server_health(&id_task, ServerHealthState { process_alive: true, http_healthy: true });
-        emit_status_full(app.as_ref(), &id_task, ServerStatus::Running, None, Some(true), Some(true));
+        set_server_health(
+            &id_task,
+            ServerHealthState {
+                process_alive: true,
+                http_healthy: true,
+            },
+        );
+        emit_status_full(
+            app.as_ref(),
+            &id_task,
+            ServerStatus::Running,
+            None,
+            Some(true),
+            Some(true),
+        );
         update_status(&state_task, &id_task, ServerStatus::Running);
 
         // Metrics + liveness loop
@@ -1772,7 +1803,13 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             };
             if let Some(exit) = exited {
                 release_vram(&id_task);
-                set_server_health(&id_task, ServerHealthState { process_alive: false, http_healthy: false });
+                set_server_health(
+                    &id_task,
+                    ServerHealthState {
+                        process_alive: false,
+                        http_healthy: false,
+                    },
+                );
                 if !stopping {
                     let auto_restart = state_task.config.lock().unwrap().auto_restart_crashed;
                     let retry_count = {
@@ -3470,15 +3507,11 @@ pub fn reconcile_orphaned_servers(state: &Arc<AppState>) -> Vec<ReconciledServer
                 );
                 let is_alive = probe.stdout.contains("alive");
                 if is_alive {
-                    let _ = wsl::run_script(
-                        &distro,
-                        &format!("kill -TERM {pid} 2>/dev/null || true"),
-                    );
+                    let _ =
+                        wsl::run_script(&distro, &format!("kill -TERM {pid} 2>/dev/null || true"));
                     std::thread::sleep(Duration::from_millis(100));
-                    let _ = wsl::run_script(
-                        &distro,
-                        &format!("kill -KILL {pid} 2>/dev/null || true"),
-                    );
+                    let _ =
+                        wsl::run_script(&distro, &format!("kill -KILL {pid} 2>/dev/null || true"));
                     reconciled.push(ReconciledServer {
                         id: def.id.clone(),
                         backend: def.backend.clone(),
@@ -4909,14 +4942,50 @@ vllm:num_preemptions_total{model_name="my model"} 5
         remove_server_health("srv-c8");
         assert_eq!(get_server_health("srv-c8"), None);
 
-        set_server_health("srv-c8", ServerHealthState { process_alive: true, http_healthy: false });
-        assert_eq!(get_server_health("srv-c8"), Some(ServerHealthState { process_alive: true, http_healthy: false }));
+        set_server_health(
+            "srv-c8",
+            ServerHealthState {
+                process_alive: true,
+                http_healthy: false,
+            },
+        );
+        assert_eq!(
+            get_server_health("srv-c8"),
+            Some(ServerHealthState {
+                process_alive: true,
+                http_healthy: false
+            })
+        );
 
-        set_server_health("srv-c8", ServerHealthState { process_alive: true, http_healthy: true });
-        assert_eq!(get_server_health("srv-c8"), Some(ServerHealthState { process_alive: true, http_healthy: true }));
+        set_server_health(
+            "srv-c8",
+            ServerHealthState {
+                process_alive: true,
+                http_healthy: true,
+            },
+        );
+        assert_eq!(
+            get_server_health("srv-c8"),
+            Some(ServerHealthState {
+                process_alive: true,
+                http_healthy: true
+            })
+        );
 
-        set_server_health("srv-c8", ServerHealthState { process_alive: false, http_healthy: false });
-        assert_eq!(get_server_health("srv-c8"), Some(ServerHealthState { process_alive: false, http_healthy: false }));
+        set_server_health(
+            "srv-c8",
+            ServerHealthState {
+                process_alive: false,
+                http_healthy: false,
+            },
+        );
+        assert_eq!(
+            get_server_health("srv-c8"),
+            Some(ServerHealthState {
+                process_alive: false,
+                http_healthy: false
+            })
+        );
 
         remove_server_health("srv-c8");
         assert_eq!(get_server_health("srv-c8"), None);
@@ -4926,27 +4995,22 @@ vllm:num_preemptions_total{model_name="my model"} 5
     fn test_reconcile_server_pidfile_alive_vs_dead() {
         let mut killed = Vec::new();
 
-        let res_alive = reconcile_server_pidfile(
-            "12345\n",
-            |pid| pid == 12345,
-            |pid| killed.push(pid),
-        );
+        let res_alive =
+            reconcile_server_pidfile("12345\n", |pid| pid == 12345, |pid| killed.push(pid));
         assert_eq!(res_alive, Some(("terminated_orphaned_wsl_process", 12345)));
         assert_eq!(killed, vec![12345]);
 
         killed.clear();
-        let res_dead = reconcile_server_pidfile(
-            "67890",
-            |_pid| false,
-            |pid| killed.push(pid),
-        );
+        let res_dead = reconcile_server_pidfile("67890", |_pid| false, |pid| killed.push(pid));
         assert_eq!(res_dead, Some(("cleaned_stale_pidfile", 67890)));
         assert!(killed.is_empty());
 
         assert_eq!(reconcile_server_pidfile("", |_| true, |_| {}), None);
-        assert_eq!(reconcile_server_pidfile("not_a_pid", |_| true, |_| {}), None);
+        assert_eq!(
+            reconcile_server_pidfile("not_a_pid", |_| true, |_| {}),
+            None
+        );
     }
-
 
     #[test]
     fn test_server_api_key_applies_to_vllm_and_llamacpp() {
@@ -4960,18 +5024,33 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let enc_global = crate::security::encrypt_token("my-global-secret-key").unwrap();
         state.config.lock().unwrap().advanced_settings.api_key = Some(enc_global);
 
-        assert_eq!(server_api_key(&state, &vllm).as_deref(), Some("my-global-secret-key"));
-        assert_eq!(server_api_key(&state, &llama).as_deref(), Some("my-global-secret-key"));
+        assert_eq!(
+            server_api_key(&state, &vllm).as_deref(),
+            Some("my-global-secret-key")
+        );
+        assert_eq!(
+            server_api_key(&state, &llama).as_deref(),
+            Some("my-global-secret-key")
+        );
 
         // 2. With per-server override on llama (DPAPI encrypted)
         let enc_llama = crate::security::encrypt_token("my-llama-override-key").unwrap();
         llama.api_key = Some(enc_llama);
-        assert_eq!(server_api_key(&state, &llama).as_deref(), Some("my-llama-override-key"));
-        assert_eq!(server_api_key(&state, &vllm).as_deref(), Some("my-global-secret-key"));
+        assert_eq!(
+            server_api_key(&state, &llama).as_deref(),
+            Some("my-llama-override-key")
+        );
+        assert_eq!(
+            server_api_key(&state, &vllm).as_deref(),
+            Some("my-global-secret-key")
+        );
 
         // 3. With plaintext per-server override on vllm
         vllm.api_key = Some("plaintext-override-vllm".into());
-        assert_eq!(server_api_key(&state, &vllm).as_deref(), Some("plaintext-override-vllm"));
+        assert_eq!(
+            server_api_key(&state, &vllm).as_deref(),
+            Some("plaintext-override-vllm")
+        );
     }
 
     #[test]
@@ -4986,7 +5065,8 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let res = start_server(&state, None, "s-lan-test");
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("refusing to start server bound to 0.0.0.0 without an API key configured"));
+        assert!(err_msg
+            .contains("refusing to start server bound to 0.0.0.0 without an API key configured"));
     }
 
     #[test]
@@ -4996,7 +5076,9 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let enc = crate::security::encrypt_token("test-secret-dpapi-key").unwrap();
         d.api_key = Some(enc);
         let args = build_llamacpp_args_with_help(&d, "");
-        assert!(args.windows(2).any(|w| w == ["--api-key", "test-secret-dpapi-key"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--api-key", "test-secret-dpapi-key"]));
     }
 
     #[test]

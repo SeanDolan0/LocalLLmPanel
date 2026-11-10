@@ -47,7 +47,8 @@ pub fn check_gateway_auth(
     };
     let decrypted_storage;
     let expected_key = if raw_key.starts_with("dpapi:") {
-        decrypted_storage = crate::security::decrypt_token(raw_key).unwrap_or_else(|_| raw_key.to_string());
+        decrypted_storage =
+            crate::security::decrypt_token(raw_key).unwrap_or_else(|_| raw_key.to_string());
         decrypted_storage.trim()
     } else {
         raw_key
@@ -234,7 +235,10 @@ impl std::fmt::Display for ModelRouteError {
                     running.join(", ")
                 )
             }
-            Self::Ambiguous { requested, candidates } => {
+            Self::Ambiguous {
+                requested,
+                candidates,
+            } => {
                 write!(
                     f,
                     "model '{requested}' is ambiguous; matches multiple running models: [{}]. Please specify the exact model name.",
@@ -260,16 +264,13 @@ pub fn route_server_for(
     let running_names: Vec<String> = running
         .iter()
         .map(|ls| {
-            ls.def
-                .served_model_name
-                .clone()
-                .unwrap_or_else(|| {
-                    if !ls.def.model_id.is_empty() {
-                        ls.def.model_id.clone()
-                    } else {
-                        ls.def.name.clone()
-                    }
-                })
+            ls.def.served_model_name.clone().unwrap_or_else(|| {
+                if !ls.def.model_id.is_empty() {
+                    ls.def.model_id.clone()
+                } else {
+                    ls.def.name.clone()
+                }
+            })
         })
         .collect();
     let m = model.trim();
@@ -339,7 +340,8 @@ pub fn route_server_for(
             || lower.starts_with(&hf)
             || lower.starts_with(&name)
             || lower.starts_with(&sname)
-            || (lower.len() >= 3 && (hf.contains(&lower) || name.contains(&lower) || sname.contains(&lower)));
+            || (lower.len() >= 3
+                && (hf.contains(&lower) || name.contains(&lower) || sname.contains(&lower)));
         if matched {
             fuzzy_matches.push(ls);
         }
@@ -350,15 +352,15 @@ pub fn route_server_for(
     } else if fuzzy_matches.len() > 1 {
         let mut candidates = Vec::new();
         for ls in fuzzy_matches {
-            let label = ls
-                .def
-                .served_model_name
-                .as_deref()
-                .unwrap_or(if !ls.def.model_id.is_empty() {
-                    &ls.def.model_id
-                } else {
-                    &ls.def.name
-                });
+            let label =
+                ls.def
+                    .served_model_name
+                    .as_deref()
+                    .unwrap_or(if !ls.def.model_id.is_empty() {
+                        &ls.def.model_id
+                    } else {
+                        &ls.def.name
+                    });
             if !candidates.contains(&label.to_string()) {
                 candidates.push(label.to_string());
             }
@@ -5080,27 +5082,49 @@ async fn proxy_responses_stream(
                                             }
                                         }
 
-                                        if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                        if let Some(tool_calls) =
+                                            delta.get("tool_calls").and_then(|tc| tc.as_array())
+                                        {
                                             for tc in tool_calls {
-                                                let tc_idx = tc.get("index").and_then(|i| i.as_u64()).map(|i| i as usize).unwrap_or(0);
-                                                let tool = active_tools.entry(tc_idx).or_insert_with(|| {
-                                                    let out_idx = next_output_index;
-                                                    next_output_index += 1;
-                                                    ActiveToolItem {
-                                                        output_index: out_idx,
-                                                        call_id: format!("call_{:016x}", REQ_COUNTER.fetch_add(1, Ordering::Relaxed)),
-                                                        name: String::new(),
-                                                        arguments: String::new(),
-                                                        added_emitted: false,
-                                                        done_emitted: false,
-                                                    }
-                                                });
+                                                let tc_idx = tc
+                                                    .get("index")
+                                                    .and_then(|i| i.as_u64())
+                                                    .map(|i| i as usize)
+                                                    .unwrap_or(0);
+                                                let tool = active_tools
+                                                    .entry(tc_idx)
+                                                    .or_insert_with(|| {
+                                                        let out_idx = next_output_index;
+                                                        next_output_index += 1;
+                                                        ActiveToolItem {
+                                                            output_index: out_idx,
+                                                            call_id: format!(
+                                                                "call_{:016x}",
+                                                                REQ_COUNTER.fetch_add(
+                                                                    1,
+                                                                    Ordering::Relaxed
+                                                                )
+                                                            ),
+                                                            name: String::new(),
+                                                            arguments: String::new(),
+                                                            added_emitted: false,
+                                                            done_emitted: false,
+                                                        }
+                                                    });
 
-                                                if let Some(id) = tc.get("id").and_then(|id| id.as_str()).filter(|s| !s.is_empty()) {
+                                                if let Some(id) = tc
+                                                    .get("id")
+                                                    .and_then(|id| id.as_str())
+                                                    .filter(|s| !s.is_empty())
+                                                {
                                                     tool.call_id = id.to_string();
                                                 }
                                                 if let Some(fn_obj) = tc.get("function") {
-                                                    if let Some(name) = fn_obj.get("name").and_then(|n| n.as_str()).filter(|s| !s.is_empty()) {
+                                                    if let Some(name) = fn_obj
+                                                        .get("name")
+                                                        .and_then(|n| n.as_str())
+                                                        .filter(|s| !s.is_empty())
+                                                    {
                                                         tool.name = name.to_string();
                                                     }
                                                 }
@@ -5127,7 +5151,10 @@ async fn proxy_responses_stream(
                                                 }
 
                                                 if let Some(fn_obj) = tc.get("function") {
-                                                    if let Some(arg_delta) = fn_obj.get("arguments").and_then(|a| a.as_str()) {
+                                                    if let Some(arg_delta) = fn_obj
+                                                        .get("arguments")
+                                                        .and_then(|a| a.as_str())
+                                                    {
                                                         if !arg_delta.is_empty() {
                                                             let delta_payload = serde_json::json!({
                                                                 "item_id": &tool.call_id,
@@ -5244,31 +5271,38 @@ async fn proxy_responses_stream(
     let mut output_items: Vec<(usize, serde_json::Value)> = Vec::new();
     if item_added {
         let out_idx = message_output_index.unwrap_or(0);
-        output_items.push((out_idx, serde_json::json!({
-            "id": &item_id,
-            "type": "message",
-            "status": "completed",
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "output_text",
-                    "text": &full_output_text
-                }
-            ]
-        })));
+        output_items.push((
+            out_idx,
+            serde_json::json!({
+                "id": &item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": &full_output_text
+                    }
+                ]
+            }),
+        ));
     }
     for tool in active_tools.values() {
-        output_items.push((tool.output_index, serde_json::json!({
-            "id": &tool.call_id,
-            "type": "function_call",
-            "status": "completed",
-            "name": &tool.name,
-            "call_id": &tool.call_id,
-            "arguments": &tool.arguments
-        })));
+        output_items.push((
+            tool.output_index,
+            serde_json::json!({
+                "id": &tool.call_id,
+                "type": "function_call",
+                "status": "completed",
+                "name": &tool.name,
+                "call_id": &tool.call_id,
+                "arguments": &tool.arguments
+            }),
+        ));
     }
     output_items.sort_by_key(|(idx, _)| *idx);
-    let output_values: Vec<serde_json::Value> = output_items.into_iter().map(|(_, val)| val).collect();
+    let output_values: Vec<serde_json::Value> =
+        output_items.into_iter().map(|(_, val)| val).collect();
 
     let usage_val = normalized.usage.to_responses_usage();
     let final_resp = serde_json::json!({
@@ -5313,7 +5347,11 @@ pub const DEFAULT_SERVER_CONCURRENCY: usize = 16;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConcurrencyError {
-    LimitExceeded { port: u16, current: usize, limit: usize },
+    LimitExceeded {
+        port: u16,
+        current: usize,
+        limit: usize,
+    },
 }
 
 #[derive(Default, Debug)]
@@ -5425,9 +5463,18 @@ pub fn acquire_server_permit(
 #[serde(tag = "status", content = "details")]
 pub enum SupervisorState {
     Stopped,
-    Running { port: u16 },
-    PortConflict { port: u16, error: String },
-    TransientError { port: u16, error: String, retry_in_secs: u64 },
+    Running {
+        port: u16,
+    },
+    PortConflict {
+        port: u16,
+        error: String,
+    },
+    TransientError {
+        port: u16,
+        error: String,
+        retry_in_secs: u64,
+    },
 }
 
 static SUPERVISOR_STATE: LazyLock<std::sync::Mutex<SupervisorState>> =
@@ -5447,12 +5494,15 @@ pub fn is_port_conflict(port: u16) -> bool {
 
 pub fn verify_gateway_health(port: u16) -> bool {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)) else {
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300))
+    else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(300)));
-    let req = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let req =
+        format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if std::io::Write::write_all(&mut stream, req.as_bytes()).is_err() {
         return false;
     }
@@ -5469,7 +5519,8 @@ pub fn verify_gateway_health(port: u16) -> bool {
     }
     let resp_str = String::from_utf8_lossy(&resp);
     resp_str.contains("200 OK")
-        && (resp_str.contains("llm-panel-gateway") || resp_str.contains("x-gateway-service: llm-panel-gateway"))
+        && (resp_str.contains("llm-panel-gateway")
+            || resp_str.contains("x-gateway-service: llm-panel-gateway"))
 }
 
 /// Bind the gateway on `port` and serve until aborted. Returns a join handle
@@ -5534,7 +5585,8 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
                 }
 
                 // If currently running, check if task finished unexpectedly or port changed
-                let is_running_stale = matches!(&running, Some((p, h)) if *p != port || h.is_finished());
+                let is_running_stale =
+                    matches!(&running, Some((p, h)) if *p != port || h.is_finished());
                 if is_running_stale {
                     if let Some((_, h)) = running.take() {
                         h.abort();
@@ -5558,7 +5610,9 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
                     // Attempt bind
                     match TcpListener::bind(("127.0.0.1", port)).await {
                         Ok(listener) => {
-                            eprintln!("[gateway] OpenAI-compatible gateway listening on 127.0.0.1:{port}");
+                            eprintln!(
+                                "[gateway] OpenAI-compatible gateway listening on 127.0.0.1:{port}"
+                            );
                             set_supervisor_state(SupervisorState::Running { port });
                             transient_backoff_secs = 1;
                             next_retry_at = None;
@@ -5573,7 +5627,10 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
                                         }
                                         Err(e) => {
                                             eprintln!("[gateway] accept error: {e}");
-                                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                200,
+                                            ))
+                                            .await;
                                         }
                                     }
                                 }
@@ -5599,7 +5656,10 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
                                     error: e.to_string(),
                                     retry_in_secs: transient_backoff_secs,
                                 });
-                                next_retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(transient_backoff_secs));
+                                next_retry_at = Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_secs(transient_backoff_secs),
+                                );
                                 transient_backoff_secs = (transient_backoff_secs * 2).min(30);
                             }
                         }
@@ -7713,9 +7773,23 @@ mod tests {
     #[test]
     fn test_route_server_exact_match_wins_over_fuzzy() {
         let mut servers = BTreeMap::new();
-        let mut s1 = live_server("srv1", "qwen2.5-7b", Some("qwen"), 8001, "instruct", ServerStatus::Running);
+        let mut s1 = live_server(
+            "srv1",
+            "qwen2.5-7b",
+            Some("qwen"),
+            8001,
+            "instruct",
+            ServerStatus::Running,
+        );
         s1.def.max_model_len = Some(4096);
-        let mut s2 = live_server("srv2", "qwen-7b", None, 8002, "instruct", ServerStatus::Running);
+        let mut s2 = live_server(
+            "srv2",
+            "qwen-7b",
+            None,
+            8002,
+            "instruct",
+            ServerStatus::Running,
+        );
         s2.def.max_model_len = Some(4096);
         servers.insert("srv1".into(), s1);
         servers.insert("srv2".into(), s2);
@@ -7729,9 +7803,23 @@ mod tests {
     #[test]
     fn test_route_server_multiple_fuzzy_matches_returns_ambiguous_error() {
         let mut servers = BTreeMap::new();
-        let mut s1 = live_server("srv1", "Qwen/Qwen2.5-7B-Instruct", Some("qwen2.5-7b"), 8001, "instruct", ServerStatus::Running);
+        let mut s1 = live_server(
+            "srv1",
+            "Qwen/Qwen2.5-7B-Instruct",
+            Some("qwen2.5-7b"),
+            8001,
+            "instruct",
+            ServerStatus::Running,
+        );
         s1.def.max_model_len = Some(4096);
-        let mut s2 = live_server("srv2", "Qwen/Qwen2.5-14B-Instruct", Some("qwen2.5-14b"), 8002, "instruct", ServerStatus::Running);
+        let mut s2 = live_server(
+            "srv2",
+            "Qwen/Qwen2.5-14B-Instruct",
+            Some("qwen2.5-14b"),
+            8002,
+            "instruct",
+            ServerStatus::Running,
+        );
         s2.def.max_model_len = Some(4096);
         servers.insert("srv1".into(), s1);
         servers.insert("srv2".into(), s2);
@@ -7739,7 +7827,10 @@ mod tests {
         // "qwen" matches both srv1 and srv2 fuzzily.
         let err = route_server_for(&servers, "qwen", "instruct").unwrap_err();
         match err {
-            ModelRouteError::Ambiguous { requested, candidates } => {
+            ModelRouteError::Ambiguous {
+                requested,
+                candidates,
+            } => {
                 assert_eq!(requested, "qwen");
                 assert_eq!(candidates, vec!["qwen2.5-14b", "qwen2.5-7b"]);
             }
@@ -7757,21 +7848,34 @@ mod tests {
         let port = 9050;
         assert_eq!(manager.current_inflight(port), 0);
 
-        let permit1 = manager.try_acquire(port, 2).expect("first acquire succeeds");
+        let permit1 = manager
+            .try_acquire(port, 2)
+            .expect("first acquire succeeds");
         assert_eq!(manager.current_inflight(port), 1);
 
-        let permit2 = manager.try_acquire(port, 2).expect("second acquire succeeds");
+        let permit2 = manager
+            .try_acquire(port, 2)
+            .expect("second acquire succeeds");
         assert_eq!(manager.current_inflight(port), 2);
 
         // Third acquire exceeds limit 2
         let err = manager.try_acquire(port, 2);
-        assert!(matches!(err, Err(ConcurrencyError::LimitExceeded { port: 9050, current: 2, limit: 2 })));
+        assert!(matches!(
+            err,
+            Err(ConcurrencyError::LimitExceeded {
+                port: 9050,
+                current: 2,
+                limit: 2
+            })
+        ));
 
         // Dropping one permit frees a slot
         drop(permit1);
         assert_eq!(manager.current_inflight(port), 1);
 
-        let permit3 = manager.try_acquire(port, 2).expect("third acquire succeeds after drop");
+        let permit3 = manager
+            .try_acquire(port, 2)
+            .expect("third acquire succeeds after drop");
         assert_eq!(manager.current_inflight(port), 2);
         drop(permit2);
         drop(permit3);
@@ -7857,7 +7961,14 @@ mod tests {
         });
 
         let mut servers = BTreeMap::new();
-        let mut srv = live_server("stream-srv", "stream-model", None, upstream_port, "instruct", ServerStatus::Running);
+        let mut srv = live_server(
+            "stream-srv",
+            "stream-model",
+            None,
+            upstream_port,
+            "instruct",
+            ServerStatus::Running,
+        );
         srv.def.max_model_len = Some(4096);
         servers.insert("stream-srv".into(), srv);
 
@@ -7887,14 +7998,18 @@ mod tests {
             req_body
         );
 
-        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client.write_all(req.as_bytes()).await.unwrap();
 
         let mut resp_buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
             let n = client.read(&mut tmp).await.unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp_buf.extend_from_slice(&tmp[..n]);
         }
         let resp_str = String::from_utf8_lossy(&resp_buf);
@@ -7962,7 +8077,14 @@ mod tests {
         });
 
         let mut servers = BTreeMap::new();
-        let mut srv = live_server("tool-srv", "tool-model", None, upstream_port, "instruct", ServerStatus::Running);
+        let mut srv = live_server(
+            "tool-srv",
+            "tool-model",
+            None,
+            upstream_port,
+            "instruct",
+            ServerStatus::Running,
+        );
         srv.def.max_model_len = Some(4096);
         servers.insert("tool-srv".into(), srv);
 
@@ -7993,14 +8115,18 @@ mod tests {
             req_body
         );
 
-        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client.write_all(req.as_bytes()).await.unwrap();
 
         let mut resp_buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
             let n = client.read(&mut tmp).await.unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp_buf.extend_from_slice(&tmp[..n]);
         }
         let resp_str = String::from_utf8_lossy(&resp_buf);
@@ -8057,7 +8183,14 @@ mod tests {
         });
 
         let mut servers = BTreeMap::new();
-        let mut srv = live_server("sys-srv", "sys-model", None, upstream_port, "instruct", ServerStatus::Running);
+        let mut srv = live_server(
+            "sys-srv",
+            "sys-model",
+            None,
+            upstream_port,
+            "instruct",
+            ServerStatus::Running,
+        );
         srv.def.max_model_len = Some(4096);
         servers.insert("sys-srv".into(), srv);
 
@@ -8089,14 +8222,18 @@ mod tests {
             req_body
         );
 
-        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client.write_all(req.as_bytes()).await.unwrap();
 
         let mut resp_buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
             let n = client.read(&mut tmp).await.unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp_buf.extend_from_slice(&tmp[..n]);
         }
         let resp_str = String::from_utf8_lossy(&resp_buf);
@@ -8138,7 +8275,14 @@ mod tests {
         });
 
         let mut servers = BTreeMap::new();
-        let mut srv = live_server("resp-srv", "resp-model", None, upstream_port, "instruct", ServerStatus::Running);
+        let mut srv = live_server(
+            "resp-srv",
+            "resp-model",
+            None,
+            upstream_port,
+            "instruct",
+            ServerStatus::Running,
+        );
         srv.def.max_model_len = Some(4096);
         servers.insert("resp-srv".into(), srv);
 
@@ -8169,14 +8313,18 @@ mod tests {
             req_body
         );
 
-        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client.write_all(req.as_bytes()).await.unwrap();
 
         let mut resp_buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
             let n = client.read(&mut tmp).await.unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp_buf.extend_from_slice(&tmp[..n]);
         }
         let resp_str = String::from_utf8_lossy(&resp_buf);
@@ -8221,12 +8369,16 @@ mod tests {
         let req1 = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
         );
-        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client1.write_all(req1.as_bytes()).await.unwrap();
         let mut resp1 = String::new();
         let mut buf = [0u8; 1024];
         while let Ok(n) = client1.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp1.starts_with("HTTP/1.1 401 Unauthorized"));
@@ -8236,11 +8388,15 @@ mod tests {
         let req2 = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer wrong-key\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
         );
-        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client2.write_all(req2.as_bytes()).await.unwrap();
         let mut resp2 = String::new();
         while let Ok(n) = client2.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp2.starts_with("HTTP/1.1 401 Unauthorized"));
@@ -8250,11 +8406,15 @@ mod tests {
         let req3 = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
         );
-        let mut client3 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client3 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client3.write_all(req3.as_bytes()).await.unwrap();
         let mut resp3 = String::new();
         while let Ok(n) = client3.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp3.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp3.starts_with("HTTP/1.1 401 Unauthorized"));
@@ -8265,11 +8425,15 @@ mod tests {
         let req4 = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer some-key\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
         );
-        let mut client4 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client4 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client4.write_all(req4.as_bytes()).await.unwrap();
         let mut resp4 = String::new();
         while let Ok(n) = client4.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp4.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp4.starts_with("HTTP/1.1 503 Service Unavailable"));
@@ -8299,28 +8463,40 @@ mod tests {
         let preflight = format!(
             "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nOrigin: http://localhost:3000\r\nConnection: close\r\n\r\n"
         );
-        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client1.write_all(preflight.as_bytes()).await.unwrap();
         let mut resp1 = String::new();
         let mut buf = [0u8; 1024];
         while let Ok(n) = client1.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp1.starts_with("HTTP/1.1 204 No Content"));
-        assert!(resp1.to_lowercase().contains("access-control-allow-origin: http://localhost:3000"));
-        assert!(resp1.to_lowercase().contains("access-control-allow-methods: get, post, options"));
+        assert!(resp1
+            .to_lowercase()
+            .contains("access-control-allow-origin: http://localhost:3000"));
+        assert!(resp1
+            .to_lowercase()
+            .contains("access-control-allow-methods: get, post, options"));
         assert!(resp1.to_lowercase().contains("authorization"));
 
         // 2. OPTIONS preflight with untrusted external origin
         let untrusted = format!(
             "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nOrigin: https://evil.attacker.com\r\nConnection: close\r\n\r\n"
         );
-        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client2.write_all(untrusted.as_bytes()).await.unwrap();
         let mut resp2 = String::new();
         while let Ok(n) = client2.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp2.starts_with("HTTP/1.1 403 Forbidden"));
@@ -8334,11 +8510,32 @@ mod tests {
         use tokio::net::TcpListener;
 
         let mut servers = BTreeMap::new();
-        let mut s_a = live_server("srv-a", "Qwen/Qwen2.5-7B", Some("qwen2.5-7b"), 8010, "instruct", ServerStatus::Running);
+        let mut s_a = live_server(
+            "srv-a",
+            "Qwen/Qwen2.5-7B",
+            Some("qwen2.5-7b"),
+            8010,
+            "instruct",
+            ServerStatus::Running,
+        );
         s_a.def.max_model_len = Some(4096);
-        let mut s_b = live_server("srv-b", "Qwen/Qwen2.5-14B", Some("qwen2.5-14b"), 8011, "instruct", ServerStatus::Running);
+        let mut s_b = live_server(
+            "srv-b",
+            "Qwen/Qwen2.5-14B",
+            Some("qwen2.5-14b"),
+            8011,
+            "instruct",
+            ServerStatus::Running,
+        );
         s_b.def.max_model_len = Some(4096);
-        let mut s_starting = live_server("srv-starting", "meta-llama/Llama-3-8B", Some("llama-3-8b"), 8012, "instruct", ServerStatus::Starting);
+        let mut s_starting = live_server(
+            "srv-starting",
+            "meta-llama/Llama-3-8B",
+            Some("llama-3-8b"),
+            8012,
+            "instruct",
+            ServerStatus::Starting,
+        );
         s_starting.def.max_model_len = Some(4096);
 
         servers.insert("srv-a".into(), s_a);
@@ -8366,18 +8563,23 @@ mod tests {
         let req_ambiguous = serde_json::json!({
             "model": "qwen",
             "messages": [{"role": "user", "content": "hi"}]
-        }).to_string();
+        })
+        .to_string();
         let req1 = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             req_ambiguous.len(),
             req_ambiguous
         );
-        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client1 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client1.write_all(req1.as_bytes()).await.unwrap();
         let mut resp1 = String::new();
         let mut buf = [0u8; 1024];
         while let Ok(n) = client1.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp1.starts_with("HTTP/1.1 400 Bad Request"));
@@ -8389,17 +8591,22 @@ mod tests {
         let req_starting = serde_json::json!({
             "model": "llama-3-8b",
             "messages": [{"role": "user", "content": "hi"}]
-        }).to_string();
+        })
+        .to_string();
         let req2 = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             req_starting.len(),
             req_starting
         );
-        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}")).await.unwrap();
+        let mut client2 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
         client2.write_all(req2.as_bytes()).await.unwrap();
         let mut resp2 = String::new();
         while let Ok(n) = client2.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         assert!(resp2.starts_with("HTTP/1.1 503 Service Unavailable"));

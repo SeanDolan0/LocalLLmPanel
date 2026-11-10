@@ -2221,7 +2221,7 @@ pub async fn servers_create(
             let p = held.port;
             held.release();
             p
-        },
+        }
     };
 
     let gpu_mem_util = input
@@ -3799,7 +3799,9 @@ fn scan_native_gguf_library(
         if !local_path.exists() {
             continue;
         }
-        let canonical = local_path.canonicalize().unwrap_or_else(|_| local_path.clone());
+        let canonical = local_path
+            .canonicalize()
+            .unwrap_or_else(|_| local_path.clone());
         catalogued_paths.insert(canonical);
 
         let in_use_server = running_servers
@@ -3818,7 +3820,10 @@ fn scan_native_gguf_library(
         let size_mb = if reg.size_bytes > 0 {
             reg.size_bytes / (1024 * 1024)
         } else {
-            local_path.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0)
+            local_path
+                .metadata()
+                .map(|m| m.len() / (1024 * 1024))
+                .unwrap_or(0)
         };
 
         entries.push(LibraryEntry {
@@ -3851,14 +3856,16 @@ fn scan_native_gguf_library(
             continue;
         }
 
-        let mut quant_groups: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+        let mut quant_groups: std::collections::HashMap<String, Vec<PathBuf>> =
+            std::collections::HashMap::new();
         for file in all_files {
             let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
             if catalogued_paths.contains(&canonical) {
                 continue;
             }
             let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let quant = crate::hf::parse_gguf_quant_label(file_name).unwrap_or_else(|| "GGUF".to_string());
+            let quant =
+                crate::hf::parse_gguf_quant_label(file_name).unwrap_or_else(|| "GGUF".to_string());
             quant_groups.entry(quant).or_default().push(file);
         }
 
@@ -5786,7 +5793,8 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
 
     #[test]
     fn test_scan_native_gguf_library_multi_quant() {
-        let temp_dir = std::env::temp_dir().join(format!("test-gguf-lib-{}", crate::state::now_ms()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-gguf-lib-{}", crate::state::now_ms()));
         let repo_dir = temp_dir.join("bartowski__Qwen2.5-Coder-7B-Instruct-GGUF");
         std::fs::create_dir_all(&repo_dir).unwrap();
 
@@ -5799,11 +5807,7 @@ printf fixture > "$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/abc/confi
             data: std::sync::Mutex::new(crate::model_registry::ModelRegistryData::default()),
         };
 
-        let entries = scan_native_gguf_library(
-            &temp_dir.to_string_lossy(),
-            &[],
-            &reg,
-        );
+        let entries = scan_native_gguf_library(&temp_dir.to_string_lossy(), &[], &reg);
 
         assert_eq!(entries.len(), 2);
         let quants: Vec<String> = entries.iter().filter_map(|e| e.quant.clone()).collect();
@@ -5838,7 +5842,6 @@ pub async fn cleanup_execute(
     Ok(crate::cleanup::execute_cleanup(&state, &confirmed_targets))
 }
 
-
 // ---------------------------------------------------------------------------
 // Unified First-run Diagnostics, Windows Trust & Compatibility Test (Stream G)
 // ---------------------------------------------------------------------------
@@ -5856,9 +5859,7 @@ pub async fn diagnostics_run(
 }
 
 #[tauri::command]
-pub async fn diagnostics_export_bundle(
-    state: State<'_, Arc<AppState>>,
-) -> Result<String, String> {
+pub async fn diagnostics_export_bundle(state: State<'_, Arc<AppState>>) -> Result<String, String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let bundle = crate::diagnostics::generate_redacted_bundle(&st);
@@ -5880,7 +5881,10 @@ pub async fn disk_preflight(
             .map(std::path::PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("huggingface")))
             .unwrap_or_else(|| std::path::PathBuf::from(r"C:\"));
-        Ok(crate::diagnostics::evaluate_disk_preflight(&path, required_bytes))
+        Ok(crate::diagnostics::evaluate_disk_preflight(
+            &path,
+            required_bytes,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?

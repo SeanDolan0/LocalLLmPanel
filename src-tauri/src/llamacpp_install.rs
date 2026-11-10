@@ -261,7 +261,9 @@ pub(crate) fn choose_assets_for_machine_config_ext(
         .find(|asset| parse_runtime_channel(&asset.name, config) == Some(*version))
         .cloned();
 
-    let mut warning = if compute_cap.is_some_and(|cc| cc >= (12, 0)) && *version < CudaVersion(12, 8) {
+    let mut warning = if compute_cap.is_some_and(|cc| cc >= (12, 0))
+        && *version < CudaVersion(12, 8)
+    {
         Some(format!("CUDA {} predates Blackwell native support; it may be slow or fail. Update the NVIDIA driver to use CUDA 12.8 or newer.", version))
     } else {
         None
@@ -288,7 +290,10 @@ pub(crate) fn choose_assets_for_machine_config_ext(
 
 pub fn promote_staging_dir(staging: &Path, destination: &Path) -> Result<()> {
     if !staging.exists() {
-        return Err(anyhow!("staging directory does not exist: {}", staging.display()));
+        return Err(anyhow!(
+            "staging directory does not exist: {}",
+            staging.display()
+        ));
     }
     if destination.exists() {
         let backup = destination.with_extension(format!("old-{}", std::process::id()));
@@ -296,7 +301,9 @@ pub fn promote_staging_dir(staging: &Path, destination: &Path) -> Result<()> {
         std::fs::rename(destination, &backup)?;
         if let Err(e) = std::fs::rename(staging, destination) {
             let _ = std::fs::rename(&backup, destination);
-            return Err(anyhow!("Failed to promote staging dir, restored previous working install: {e}"));
+            return Err(anyhow!(
+                "Failed to promote staging dir, restored previous working install: {e}"
+            ));
         }
         let _ = std::fs::remove_dir_all(&backup);
     } else {
@@ -331,8 +338,16 @@ pub fn install_for_channel(
 
     let install_dir = destination
         .join(format!("{}-{}-cuda-{}", fork.id, tag, selection.candidate.version).to_lowercase());
-    let staging_dir = destination
-        .join(format!("{}-{}-cuda-{}.staging-{}", fork.id, tag, selection.candidate.version, std::process::id()).to_lowercase());
+    let staging_dir = destination.join(
+        format!(
+            "{}-{}-cuda-{}.staging-{}",
+            fork.id,
+            tag,
+            selection.candidate.version,
+            std::process::id()
+        )
+        .to_lowercase(),
+    );
     let _ = std::fs::remove_dir_all(&staging_dir);
     std::fs::create_dir_all(&staging_dir)?;
 
@@ -1133,7 +1148,9 @@ pub fn windows_gpu_devices() -> Vec<NvidiaGpuDevice> {
         ])
         .output()
         .ok();
-    let Some(output) = output else { return Vec::new(); };
+    let Some(output) = output else {
+        return Vec::new();
+    };
     if !output.status.success() {
         return Vec::new();
     }
@@ -1650,7 +1667,9 @@ mod tests {
         ];
         // Without override acknowledged, selecting without driver capability must refuse
         let err = choose_assets_for_machine(&fork, &assets, None, None).unwrap_err();
-        assert!(err.to_string().contains("NVIDIA driver capability is unknown"));
+        assert!(err
+            .to_string()
+            .contains("NVIDIA driver capability is unknown"));
     }
 
     #[test]
@@ -1668,9 +1687,15 @@ mod tests {
             },
         ];
         // When explicit override is passed, selection succeeds with warning
-        let selection = super::choose_assets_for_machine_config_ext(&config, &assets, None, None, true).unwrap();
+        let selection =
+            super::choose_assets_for_machine_config_ext(&config, &assets, None, None, true)
+                .unwrap();
         assert_eq!(selection.candidate.version, CudaVersion(12, 4));
-        assert!(selection.warning.as_deref().unwrap_or("").contains("override acknowledgment"));
+        assert!(selection
+            .warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("override acknowledgment"));
     }
 
     #[test]
@@ -1698,7 +1723,8 @@ mod tests {
 
     #[test]
     fn test_staging_dir_promotion_and_atomic_rollback() {
-        let temp_dir = std::env::temp_dir().join(format!("llp-test-staging-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("llp-test-staging-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1711,7 +1737,10 @@ mod tests {
         // Initial promotion: dest does not exist yet
         super::promote_staging_dir(&staging, &dest).unwrap();
         assert!(dest.join("llama-server.exe").is_file());
-        assert_eq!(std::fs::read(dest.join("llama-server.exe")).unwrap(), b"new binary");
+        assert_eq!(
+            std::fs::read(dest.join("llama-server.exe")).unwrap(),
+            b"new binary"
+        );
         assert!(!staging.exists());
 
         // Second promotion over existing install
@@ -1719,7 +1748,10 @@ mod tests {
         std::fs::write(staging.join("llama-server.exe"), b"newer binary").unwrap();
 
         super::promote_staging_dir(&staging, &dest).unwrap();
-        assert_eq!(std::fs::read(dest.join("llama-server.exe")).unwrap(), b"newer binary");
+        assert_eq!(
+            std::fs::read(dest.join("llama-server.exe")).unwrap(),
+            b"newer binary"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1740,5 +1772,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
-
 }

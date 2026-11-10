@@ -1198,7 +1198,9 @@ impl PersistedConfig {
                         cfg.advanced_settings.api_key = Some(enc);
                         needs_save = true;
                     }
-                    Err(e) => eprintln!("[config] could not encrypt plaintext advanced API key on load: {e}"),
+                    Err(e) => eprintln!(
+                        "[config] could not encrypt plaintext advanced API key on load: {e}"
+                    ),
                 }
             }
         }
@@ -1211,7 +1213,9 @@ impl PersistedConfig {
                             server.api_key = Some(enc);
                             needs_save = true;
                         }
-                        Err(e) => eprintln!("[config] could not encrypt plaintext server API key on load: {e}"),
+                        Err(e) => eprintln!(
+                            "[config] could not encrypt plaintext server API key on load: {e}"
+                        ),
                     }
                 }
             }
@@ -2571,7 +2575,8 @@ mod tests {
         let mut enc_server = cfg.servers[0].clone();
         enc_server.api_key = Some("dpapi:test_server_enc_blob".into());
         enc_cfg.servers = vec![enc_server];
-        let enc_export_json = serde_json::to_string(&ConfigExportPackage::from_persisted(&enc_cfg)).unwrap();
+        let enc_export_json =
+            serde_json::to_string(&ConfigExportPackage::from_persisted(&enc_cfg)).unwrap();
         assert!(!enc_export_json.contains("test_global_enc_blob"));
         assert!(!enc_export_json.contains("test_server_enc_blob"));
         assert!(!enc_export_json.contains("dpapi:"));
@@ -2608,7 +2613,8 @@ mod tests {
         let mut on_disk = cfg.clone();
         if let Some(ref key) = on_disk.advanced_settings.api_key {
             if !key.starts_with("dpapi:") {
-                on_disk.advanced_settings.api_key = Some(crate::security::encrypt_token(key).unwrap());
+                on_disk.advanced_settings.api_key =
+                    Some(crate::security::encrypt_token(key).unwrap());
             }
         }
         if let Some(ref key) = on_disk.servers[0].api_key {
@@ -2625,8 +2631,11 @@ mod tests {
         // Load simulation: loads encrypted keys, decrypt_token recovers original
         let read_back = std::fs::read_to_string(&tmp_file).unwrap();
         let loaded: PersistedConfig = serde_json::from_str(&read_back).unwrap();
-        let decrypted_global = crate::security::decrypt_token(loaded.advanced_settings.api_key.as_deref().unwrap()).unwrap();
-        let decrypted_server = crate::security::decrypt_token(loaded.servers[0].api_key.as_deref().unwrap()).unwrap();
+        let decrypted_global =
+            crate::security::decrypt_token(loaded.advanced_settings.api_key.as_deref().unwrap())
+                .unwrap();
+        let decrypted_server =
+            crate::security::decrypt_token(loaded.servers[0].api_key.as_deref().unwrap()).unwrap();
         assert_eq!(decrypted_global, "test_global_key_abc123");
         assert_eq!(decrypted_server, "test_server_key_xyz789");
 
@@ -2634,10 +2643,12 @@ mod tests {
         let raw_plaintext_json = serde_json::to_string_pretty(&cfg).unwrap();
         assert!(raw_plaintext_json.contains("test_global_key_abc123"));
         std::fs::write(&tmp_file, &raw_plaintext_json).unwrap();
-        let mut migrated: PersistedConfig = serde_json::from_str(&std::fs::read_to_string(&tmp_file).unwrap()).unwrap();
+        let mut migrated: PersistedConfig =
+            serde_json::from_str(&std::fs::read_to_string(&tmp_file).unwrap()).unwrap();
         if let Some(ref key) = migrated.advanced_settings.api_key {
             if !key.starts_with("dpapi:") {
-                migrated.advanced_settings.api_key = Some(crate::security::encrypt_token(key).unwrap());
+                migrated.advanced_settings.api_key =
+                    Some(crate::security::encrypt_token(key).unwrap());
             }
         }
         if let Some(ref key) = migrated.servers[0].api_key {
@@ -2645,14 +2656,25 @@ mod tests {
                 migrated.servers[0].api_key = Some(crate::security::encrypt_token(key).unwrap());
             }
         }
-        assert!(migrated.advanced_settings.api_key.as_ref().unwrap().starts_with("dpapi:"));
-        assert!(migrated.servers[0].api_key.as_ref().unwrap().starts_with("dpapi:"));
+        assert!(migrated
+            .advanced_settings
+            .api_key
+            .as_ref()
+            .unwrap()
+            .starts_with("dpapi:"));
+        assert!(migrated.servers[0]
+            .api_key
+            .as_ref()
+            .unwrap()
+            .starts_with("dpapi:"));
         assert_eq!(
-            crate::security::decrypt_token(migrated.advanced_settings.api_key.as_deref().unwrap()).unwrap(),
+            crate::security::decrypt_token(migrated.advanced_settings.api_key.as_deref().unwrap())
+                .unwrap(),
             "test_global_key_abc123"
         );
         assert_eq!(
-            crate::security::decrypt_token(migrated.servers[0].api_key.as_deref().unwrap()).unwrap(),
+            crate::security::decrypt_token(migrated.servers[0].api_key.as_deref().unwrap())
+                .unwrap(),
             "test_server_key_xyz789"
         );
 

@@ -1120,8 +1120,9 @@ fn parse_progress_line(
 ///
 /// `app.state()` is NOT usable from the spawned thread, so we hand it a clone
 /// of the pulling map Arc + the AppHandle (for emitting events).
-static ACTIVE_PULL_PIDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static ACTIVE_PULL_PIDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u32>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 pub fn register_pull_pid(model_id: &str, pid: u32) {
     ACTIVE_PULL_PIDS
@@ -1155,7 +1156,13 @@ pub fn cancel_pull(model_id: &str, distro: &str) {
     }
     let clean_id: String = model_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let kill_script = format!(
         "if [ -f /tmp/local-llm-panel/pull_{clean_id}.pid ]; then pid=$(cat /tmp/local-llm-panel/pull_{clean_id}.pid 2>/dev/null) && kill -9 $pid 2>/dev/null && rm -f /tmp/local-llm-panel/pull_{clean_id}.pid; fi"
@@ -1235,7 +1242,13 @@ pub fn pull_model(state: &StdArc<AppState>, app: tauri::AppHandle, model_id: &st
     std::thread::spawn(move || {
         let clean_id: String = mid
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let pid_file = format!("/tmp/local-llm-panel/pull_{clean_id}.pid");
 
@@ -1300,7 +1313,8 @@ fi
         // C10 & C11: Spawn via stdin so HF_TOKEN is never visible in process arguments,
         // and track exact child process handle for exact PID cancellation.
         let server_tag = format!("pull-{}", clean_id);
-        let mut child_res = crate::wsl::spawn_script_via_stdin(&distro, &script, &server_tag, on_line);
+        let mut child_res =
+            crate::wsl::spawn_script_via_stdin(&distro, &script, &server_tag, on_line);
         let out = match child_res.as_mut() {
             Ok(child) => {
                 register_pull_pid(&model_id, child.pid());

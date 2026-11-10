@@ -113,7 +113,8 @@ pub fn evaluate_windows_build(
                 true,
                 false,
                 format!("Windows 10 Build {b}{ver_suffix}"),
-                "Windows 10 Build 19041+ (2004+) satisfies WSL2 and NVIDIA CUDA requirements.".to_string(),
+                "Windows 10 Build 19041+ (2004+) satisfies WSL2 and NVIDIA CUDA requirements."
+                    .to_string(),
             )
         }
         Some(b) => {
@@ -165,7 +166,12 @@ pub fn detect_windows_info() -> WindowsInfo {
 
         // Query CurrentBuild from registry
         if let Ok(out) = Command::new("reg")
-            .args(&["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "CurrentBuild"])
+            .args(&[
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                "/v",
+                "CurrentBuild",
+            ])
             .output()
         {
             if out.status.success() {
@@ -184,7 +190,12 @@ pub fn detect_windows_info() -> WindowsInfo {
 
         // Query DisplayVersion from registry
         if let Ok(out) = Command::new("reg")
-            .args(&["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "DisplayVersion"])
+            .args(&[
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                "/v",
+                "DisplayVersion",
+            ])
             .output()
         {
             if out.status.success() {
@@ -201,7 +212,12 @@ pub fn detect_windows_info() -> WindowsInfo {
 
         // Query ProductName from registry
         if let Ok(out) = Command::new("reg")
-            .args(&["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "ProductName"])
+            .args(&[
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                "/v",
+                "ProductName",
+            ])
             .output()
         {
             if out.status.success() {
@@ -228,7 +244,10 @@ pub fn detect_windows_info() -> WindowsInfo {
                 if !trimmed.is_empty() {
                     raw_version = Some(trimmed.clone());
                     if build_num.is_none() {
-                        if let Some(caps) = Regex::new(r"(?i)version\s+10\.0\.(\d+)").ok().and_then(|re| re.captures(&trimmed)) {
+                        if let Some(caps) = Regex::new(r"(?i)version\s+10\.0\.(\d+)")
+                            .ok()
+                            .and_then(|re| re.captures(&trimmed))
+                        {
                             if let Some(m) = caps.get(1) {
                                 build_num = m.as_str().parse::<u32>().ok();
                             }
@@ -277,11 +296,15 @@ pub fn redact_secrets(input: &str) -> String {
 
     // Redact Bearer authorization headers: Bearer <alphanumeric_or_punctuation>
     if let Ok(re) = Regex::new(r"(?i)Bearer\s+([a-zA-Z0-9_\-\.]{15,})") {
-        s = re.replace_all(&s, "Bearer [REDACTED_BEARER_TOKEN]").to_string();
+        s = re
+            .replace_all(&s, "Bearer [REDACTED_BEARER_TOKEN]")
+            .to_string();
     }
 
     // Redact key=value or token=value query parameters and env strings
-    if let Ok(re) = Regex::new(r#"(?i)(token|api[_-]?key|secret|password|access[_-]?token)\s*[:=]\s*([^\s,;\"']+)"#) {
+    if let Ok(re) = Regex::new(
+        r#"(?i)(token|api[_-]?key|secret|password|access[_-]?token)\s*[:=]\s*([^\s,;\"']+)"#,
+    ) {
         s = re.replace_all(&s, "$1=[REDACTED]").to_string();
     }
 
@@ -368,7 +391,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
                     status: DiagnosticStatus::Warning,
                     value: "WSL Installed (legacy inbox version)".into(),
                     details: Some(format!("Found distros: {}", distros.join(", "))),
-                    fix_recommendation: Some("Update WSL to Microsoft Store package: run 'wsl --update' in PowerShell.".into()),
+                    fix_recommendation: Some(
+                        "Update WSL to Microsoft Store package: run 'wsl --update' in PowerShell."
+                            .into(),
+                    ),
                     doc_url: Some("https://learn.microsoft.com/windows/wsl/install".into()),
                 }
             } else {
@@ -378,8 +404,13 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
                     title: "WSL Installation & Version".into(),
                     status: DiagnosticStatus::Fail,
                     value: "WSL Not Installed".into(),
-                    details: Some("wsl.exe was not found or no Linux distributions are registered.".into()),
-                    fix_recommendation: Some("Install WSL in Administrator PowerShell: wsl --install --no-distribution".into()),
+                    details: Some(
+                        "wsl.exe was not found or no Linux distributions are registered.".into(),
+                    ),
+                    fix_recommendation: Some(
+                        "Install WSL in Administrator PowerShell: wsl --install --no-distribution"
+                            .into(),
+                    ),
                     doc_url: Some("https://learn.microsoft.com/windows/wsl/install".into()),
                 }
             }
@@ -397,7 +428,9 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             title: "WSL2 Environment & Kernel".into(),
             status: DiagnosticStatus::Pass,
             value: format!("Active ({distro_name})"),
-            details: Some("WSL2 virtualization and container runtime are operating normally.".into()),
+            details: Some(
+                "WSL2 virtualization and container runtime are operating normally.".into(),
+            ),
             fix_recommendation: None,
             doc_url: None,
         }
@@ -439,7 +472,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
     let native_gpu = crate::llamacpp_install::windows_gpu_snapshot();
     let host_smi_gpus = {
         let output = std::process::Command::new("nvidia-smi")
-            .args(&["--query-gpu=driver_version,name,memory.total", "--format=csv,noheader"])
+            .args(&[
+                "--query-gpu=driver_version,name,memory.total",
+                "--format=csv,noheader",
+            ])
             .output();
         output.ok().and_then(|o| {
             if o.status.success() {
@@ -503,7 +539,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             doc_url: None,
         },
         None => {
-            let check_libcuda = crate::wsl::run_script(&distro_name, "test -f /usr/lib/wsl/lib/libcuda.so.1 && echo present || echo missing");
+            let check_libcuda = crate::wsl::run_script(
+                &distro_name,
+                "test -f /usr/lib/wsl/lib/libcuda.so.1 && echo present || echo missing",
+            );
             let has_libcuda = check_libcuda.stdout.contains("present");
             if has_libcuda {
                 DiagnosticStep {
@@ -536,7 +575,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
 
     // Step 6: CUDA runtime (WSL or native llama.cpp)
     let prov_report = {
-        let out = crate::wsl::run_script(&distro_name, "cat ~/llm-lp/.provisioned 2>/dev/null || true");
+        let out = crate::wsl::run_script(
+            &distro_name,
+            "cat ~/llm-lp/.provisioned 2>/dev/null || true",
+        );
         if out.ok && !out.stdout.trim().is_empty() {
             serde_json::from_str::<crate::provision::ProvisionReport>(&out.stdout).ok()
         } else {
@@ -551,8 +593,14 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             id: "cuda_runtime".into(),
             title: "CUDA Runtime & PyTorch".into(),
             status: DiagnosticStatus::Pass,
-            value: format!("CUDA Ready (PyTorch {})", rep.torch_version.as_deref().unwrap_or("available")),
-            details: Some(format!("GPU: {}", rep.gpu_name.as_deref().unwrap_or("NVIDIA"))),
+            value: format!(
+                "CUDA Ready (PyTorch {})",
+                rep.torch_version.as_deref().unwrap_or("available")
+            ),
+            details: Some(format!(
+                "GPU: {}",
+                rep.gpu_name.as_deref().unwrap_or("NVIDIA")
+            )),
             fix_recommendation: None,
             doc_url: None,
         },
@@ -562,8 +610,13 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             title: "CUDA Runtime & PyTorch".into(),
             status: DiagnosticStatus::Fail,
             value: "PyTorch CUDA Unavailable in WSL".into(),
-            details: Some("Provisioning ran but PyTorch reports cuda.is_available() == false.".into()),
-            fix_recommendation: Some("Re-run 'Provision WSL' from Dashboard. Verify host NVIDIA driver is intact.".into()),
+            details: Some(
+                "Provisioning ran but PyTorch reports cuda.is_available() == false.".into(),
+            ),
+            fix_recommendation: Some(
+                "Re-run 'Provision WSL' from Dashboard. Verify host NVIDIA driver is intact."
+                    .into(),
+            ),
             doc_url: None,
         },
         None => {
@@ -595,7 +648,9 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
     steps.push(step6);
 
     // Step 7: Free disk space
-    let models_dir = dirs::home_dir().map(|h| h.join(".cache").join("huggingface")).unwrap_or_else(|| PathBuf::from(r"C:\"));
+    let models_dir = dirs::home_dir()
+        .map(|h| h.join(".cache").join("huggingface"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\"));
     let disk_info = evaluate_disk_preflight(&models_dir, Some(10 * 1024 * 1024 * 1024));
     let step7 = match disk_info.status.as_str() {
         "sufficient" => DiagnosticStep {
@@ -604,7 +659,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             title: "Available Disk Space".into(),
             status: DiagnosticStatus::Pass,
             value: format!("{:.1} GB Free", disk_info.available_gb),
-            details: Some(format!("Volume total: {:.1} GB ({})", disk_info.total_gb, disk_info.target_path)),
+            details: Some(format!(
+                "Volume total: {:.1} GB ({})",
+                disk_info.total_gb, disk_info.target_path
+            )),
             fix_recommendation: None,
             doc_url: None,
         },
@@ -614,8 +672,13 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             title: "Available Disk Space".into(),
             status: DiagnosticStatus::Warning,
             value: format!("{:.1} GB Free (Low)", disk_info.available_gb),
-            details: Some("Free storage is below 20 GB. Larger models (>14B) may fail to stage and download.".into()),
-            fix_recommendation: Some("Clean up unused files or configure a separate storage volume for models.".into()),
+            details: Some(
+                "Free storage is below 20 GB. Larger models (>14B) may fail to stage and download."
+                    .into(),
+            ),
+            fix_recommendation: Some(
+                "Clean up unused files or configure a separate storage volume for models.".into(),
+            ),
             doc_url: None,
         },
         _ => DiagnosticStep {
@@ -624,8 +687,13 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             title: "Available Disk Space".into(),
             status: DiagnosticStatus::Fail,
             value: format!("{:.1} GB Free (Critical)", disk_info.available_gb),
-            details: Some("Free storage is below 10 GB. Model downloads and KV-cache allocations will fail.".into()),
-            fix_recommendation: Some("Free at least 20 GB of disk space on your main drive.".into()),
+            details: Some(
+                "Free storage is below 10 GB. Model downloads and KV-cache allocations will fail."
+                    .into(),
+            ),
+            fix_recommendation: Some(
+                "Free at least 20 GB of disk space on your main drive.".into(),
+            ),
             doc_url: None,
         },
     };
@@ -634,7 +702,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
     // Step 8: Backend readiness
     let cfg = state.config();
     let llamacpp_ready = crate::llamacpp_install::executable_from_config(&cfg).is_some();
-    let vllm_ready = prov_report.as_ref().map(|r| r.vllm_version.is_some() && r.cuda_available).unwrap_or(false);
+    let vllm_ready = prov_report
+        .as_ref()
+        .map(|r| r.vllm_version.is_some() && r.cuda_available)
+        .unwrap_or(false);
 
     let step8 = if vllm_ready && llamacpp_ready {
         DiagnosticStep {
@@ -676,8 +747,12 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
             title: "Inference Backend Readiness".into(),
             status: DiagnosticStatus::Warning,
             value: "No Backends Installed".into(),
-            details: Some("Neither vLLM (WSL2) nor llama.cpp (Windows) has been installed yet.".into()),
-            fix_recommendation: Some("Click 'Provision WSL' on Dashboard or 'Install llama.cpp' to get started.".into()),
+            details: Some(
+                "Neither vLLM (WSL2) nor llama.cpp (Windows) has been installed yet.".into(),
+            ),
+            fix_recommendation: Some(
+                "Click 'Provision WSL' on Dashboard or 'Install llama.cpp' to get started.".into(),
+            ),
             doc_url: None,
         }
     };
@@ -686,10 +761,17 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
     // Beginner safety rule:
     // Beginners must NEVER see "success" when the GPU is unusable!
     let gpu_usable = (native_gpu.is_some() || wsl_gpu.is_some())
-        && steps.iter().find(|s| s.id == "nvidia_driver").map(|s| s.status != DiagnosticStatus::Fail).unwrap_or(false);
+        && steps
+            .iter()
+            .find(|s| s.id == "nvidia_driver")
+            .map(|s| s.status != DiagnosticStatus::Fail)
+            .unwrap_or(false);
 
     let any_critical_fail = steps.iter().any(|s| {
-        (s.id == "windows_version" || s.id == "wsl2_working" || s.id == "nvidia_driver" || s.id == "gpu_in_wsl")
+        (s.id == "windows_version"
+            || s.id == "wsl2_working"
+            || s.id == "nvidia_driver"
+            || s.id == "gpu_in_wsl")
             && s.status == DiagnosticStatus::Fail
     });
 
@@ -702,7 +784,8 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
     } else if any_critical_fail {
         "System setup incomplete: Critical errors detected in WSL or driver virtualization.".into()
     } else if steps.iter().any(|s| s.status == DiagnosticStatus::Warning) {
-        "System is operational with warnings. You can run models, but review recommended actions.".into()
+        "System is operational with warnings. You can run models, but review recommended actions."
+            .into()
     } else {
         "All diagnostics passed! System is fully ready for GPU-accelerated local inference.".into()
     };
@@ -717,7 +800,10 @@ pub fn run_ordered_diagnostics(state: &AppState) -> DiagnosticReport {
 }
 
 /// Evaluates free volume space against required bytes for storage planning and preflight checks.
-pub fn evaluate_disk_preflight(target_path: &Path, required_bytes: Option<u64>) -> DiskPreflightInfo {
+pub fn evaluate_disk_preflight(
+    target_path: &Path,
+    required_bytes: Option<u64>,
+) -> DiskPreflightInfo {
     let available_bytes = crate::download_manager::get_disk_free_space(target_path).unwrap_or(0);
     let total_bytes = available_bytes.max(100 * 1024 * 1024 * 1024);
     let available_gb = available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -748,26 +834,36 @@ pub fn evaluate_disk_preflight(target_path: &Path, required_bytes: Option<u64>) 
             } else {
                 (
                     "sufficient".to_string(),
-                    Some(format!("Ample storage available: {:.1} GB headroom remaining after allocation.", headroom)),
+                    Some(format!(
+                        "Ample storage available: {:.1} GB headroom remaining after allocation.",
+                        headroom
+                    )),
                 )
             }
         }
-        (Some(req), None) => {
-            (
-                "insufficient".to_string(),
-                Some(format!(
-                    "Required: {:.1} GB, but volume free space could not be determined.",
-                    req as f64 / (1024.0 * 1024.0 * 1024.0)
-                )),
-            )
-        }
+        (Some(req), None) => (
+            "insufficient".to_string(),
+            Some(format!(
+                "Required: {:.1} GB, but volume free space could not be determined.",
+                req as f64 / (1024.0 * 1024.0 * 1024.0)
+            )),
+        ),
         (None, _) => {
             if available_gb < 10.0 {
-                ("insufficient".to_string(), Some("Critically low disk space (< 10 GB).".into()))
+                (
+                    "insufficient".to_string(),
+                    Some("Critically low disk space (< 10 GB).".into()),
+                )
             } else if available_gb < 20.0 {
-                ("tight".to_string(), Some("Storage is tight (< 20 GB free).".into()))
+                (
+                    "tight".to_string(),
+                    Some("Storage is tight (< 20 GB free).".into()),
+                )
             } else {
-                ("sufficient".to_string(), Some("Sufficient free disk space.".into()))
+                (
+                    "sufficient".to_string(),
+                    Some("Sufficient free disk space.".into()),
+                )
             }
         }
     };
@@ -841,7 +937,10 @@ pub fn generate_redacted_bundle(state: &AppState) -> DiagnosticBundle {
                 let mut def_val = serde_json::to_value(&ls.def).unwrap_or_default();
                 if let Some(obj) = def_val.as_object_mut() {
                     if obj.contains_key("api_key") && !obj["api_key"].is_null() {
-                        obj.insert("api_key".into(), serde_json::Value::String("[REDACTED_API_KEY]".into()));
+                        obj.insert(
+                            "api_key".into(),
+                            serde_json::Value::String("[REDACTED_API_KEY]".into()),
+                        );
                     }
                 }
                 def_val
@@ -885,11 +984,20 @@ pub async fn run_server_compatibility_test(
 ) -> Result<CompatibilityTestReport, String> {
     let (port, model, backend) = {
         let servers = state.servers.lock().unwrap();
-        let ls = servers.get(server_id).ok_or_else(|| format!("Server {server_id} not found"))?;
+        let ls = servers
+            .get(server_id)
+            .ok_or_else(|| format!("Server {server_id} not found"))?;
         if ls.status != crate::state::ServerStatus::Running {
-            return Err(format!("Server {server_id} is not running (status: {:?})", ls.status));
+            return Err(format!(
+                "Server {server_id} is not running (status: {:?})",
+                ls.status
+            ));
         }
-        (ls.def.port, ls.def.backend_model_name(), ls.def.backend.clone())
+        (
+            ls.def.port,
+            ls.def.backend_model_name(),
+            ls.def.backend.clone(),
+        )
     };
 
     let base_url = format!("http://127.0.0.1:{port}");
@@ -905,17 +1013,26 @@ pub async fn run_server_compatibility_test(
             "max_tokens": 32,
             "stream": false,
         });
-        let resp = client.post(format!("{base_url}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
+        let resp = client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
         let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        let content = json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim();
+        let content = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim();
         if content.is_empty() {
             return Err("Empty completion response".into());
         }
         Ok(format!("Response: {content}"))
-    }.await;
+    }
+    .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     items.push(CompatibilityTestItem {
         id: "basic_chat".into(),
@@ -937,7 +1054,12 @@ pub async fn run_server_compatibility_test(
             "max_tokens": 64,
             "stream": true,
         });
-        let resp = client.post(format!("{base_url}/v1/chat/completions")).json(&body).send().await.map_err(|e| e.to_string())?;
+        let resp = client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
@@ -947,7 +1069,8 @@ pub async fn run_server_compatibility_test(
         } else {
             Err("No SSE stream tokens received".into())
         }
-    }.await;
+    }
+    .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     items.push(CompatibilityTestItem {
         id: "streaming".into(),
@@ -1119,13 +1242,15 @@ mod tests {
         assert!(win10_old.support_note.contains("19041"));
 
         // Windows 10 exact threshold 19041 (Version 2004) passes
-        let win10_2004 = evaluate_windows_build(Some(19041), Some("2004"), Some("Windows 10 Pro"), None);
+        let win10_2004 =
+            evaluate_windows_build(Some(19041), Some("2004"), Some("Windows 10 Pro"), None);
         assert!(win10_2004.is_supported);
         assert!(!win10_2004.is_windows_11);
         assert!(!win10_2004.os_label.contains("UNSUPPORTED"));
 
         // Windows 10 22H2 (Build 19045) passes
-        let win10_22h2 = evaluate_windows_build(Some(19045), Some("22H2"), Some("Windows 10 Pro"), None);
+        let win10_22h2 =
+            evaluate_windows_build(Some(19045), Some("22H2"), Some("Windows 10 Pro"), None);
         assert!(win10_22h2.is_supported);
         assert!(!win10_22h2.is_windows_11);
 
@@ -1155,7 +1280,8 @@ mod tests {
         assert!(!redacted.contains("ghp_abcdef"));
         assert!(redacted.contains("[REDACTED_GITHUB_TOKEN]"));
 
-        let text_fine_grained = "Authorization: Bearer github_pat_11AAAAAA00000000000000_12345678901234567890";
+        let text_fine_grained =
+            "Authorization: Bearer github_pat_11AAAAAA00000000000000_12345678901234567890";
         let redacted2 = redact_secrets(text_fine_grained);
         assert!(!redacted2.contains("github_pat_"));
         assert!(redacted2.contains("[REDACTED_GITHUB_TOKEN]"));
@@ -1243,7 +1369,8 @@ mod tests {
                 "env": {},
                 "api_key": "sk-super_secret_test_key_123456789012345",
                 "speculative_enabled": false
-            })).expect("valid server def");
+            }))
+            .expect("valid server def");
 
             let ls = crate::state::LiveServer {
                 def,
@@ -1257,7 +1384,9 @@ mod tests {
                 stopping: false,
                 crash_retry_count: 0,
             };
-            ls.log_ring.lock().unwrap().push("Starting worker with auth hf_12345678901234567890abcdef1234567890 on hub".into());
+            ls.log_ring.lock().unwrap().push(
+                "Starting worker with auth hf_12345678901234567890abcdef1234567890 on hub".into(),
+            );
             servers.insert("test-srv".into(), ls);
         }
 

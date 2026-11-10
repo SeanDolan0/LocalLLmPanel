@@ -170,8 +170,16 @@ pub fn score_variant(
     };
     let target_context = max_context_cap.unwrap_or(arch.context).min(arch.context);
     let ram_known = hw.is_ram_known();
-    let active_ram = if ram_known { hw.ram_usable_mb as f64 } else { 0.0 };
-    let potential_ram = if ram_known { hw.potential_ram_mb() } else { 0.0 };
+    let active_ram = if ram_known {
+        hw.ram_usable_mb as f64
+    } else {
+        0.0
+    };
+    let potential_ram = if ram_known {
+        hw.potential_ram_mb()
+    } else {
+        0.0
+    };
 
     let tiered = estimate::context_fit_tiered(
         usable_vram_mb,
@@ -355,7 +363,7 @@ pub fn score_variant(
             "GPU + RAM Swap ({vram_pct}% VRAM, {ram_pct}% RAM, single-GPU estimate). Estimated {vram_room} context in VRAM extended to ~{ext_limit} via ~{} GB estimated RAM swap buffer.",
             tiered.swap_space_gb
         ),
-        RunMode::CpuOffload => format!( 
+        RunMode::CpuOffload => format!(
             "CPU Offload ({vram_pct}% VRAM, {ram_pct}% RAM, single-GPU estimate). Offloading ~{} GB estimated weights to RAM; usable context estimated at ~{ext_limit}.",
             tiered.cpu_offload_gb
         ),
@@ -1000,7 +1008,10 @@ mod tests {
 
         assert!(res.reason.contains("single-GPU estimate"));
         assert!(res.reason.contains("Estimated room for"));
-        assert!(res.notes.iter().any(|n| n.contains("heuristic estimates (single-GPU estimate)")));
+        assert!(res
+            .notes
+            .iter()
+            .any(|n| n.contains("heuristic estimates (single-GPU estimate)")));
     }
 
     #[test]
@@ -1018,13 +1029,27 @@ mod tests {
         let mut arch = arch_14b();
         arch.params_b = Some(70.0);
         let var = variant("q4_k_m", true);
-        let res = score_variant(&hw_unknown_ram, &var, &arch, None, 0.92, 2500.0, true, None, None);
+        let res = score_variant(
+            &hw_unknown_ram,
+            &var,
+            &arch,
+            None,
+            0.92,
+            2500.0,
+            true,
+            None,
+            None,
+        );
 
         assert_eq!(res.run_mode, RunMode::DoesNotFit);
         assert_eq!(res.swap_space_gb, 0);
         assert_eq!(res.cpu_offload_gb, 0);
-        assert!(res.reason.contains("RAM-overflow disabled because system RAM is unknown"));
-        assert!(res.notes.iter().any(|n| n.contains("System RAM is unknown")));
+        assert!(res
+            .reason
+            .contains("RAM-overflow disabled because system RAM is unknown"));
+        assert!(res
+            .notes
+            .iter()
+            .any(|n| n.contains("System RAM is unknown")));
     }
-
 }

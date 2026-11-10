@@ -260,10 +260,14 @@ pub fn resolve_remote_file_size(
         Ok(resp) => {
             let status = resp.status();
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err("Authentication required (401). Please check Hugging Face token.".to_string());
+                return Err(
+                    "Authentication required (401). Please check Hugging Face token.".to_string(),
+                );
             }
             if status == reqwest::StatusCode::FORBIDDEN {
-                return Err("Access forbidden (403). Repository may be private or gated.".to_string());
+                return Err(
+                    "Access forbidden (403). Repository may be private or gated.".to_string(),
+                );
             }
             if status == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!("File not found on remote (404): {url}"));
@@ -286,7 +290,9 @@ pub fn resolve_remote_file_size(
         get_req = get_req.bearer_auth(t);
     }
 
-    let resp = get_req.send().map_err(|e| format!("Transfer error for {url}: {e}"))?;
+    let resp = get_req
+        .send()
+        .map_err(|e| format!("Transfer error for {url}: {e}"))?;
     let status = resp.status();
 
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -300,7 +306,11 @@ pub fn resolve_remote_file_size(
     }
 
     if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        if let Some(cr) = resp.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
+        if let Some(cr) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+        {
             if let Some(total_str) = cr.split('/').next_back() {
                 if let Ok(total) = total_str.parse::<u64>() {
                     return Ok(total);
@@ -314,14 +324,14 @@ pub fn resolve_remote_file_size(
         }
     }
 
-    Err(format!("Could not determine file size for {url} (HTTP {status})"))
+    Err(format!(
+        "Could not determine file size for {url} (HTTP {status})"
+    ))
 }
 
-pub fn verify_file_sha256(
-    file_path: &Path,
-    cancel_flag: &AtomicBool,
-) -> Result<String, String> {
-    let mut file = std::fs::File::open(file_path).map_err(|e| format!("Cannot open file for hashing: {e}"))?;
+pub fn verify_file_sha256(file_path: &Path, cancel_flag: &AtomicBool) -> Result<String, String> {
+    let mut file =
+        std::fs::File::open(file_path).map_err(|e| format!("Cannot open file for hashing: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 1024 * 1024];
 
@@ -329,7 +339,9 @@ pub fn verify_file_sha256(
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Verification cancelled".to_string());
         }
-        let n = file.read(&mut buf).map_err(|e| format!("Read error during hashing: {e}"))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("Read error during hashing: {e}"))?;
         if n == 0 {
             break;
         }
@@ -370,7 +382,9 @@ fn fetch_repo_lfs_sha256_digests(
     token: Option<&str>,
 ) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let mut next_url = Some(format!("https://huggingface.co/api/models/{repo_id}/tree/{revision}?recursive=true"));
+    let mut next_url = Some(format!(
+        "https://huggingface.co/api/models/{repo_id}/tree/{revision}?recursive=true"
+    ));
     let mut pages = 0;
 
     while let Some(url) = next_url.take() {
@@ -389,7 +403,8 @@ fn fetch_repo_lfs_sha256_digests(
             Err(_) => break,
         };
 
-        next_url = resp.headers()
+        next_url = resp
+            .headers()
             .get(reqwest::header::LINK)
             .and_then(|v| v.to_str().ok())
             .and_then(parse_link_next_url);
@@ -402,7 +417,9 @@ fn fetch_repo_lfs_sha256_digests(
         for item in items {
             if let (Some(path), Some(oid)) = (
                 item.get("path").and_then(|v| v.as_str()),
-                item.get("lfs").and_then(|l| l.get("oid")).and_then(|v| v.as_str()),
+                item.get("lfs")
+                    .and_then(|l| l.get("oid"))
+                    .and_then(|v| v.as_str()),
             ) {
                 map.insert(path.to_string(), oid.to_ascii_lowercase());
                 let filename = path.rsplit('/').next().unwrap_or(path);
@@ -487,7 +504,9 @@ impl DownloadManager {
         let guard = self.jobs.lock().ok()?;
         guard
             .values()
-            .find(|j| j.repo_id.eq_ignore_ascii_case(repo_id) || j.model_id.eq_ignore_ascii_case(repo_id))
+            .find(|j| {
+                j.repo_id.eq_ignore_ascii_case(repo_id) || j.model_id.eq_ignore_ascii_case(repo_id)
+            })
             .cloned()
     }
 
@@ -496,7 +515,8 @@ impl DownloadManager {
         guard
             .values()
             .find(|j| {
-                (j.repo_id.eq_ignore_ascii_case(repo_id) || j.model_id.eq_ignore_ascii_case(repo_id))
+                (j.repo_id.eq_ignore_ascii_case(repo_id)
+                    || j.model_id.eq_ignore_ascii_case(repo_id))
                     && j.quant.eq_ignore_ascii_case(quant)
             })
             .cloned()
@@ -514,7 +534,8 @@ impl DownloadManager {
             let before = guard.len();
             let mut removed_ids = Vec::new();
             guard.retain(|id, job| {
-                let keep = job.status != DownloadStatus::Completed && job.status != DownloadStatus::Cancelled;
+                let keep = job.status != DownloadStatus::Completed
+                    && job.status != DownloadStatus::Cancelled;
                 if !keep {
                     removed_ids.push(id.clone());
                 }
@@ -632,8 +653,8 @@ impl DownloadManager {
             Err(_) => return false,
         };
         guard.values().any(|j| {
-            let id_matches = j.repo_id.eq_ignore_ascii_case(repo_id)
-                || j.model_id.eq_ignore_ascii_case(repo_id);
+            let id_matches =
+                j.repo_id.eq_ignore_ascii_case(repo_id) || j.model_id.eq_ignore_ascii_case(repo_id);
             if !id_matches {
                 return false;
             }
@@ -812,11 +833,14 @@ impl DownloadManager {
                 Err(_) => return,
             };
 
-            let active_count = guard.values().filter(|j| {
-                j.status == DownloadStatus::Downloading
-                    || j.status == DownloadStatus::Resolving
-                    || j.status == DownloadStatus::Verifying
-            }).count();
+            let active_count = guard
+                .values()
+                .filter(|j| {
+                    j.status == DownloadStatus::Downloading
+                        || j.status == DownloadStatus::Resolving
+                        || j.status == DownloadStatus::Verifying
+                })
+                .count();
 
             if active_count >= max {
                 return;
@@ -853,11 +877,18 @@ impl DownloadManager {
                 if let Some(c) = guard.get(&job_id) {
                     (Arc::clone(&c.cancel_flag), Arc::clone(&c.pause_flag))
                 } else {
-                    (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
+                    (
+                        Arc::new(AtomicBool::new(false)),
+                        Arc::new(AtomicBool::new(false)),
+                    )
                 }
             };
 
-            let token = self.tokens.lock().ok().and_then(|t| t.get(&job_id).cloned().flatten());
+            let token = self
+                .tokens
+                .lock()
+                .ok()
+                .and_then(|t| t.get(&job_id).cloned().flatten());
             let mgr = Arc::clone(self);
             std::thread::spawn(move || {
                 mgr.run_gguf_download_worker(job_id, cancel_flag, pause_flag, token);
@@ -968,7 +999,10 @@ impl DownloadManager {
 
         let dest_path = PathBuf::from(&destination_dir);
         if let Err(e) = std::fs::create_dir_all(&dest_path) {
-            self.set_job_error(&job_id, format!("Cannot create folder {}: {e}", dest_path.display()));
+            self.set_job_error(
+                &job_id,
+                format!("Cannot create folder {}: {e}", dest_path.display()),
+            );
             self.cleanup_finished_job(&job_id);
             self.try_start_next_job();
             return;
@@ -999,7 +1033,8 @@ impl DownloadManager {
         }
 
         // A2: Fetch trusted SHA-256 digests from HF Git LFS metadata
-        let expected_sha256 = fetch_repo_lfs_sha256_digests(&client, &repo_id, &revision, token.as_deref());
+        let expected_sha256 =
+            fetch_repo_lfs_sha256_digests(&client, &repo_id, &revision, token.as_deref());
 
         // A8: Resolve remote file sizes using HEAD with ranged GET fallback
         let mut file_sizes = Vec::new();
@@ -1087,7 +1122,9 @@ impl DownloadManager {
                         let expected_hash = expected_sha256.get(file_rel);
                         if let Some(expected_digest) = expected_hash {
                             self.set_job_verifying(&job_id, file_rel, shard_idx + 1);
-                            if let Ok(actual_digest) = verify_file_sha256(&target_final, &cancel_flag) {
+                            if let Ok(actual_digest) =
+                                verify_file_sha256(&target_final, &cancel_flag)
+                            {
                                 if actual_digest.eq_ignore_ascii_case(expected_digest) {
                                     self.set_job_verification_state(&job_id, "verified");
                                     completed_bytes_prior_shards += expected_file_size;
@@ -1146,7 +1183,12 @@ impl DownloadManager {
                     Err(e) => {
                         attempt += 1;
                         if attempt > max_retries {
-                            self.set_job_error(&job_id, format!("Network error for {file_rel} after {max_retries} retries: {e}"));
+                            self.set_job_error(
+                                &job_id,
+                                format!(
+                                    "Network error for {file_rel} after {max_retries} retries: {e}"
+                                ),
+                            );
                             self.cleanup_finished_job(&job_id);
                             self.try_start_next_job();
                             return;
@@ -1169,7 +1211,10 @@ impl DownloadManager {
 
                 // Non-retryable client errors: fail immediately
                 if status == reqwest::StatusCode::UNAUTHORIZED {
-                    self.set_job_error(&job_id, format!("Authentication required (401) for {file_rel}"));
+                    self.set_job_error(
+                        &job_id,
+                        format!("Authentication required (401) for {file_rel}"),
+                    );
                     self.cleanup_finished_job(&job_id);
                     self.try_start_next_job();
                     return;
@@ -1181,7 +1226,10 @@ impl DownloadManager {
                     return;
                 }
                 if status == reqwest::StatusCode::NOT_FOUND {
-                    self.set_job_error(&job_id, format!("File not found on remote (404) for {file_rel}"));
+                    self.set_job_error(
+                        &job_id,
+                        format!("File not found on remote (404) for {file_rel}"),
+                    );
                     self.cleanup_finished_job(&job_id);
                     self.try_start_next_job();
                     return;
@@ -1196,12 +1244,18 @@ impl DownloadManager {
                 {
                     attempt += 1;
                     if attempt > max_retries {
-                        self.set_job_error(&job_id, format!("Server error {status} for {file_rel} after {max_retries} retries"));
+                        self.set_job_error(
+                            &job_id,
+                            format!(
+                                "Server error {status} for {file_rel} after {max_retries} retries"
+                            ),
+                        );
                         self.cleanup_finished_job(&job_id);
                         self.try_start_next_job();
                         return;
                     }
-                    let retry_after = resp.headers()
+                    let retry_after = resp
+                        .headers()
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok());
@@ -1219,7 +1273,8 @@ impl DownloadManager {
                 }
 
                 // A3: Range resume validation
-                let cr_header = resp.headers()
+                let cr_header = resp
+                    .headers()
                     .get(reqwest::header::CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok());
                 let range_check = validate_range_response(status, cr_header, current_offset);
@@ -1228,7 +1283,8 @@ impl DownloadManager {
                     RangeValidation::ValidRangeResume => {
                         // Resuming cleanly from verified offset
                     }
-                    RangeValidation::MismatchRestartFromZero | RangeValidation::FullContentRestartFromZero => {
+                    RangeValidation::MismatchRestartFromZero
+                    | RangeValidation::FullContentRestartFromZero => {
                         // Server ignored range or returned mismatched start offset: restart from 0!
                         let _ = std::fs::remove_file(&target_part);
                         current_offset = 0;
@@ -1240,7 +1296,10 @@ impl DownloadManager {
                         let _ = std::fs::remove_file(&target_part);
                         attempt += 1;
                         if attempt > max_retries {
-                            self.set_job_error(&job_id, format!("Range not satisfiable for {file_rel}"));
+                            self.set_job_error(
+                                &job_id,
+                                format!("Range not satisfiable for {file_rel}"),
+                            );
                             self.cleanup_finished_job(&job_id);
                             self.try_start_next_job();
                             return;
@@ -1248,7 +1307,10 @@ impl DownloadManager {
                         continue;
                     }
                     RangeValidation::InvalidStatus(s) => {
-                        self.set_job_error(&job_id, format!("Unexpected HTTP response {s} for {file_rel}"));
+                        self.set_job_error(
+                            &job_id,
+                            format!("Unexpected HTTP response {s} for {file_rel}"),
+                        );
                         self.cleanup_finished_job(&job_id);
                         self.try_start_next_job();
                         return;
@@ -1264,7 +1326,10 @@ impl DownloadManager {
                 {
                     Ok(f) => f,
                     Err(e) => {
-                        self.set_job_error(&job_id, format!("Cannot write to {}: {e}", target_part.display()));
+                        self.set_job_error(
+                            &job_id,
+                            format!("Cannot write to {}: {e}", target_part.display()),
+                        );
                         self.cleanup_finished_job(&job_id);
                         self.try_start_next_job();
                         return;
@@ -1299,7 +1364,10 @@ impl DownloadManager {
                         Ok(0) => break, // Clean EOF
                         Ok(n) => {
                             if let Err(e) = out_file.write_all(&buf[..n]) {
-                                self.set_job_error(&job_id, format!("Disk write error for {file_rel}: {e}"));
+                                self.set_job_error(
+                                    &job_id,
+                                    format!("Disk write error for {file_rel}: {e}"),
+                                );
                                 self.cleanup_finished_job(&job_id);
                                 self.try_start_next_job();
                                 return;
@@ -1309,9 +1377,11 @@ impl DownloadManager {
 
                             if last_emit.elapsed() >= Duration::from_millis(250) {
                                 let elapsed_sec = start_inst.elapsed().as_secs_f64().max(0.001);
-                                let transferred_this_session = shard_done.saturating_sub(current_offset);
+                                let transferred_this_session =
+                                    shard_done.saturating_sub(current_offset);
                                 let speed = transferred_this_session as f64 / elapsed_sec;
-                                let remaining = aggregate_total_bytes.saturating_sub(aggregate_done);
+                                let remaining =
+                                    aggregate_total_bytes.saturating_sub(aggregate_done);
                                 let eta = if speed > 1024.0 {
                                     Some(remaining as f64 / speed)
                                 } else {
@@ -1350,7 +1420,10 @@ impl DownloadManager {
                             }
                             attempt += 1;
                             if attempt > max_retries {
-                                self.set_job_error(&job_id, format!("Transfer read stalled for {file_rel}: {e}"));
+                                self.set_job_error(
+                                    &job_id,
+                                    format!("Transfer read stalled for {file_rel}: {e}"),
+                                );
                                 self.cleanup_finished_job(&job_id);
                                 self.try_start_next_job();
                                 return;
@@ -1382,7 +1455,9 @@ impl DownloadManager {
             let expected_hash = expected_sha256.get(file_rel);
             self.set_job_verifying(&job_id, file_rel, shard_idx + 1);
 
-            let actual_size = std::fs::metadata(&target_part).map(|m| m.len()).unwrap_or(0);
+            let actual_size = std::fs::metadata(&target_part)
+                .map(|m| m.len())
+                .unwrap_or(0);
             if expected_file_size > 0 && actual_size != expected_file_size {
                 self.set_job_error(
                     &job_id,
@@ -1410,7 +1485,10 @@ impl DownloadManager {
                         self.set_job_verification_state(&job_id, "verified");
                     }
                     Err(e) => {
-                        self.set_job_error(&job_id, format!("Integrity check failed for {file_rel}: {e}"));
+                        self.set_job_error(
+                            &job_id,
+                            format!("Integrity check failed for {file_rel}: {e}"),
+                        );
                         self.cleanup_finished_job(&job_id);
                         self.try_start_next_job();
                         return;
@@ -1578,14 +1656,7 @@ mod tests {
             let q = quant.to_string();
             let f = files.clone();
             let handle = std::thread::spawn(move || {
-                mgr.enqueue_gguf_job_internal(
-                    r.clone(),
-                    r,
-                    q,
-                    f,
-                    "C:/dummy/path".to_string(),
-                    None,
-                )
+                mgr.enqueue_gguf_job_internal(r.clone(), r, q, f, "C:/dummy/path".to_string(), None)
             });
             handles.push(handle);
         }
@@ -1607,8 +1678,15 @@ mod tests {
             }
         }
 
-        assert_eq!(successes, 1, "Exactly one thread must succeed in registration");
-        assert_eq!(rejected, num_threads - 1, "All conflicting threads must be rejected");
+        assert_eq!(
+            successes, 1,
+            "Exactly one thread must succeed in registration"
+        );
+        assert_eq!(
+            rejected,
+            num_threads - 1,
+            "All conflicting threads must be rejected"
+        );
         assert!(job_id.starts_with("job-"), "Job ID must have job- prefix");
         assert_eq!(job_id.len(), 40, "Job ID must contain full UUID v4");
     }
@@ -1632,25 +1710,19 @@ mod tests {
         assert_eq!(check2, RangeValidation::MismatchRestartFromZero);
 
         // Case 3: Server ignored range header and returned 200 OK -> FullContentRestartFromZero
-        let check3 = validate_range_response(
-            reqwest::StatusCode::OK,
-            None,
-            1000,
-        );
+        let check3 = validate_range_response(reqwest::StatusCode::OK, None, 1000);
         assert_eq!(check3, RangeValidation::FullContentRestartFromZero);
 
         // Case 4: Server returned 416 Range Not Satisfiable -> RangeNotSatisfiable
-        let check4 = validate_range_response(
-            reqwest::StatusCode::RANGE_NOT_SATISFIABLE,
-            None,
-            1000,
-        );
+        let check4 =
+            validate_range_response(reqwest::StatusCode::RANGE_NOT_SATISFIABLE, None, 1000);
         assert_eq!(check4, RangeValidation::RangeNotSatisfiable);
     }
 
     #[test]
     fn test_checksum_mismatch_not_promoted() {
-        let temp_dir = std::env::temp_dir().join(format!("llm_panel_test_{}", crate::state::now_ms()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("llm_panel_test_{}", crate::state::now_ms()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let target_final = temp_dir.join("test_model.gguf");
@@ -1660,7 +1732,8 @@ mod tests {
         std::fs::write(&target_part, test_payload).unwrap();
 
         // Deliberately incorrect SHA-256 digest
-        let expected_wrong_sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+        let expected_wrong_sha256 =
+            "0000000000000000000000000000000000000000000000000000000000000000";
         let cancel_flag = AtomicBool::new(false);
 
         let actual_hash = verify_file_sha256(&target_part, &cancel_flag).unwrap();
@@ -1673,7 +1746,10 @@ mod tests {
             let _ = std::fs::rename(&target_part, &target_final);
         }
 
-        assert!(!target_final.exists(), "Corrupt part must NOT be promoted to final file");
+        assert!(
+            !target_final.exists(),
+            "Corrupt part must NOT be promoted to final file"
+        );
         assert!(!target_part.exists(), "Corrupt part must be removed");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1693,7 +1769,9 @@ mod tests {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                    if line.trim().is_empty() { break; }
+                    if line.trim().is_empty() {
+                        break;
+                    }
                     line.clear();
                 }
                 let resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1705,7 +1783,9 @@ mod tests {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                    if line.trim().is_empty() { break; }
+                    if line.trim().is_empty() {
+                        break;
+                    }
                     line.clear();
                 }
                 let resp = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1717,7 +1797,9 @@ mod tests {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                    if line.trim().is_empty() { break; }
+                    if line.trim().is_empty() {
+                        break;
+                    }
                     line.clear();
                 }
                 let body = "Recovered after retries";
@@ -1753,13 +1835,21 @@ mod tests {
             };
 
             let status = resp.status();
-            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
                 attempt += 1;
-                let retry_after = resp.headers()
+                let retry_after = resp
+                    .headers()
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok());
-                assert!(wait_for_retry(&cancel_flag, &pause_flag, attempt, retry_after));
+                assert!(wait_for_retry(
+                    &cancel_flag,
+                    &pause_flag,
+                    attempt,
+                    retry_after
+                ));
                 continue;
             }
 
@@ -1770,7 +1860,10 @@ mod tests {
         }
 
         assert_eq!(final_body, "Recovered after retries");
-        assert_eq!(attempt, 2, "Should have retried exactly twice before success");
+        assert_eq!(
+            attempt, 2,
+            "Should have retried exactly twice before success"
+        );
     }
 
     #[test]
@@ -1786,10 +1879,13 @@ mod tests {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                    if line.trim().is_empty() { break; }
+                    if line.trim().is_empty() {
+                        break;
+                    }
                     line.clear();
                 }
-                let header = "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n";
+                let header =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(header.as_bytes());
                 let _ = stream.flush();
                 // Send initial chunk
@@ -1847,7 +1943,11 @@ mod tests {
         cancel_flag.store(true, Ordering::SeqCst);
 
         let result = handle.join().unwrap();
-        assert_eq!(result, Err("Cancelled"), "Download must promptly abort on cancel");
+        assert_eq!(
+            result,
+            Err("Cancelled"),
+            "Download must promptly abort on cancel"
+        );
     }
 
     #[test]
@@ -1922,7 +2022,10 @@ mod tests {
 
         // try_start_next_job should respect max_concurrent = 1 and NOT promote job2 yet
         manager.try_start_next_job();
-        assert_eq!(manager.get_job("job-queued-2").unwrap().status, DownloadStatus::Queued);
+        assert_eq!(
+            manager.get_job("job-queued-2").unwrap().status,
+            DownloadStatus::Queued
+        );
 
         // When job1 completes, try_start_next_job promotes job2
         {
@@ -1933,7 +2036,10 @@ mod tests {
         }
 
         manager.try_start_next_job();
-        assert_eq!(manager.get_job("job-queued-2").unwrap().status, DownloadStatus::Resolving);
+        assert_eq!(
+            manager.get_job("job-queued-2").unwrap().status,
+            DownloadStatus::Resolving
+        );
     }
 
     #[test]

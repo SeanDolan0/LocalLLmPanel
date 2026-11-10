@@ -59,7 +59,10 @@ fn test_live_wsl_provisioning_verify() {
     );
 
     // 2. Check NVIDIA driver inside WSL via nvidia-smi
-    let smi = llm_panel_lib::wsl::run_script(&distro, "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader");
+    let smi = llm_panel_lib::wsl::run_script(
+        &distro,
+        "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader",
+    );
     assert!(
         smi.ok,
         "nvidia-smi failed inside WSL2. Ensure NVIDIA CUDA WSL drivers are installed on Windows host: {}",
@@ -184,6 +187,9 @@ async fn test_live_crash_recovery() {
     assert!(!running, "Server should not be running after cleanup");
 
     let port_listening = is_port_listening(test_port);
-    assert!(!port_listening, "Port {test_port} must be free after crash/stop");
+    assert!(
+        !port_listening,
+        "Port {test_port} must be free after crash/stop"
+    );
     println!("[GPU/WSL] Crash recovery and port reclamation verified.");
 }

@@ -20,11 +20,22 @@ pub struct ProvisionReport {
 /// Distinct failure states encountered when verifying GPU and runtime capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyFailure {
-    DriverNotVisible { diagnostic: String },
-    NoGpuInWsl { diagnostic: String },
-    TorchImportFailed { diagnostic: String },
-    CudaUnavailable { diagnostic: String, torch_version: Option<String> },
-    NoWorkingGpu { diagnostic: String },
+    DriverNotVisible {
+        diagnostic: String,
+    },
+    NoGpuInWsl {
+        diagnostic: String,
+    },
+    TorchImportFailed {
+        diagnostic: String,
+    },
+    CudaUnavailable {
+        diagnostic: String,
+        torch_version: Option<String>,
+    },
+    NoWorkingGpu {
+        diagnostic: String,
+    },
 }
 
 impl std::fmt::Display for VerifyFailure {
@@ -96,9 +107,13 @@ pub fn parse_verify_result(
             || combined.contains("not found")
             || !smi_ok
         {
-            return Err(VerifyFailure::DriverNotVisible { diagnostic: combined });
+            return Err(VerifyFailure::DriverNotVisible {
+                diagnostic: combined,
+            });
         }
-        return Err(VerifyFailure::NoGpuInWsl { diagnostic: combined });
+        return Err(VerifyFailure::NoGpuInWsl {
+            diagnostic: combined,
+        });
     }
 
     let first_line = trimmed_smi.lines().next().unwrap_or("").trim();
@@ -111,7 +126,9 @@ pub fn parse_verify_result(
     // 2. Check PyTorch execution in the venv
     if !torch_ok {
         let combined = format!("{torch_stdout}\n{torch_stderr}").trim().to_string();
-        return Err(VerifyFailure::TorchImportFailed { diagnostic: combined });
+        return Err(VerifyFailure::TorchImportFailed {
+            diagnostic: combined,
+        });
     }
 
     let lines: Vec<&str> = torch_stdout.lines().collect();
@@ -172,9 +189,7 @@ pub fn provision_all(
     } else {
         on_log(
             "distro",
-            &format!(
-                "distro '{distro}' not found, installing dedicated distro…"
-            ),
+            &format!("distro '{distro}' not found, installing dedicated distro…"),
         );
         let installed = wsl::ensure_app_distro(|msg| on_log("distro", msg))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -186,9 +201,7 @@ pub fn provision_all(
     if !wsl::is_apt_distro(&effective_distro) {
         on_log(
             "distro",
-            &format!(
-                "distro '{effective_distro}' is not apt-based, installing dedicated distro…"
-            ),
+            &format!("distro '{effective_distro}' is not apt-based, installing dedicated distro…"),
         );
         let installed = wsl::ensure_app_distro(|msg| on_log("distro", msg))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -210,9 +223,8 @@ pub fn provision_all(
         ..report
     };
     if let Ok(json) = serde_json::to_string(&full_report) {
-        let marker = format!(
-            "mkdir -p ~/llm-lp && cat << 'EOF' > ~/llm-lp/.provisioned\n{json}\nEOF"
-        );
+        let marker =
+            format!("mkdir -p ~/llm-lp && cat << 'EOF' > ~/llm-lp/.provisioned\n{json}\nEOF");
         let _ = wsl::run_script(&effective_distro, &marker);
     }
 
@@ -229,9 +241,15 @@ fn venv_assignment(venv_dir: &str) -> String {
 
 fn phase_distro(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<String> {
     on_log("distro", &format!("checking distro '{distro}'…"));
-    let res = wsl::run_script(distro, "uname -a; lsb_release -d 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME");
+    let res = wsl::run_script(
+        distro,
+        "uname -a; lsb_release -d 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME",
+    );
     if !res.ok {
-        bail!("failed to run basic commands inside WSL distro '{distro}': {}", res.combined());
+        bail!(
+            "failed to run basic commands inside WSL distro '{distro}': {}",
+            res.combined()
+        );
     }
     let first = res.stdout.lines().next().unwrap_or("");
     on_log("distro", &format!("running on {first}"));
@@ -252,7 +270,10 @@ fn phase_sudo(distro: &str, on_log: &mut impl FnMut(&str, &str)) -> Result<Strin
     "#;
     let out = wsl::run_script_root(distro, script);
     if !out.ok {
-        bail!("failed to configure scoped passwordless sudo via root: {}", out.combined());
+        bail!(
+            "failed to configure scoped passwordless sudo via root: {}",
+            out.combined()
+        );
     }
     if !sudo_nopasswd_ok(distro) {
         bail!("scoped passwordless sudo configured, but verify failed");
@@ -282,7 +303,10 @@ fi
 "#;
     let has = wsl::run_script(distro, check_script);
     if has.ok && !has.stdout.contains("NOT_INSTALLED") && has.stdout.contains("uv ") {
-        on_log("uv", &format!("uv already installed: {} (skipping)", has.stdout.trim()));
+        on_log(
+            "uv",
+            &format!("uv already installed: {} (skipping)", has.stdout.trim()),
+        );
         return Ok("uv".into());
     }
 
@@ -301,7 +325,10 @@ UV_BIN=$(command -v uv 2>/dev/null || ( [ -x "$HOME/.local/bin/uv" ] && echo "$H
         return Ok("uv".into());
     }
 
-    on_log("uv", "official installer verification failed; attempting apt fallback…");
+    on_log(
+        "uv",
+        "official installer verification failed; attempting apt fallback…",
+    );
     let fallback_script = r#"set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -y -qq
@@ -320,7 +347,13 @@ uv --version
             verify_fallback.combined().trim()
         );
     }
-    on_log("uv", &format!("uv installed via fallback: {}", verify_fallback.stdout.trim()));
+    on_log(
+        "uv",
+        &format!(
+            "uv installed via fallback: {}",
+            verify_fallback.stdout.trim()
+        ),
+    );
     Ok("uv".into())
 }
 
@@ -454,12 +487,18 @@ pub fn transactional_venv_operation(
     let op_out = wsl::run_script_stream(distro, script_to_run, |l| on_log("venv-op", l));
     if op_out.ok {
         if backup_created {
-            let _ = wsl::run_script(distro, &format!("{}rm -rf \"$venv_dir.bak\"", venv_assignment(venv_dir)));
+            let _ = wsl::run_script(
+                distro,
+                &format!("{}rm -rf \"$venv_dir.bak\"", venv_assignment(venv_dir)),
+            );
         }
         Ok(())
     } else {
         if backup_created {
-            on_log("transactional-venv", "operation failed; rolling back venv to backup snapshot…");
+            on_log(
+                "transactional-venv",
+                "operation failed; rolling back venv to backup snapshot…",
+            );
             let rollback_script = format!(
                 "{}rm -rf \"$venv_dir\" && mv \"$venv_dir.bak\" \"$venv_dir\"",
                 venv_assignment(venv_dir)
@@ -574,7 +613,11 @@ pub fn phase_cuda_build_tools_with_venv(
     );
     let py_ver_out = wsl::run_script(distro, &py_ver_cmd);
     let py_ver = py_ver_out.stdout.trim().to_string();
-    let py_ver = if py_ver.is_empty() { "3.12".to_string() } else { py_ver };
+    let py_ver = if py_ver.is_empty() {
+        "3.12".to_string()
+    } else {
+        py_ver
+    };
 
     let check_script = format!(
         r#"{venv_assignment}
@@ -614,7 +657,9 @@ test -f /usr/include/python{py_ver}/Python.h && echo "python_dev=yes" || ( "$ven
 
     on_log(
         "cuda-tools",
-        &format!("Installing CUDA build tools (gcc, python{py_ver}-dev, ninja-build, CUDA toolkit)…"),
+        &format!(
+            "Installing CUDA build tools (gcc, python{py_ver}-dev, ninja-build, CUDA toolkit)…"
+        ),
     );
     on_log("cuda-tools", "⚠ This downloads several GB and may take 5-15 minutes. First FlashInfer JIT compile will be slow.");
 
@@ -733,11 +778,16 @@ mod tests {
         let smi_out = "NVIDIA GeForce RTX 4090, 24564 MiB, 560.94\n";
         let torch_out = "2.5.1+cu124\nTrue\nNVIDIA GeForce RTX 4090\n25757220864\nTrue\n";
         let res = parse_verify_result(
-            true, smi_out, "",
-            true, torch_out, "",
+            true,
+            smi_out,
+            "",
+            true,
+            torch_out,
+            "",
             Some("0.7.3".into()),
             "Ubuntu-24.04",
-        ).expect("should succeed with working GPU");
+        )
+        .expect("should succeed with working GPU");
 
         assert_eq!(res.vllm_version.as_deref(), Some("0.7.3"));
         assert_eq!(res.torch_version.as_deref(), Some("2.5.1+cu124"));
@@ -749,14 +799,20 @@ mod tests {
 
     #[test]
     fn test_parse_verify_result_driver_not_visible() {
-        let smi_err = "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.";
+        let smi_err =
+            "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.";
         let torch_out = "2.5.1+cu124\nFalse\nn/a\n0\nFalse\n";
         let err = parse_verify_result(
-            false, "", smi_err,
-            true, torch_out, "",
+            false,
+            "",
+            smi_err,
+            true,
+            torch_out,
+            "",
             None,
             "Ubuntu-24.04",
-        ).unwrap_err();
+        )
+        .unwrap_err();
 
         match err {
             VerifyFailure::DriverNotVisible { diagnostic } => {
@@ -770,12 +826,8 @@ mod tests {
     fn test_parse_verify_result_no_gpu_in_wsl() {
         let smi_out = "";
         let torch_out = "2.5.1+cu124\nFalse\nn/a\n0\nFalse\n";
-        let err = parse_verify_result(
-            true, smi_out, "",
-            true, torch_out, "",
-            None,
-            "Ubuntu-24.04",
-        ).unwrap_err();
+        let err = parse_verify_result(true, smi_out, "", true, torch_out, "", None, "Ubuntu-24.04")
+            .unwrap_err();
 
         match err {
             VerifyFailure::NoGpuInWsl { .. } => {}
@@ -788,11 +840,16 @@ mod tests {
         let smi_out = "NVIDIA GeForce RTX 4090, 24564 MiB, 560.94\n";
         let torch_err = "ModuleNotFoundError: No module named 'torch'";
         let err = parse_verify_result(
-            true, smi_out, "",
-            false, "", torch_err,
+            true,
+            smi_out,
+            "",
+            false,
+            "",
+            torch_err,
             None,
             "Ubuntu-24.04",
-        ).unwrap_err();
+        )
+        .unwrap_err();
 
         match err {
             VerifyFailure::TorchImportFailed { diagnostic } => {
@@ -806,12 +863,8 @@ mod tests {
     fn test_parse_verify_result_cuda_unavailable() {
         let smi_out = "NVIDIA GeForce RTX 4090, 24564 MiB, 560.94\n";
         let torch_out = "2.5.1+cpu\nFalse\nn/a\n0\nFalse\n";
-        let err = parse_verify_result(
-            true, smi_out, "",
-            true, torch_out, "",
-            None,
-            "Ubuntu-24.04",
-        ).unwrap_err();
+        let err = parse_verify_result(true, smi_out, "", true, torch_out, "", None, "Ubuntu-24.04")
+            .unwrap_err();
 
         match err {
             VerifyFailure::CudaUnavailable { torch_version, .. } => {

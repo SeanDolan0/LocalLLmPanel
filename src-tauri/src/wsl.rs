@@ -208,7 +208,7 @@ pub fn get_wsl_version() -> Option<(u32, u32, u32)> {
 /// Returns the distro name (always APP_DISTRO_NAME on success).
 pub fn ensure_app_distro(mut on_log: impl FnMut(&str)) -> Result<String, String> {
     let distros = installed_distros();
-        if distros.contains(&APP_DISTRO_NAME.to_string()) {
+    if distros.contains(&APP_DISTRO_NAME.to_string()) {
         on_log(&format!("distro '{}' already installed", APP_DISTRO_NAME));
         return Ok(APP_DISTRO_NAME.to_string());
     }
@@ -904,7 +904,10 @@ pub fn spawn_script_via_stdin(
 
     // Write script content to stdin, then close stdin (EOF signals end to cat)
     if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(script.as_bytes()).and_then(|()| stdin.flush()) {
+        if let Err(e) = stdin
+            .write_all(script.as_bytes())
+            .and_then(|()| stdin.flush())
+        {
             let _ = child.kill();
             let _ = child.wait();
             let cleanup = format!("rm -f -- {}", shell_quote_wsl(&script_path));
@@ -1183,7 +1186,8 @@ mod tests {
 
     #[test]
     fn test_parse_gpu_snapshots_multi_gpu() {
-        let sample = "NVIDIA GeForce RTX 4090, 24576, 20480, 15\nNVIDIA GeForce RTX 4080, 16384, 14000, 5\n";
+        let sample =
+            "NVIDIA GeForce RTX 4090, 24576, 20480, 15\nNVIDIA GeForce RTX 4080, 16384, 14000, 5\n";
         let snaps = parse_gpu_snapshots(sample);
         assert_eq!(snaps.len(), 2);
         assert_eq!(snaps[0].name, "NVIDIA GeForce RTX 4090");
@@ -1332,7 +1336,10 @@ sys.stdout.flush()
             .spawn()
             .expect("spawn dummy cmd");
         #[cfg(not(windows))]
-        let child = Command::new("sleep").arg("10").spawn().expect("spawn dummy");
+        let child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn dummy");
 
         let mut wsl_child = WslChild::mock_with_guard(child, guard);
         assert!(wsl_child.has_active_guard());
@@ -1398,10 +1405,18 @@ sys.stdout.flush()
         ];
 
         for (lang, txt) in fixtures {
-            assert!(verbose_state_is_running(txt, "Ubuntu-24.04"), "Failed on {lang} running");
-            assert!(!verbose_state_is_running(txt, "docker-desktop"), "Failed on {lang} stopped");
-            assert!(!verbose_state_is_running(txt, "Nonexistent"), "Failed on {lang} nonexistent");
+            assert!(
+                verbose_state_is_running(txt, "Ubuntu-24.04"),
+                "Failed on {lang} running"
+            );
+            assert!(
+                !verbose_state_is_running(txt, "docker-desktop"),
+                "Failed on {lang} stopped"
+            );
+            assert!(
+                !verbose_state_is_running(txt, "Nonexistent"),
+                "Failed on {lang} nonexistent"
+            );
         }
     }
-
 }

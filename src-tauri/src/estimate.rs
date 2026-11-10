@@ -603,7 +603,6 @@ pub fn parse_params_from_index(
     Some(total / divisor / 1e9)
 }
 
-
 /// Parse a version string (e.g., "0.7.3", "v0.6.0.post1") into (major, minor, patch).
 pub fn parse_version_tuple(version_str: &str) -> Option<(u32, u32, u32)> {
     let cleaned = version_str.trim().trim_start_matches('v');
@@ -660,7 +659,9 @@ pub fn parse_wslconfig_memory(content: &str) -> Option<u64> {
                         if let Ok(n) = gb.trim().parse::<u64>() {
                             return Some(n * 1024);
                         }
-                    } else if let Some(mb) = lower.strip_suffix("mb").or_else(|| lower.strip_suffix("m")) {
+                    } else if let Some(mb) =
+                        lower.strip_suffix("mb").or_else(|| lower.strip_suffix("m"))
+                    {
                         if let Ok(n) = mb.trim().parse::<u64>() {
                             return Some(n);
                         }
@@ -1153,9 +1154,18 @@ mod tests {
 
     #[test]
     fn test_vllm_kv_offloading_flag_version_gating() {
-        assert_eq!(super::vllm_kv_offloading_flag(Some("0.7.3")), "--kv-offloading-size");
-        assert_eq!(super::vllm_kv_offloading_flag(Some("0.6.0")), "--kv-offloading-size");
-        assert_eq!(super::vllm_kv_offloading_flag(Some("0.5.4")), "--swap-space");
+        assert_eq!(
+            super::vllm_kv_offloading_flag(Some("0.7.3")),
+            "--kv-offloading-size"
+        );
+        assert_eq!(
+            super::vllm_kv_offloading_flag(Some("0.6.0")),
+            "--kv-offloading-size"
+        );
+        assert_eq!(
+            super::vllm_kv_offloading_flag(Some("0.5.4")),
+            "--swap-space"
+        );
         assert_eq!(super::vllm_kv_offloading_flag(None), "--kv-offloading-size");
     }
 
@@ -1171,14 +1181,18 @@ mod tests {
         assert_eq!(super::parse_wslconfig_memory(sample_commented), Some(12288));
 
         let sample_other_section = "[experimental]\nmemory=32GB\n[wsl2]\nmemory=4GB\n";
-        assert_eq!(super::parse_wslconfig_memory(sample_other_section), Some(4096));
+        assert_eq!(
+            super::parse_wslconfig_memory(sample_other_section),
+            Some(4096)
+        );
     }
 
     #[test]
     fn test_estimate_wsl_memory_from_host() {
         // With .wslconfig
         let wslcfg = "[wsl2]\nmemory=24GB\n";
-        let (total, avail) = super::estimate_wsl_memory_from_host(Some(65536), Some(wslcfg)).unwrap();
+        let (total, avail) =
+            super::estimate_wsl_memory_from_host(Some(65536), Some(wslcfg)).unwrap();
         assert_eq!(total, 24576);
         assert_eq!(avail, 18432);
 
@@ -1190,5 +1204,4 @@ mod tests {
         // Unknown host RAM and no .wslconfig preserves None
         assert!(super::estimate_wsl_memory_from_host(None, None).is_none());
     }
-
 }

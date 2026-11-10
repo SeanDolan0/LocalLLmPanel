@@ -20,14 +20,21 @@ fn get_repo_root() -> std::path::PathBuf {
 fn test_all_tauri_commands_registered_in_lib() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let lib_rs = fs::read_to_string(manifest_dir.join("src/lib.rs")).expect("read lib.rs");
-    let commands_rs = fs::read_to_string(manifest_dir.join("src/commands.rs")).expect("read commands.rs");
+    let commands_rs =
+        fs::read_to_string(manifest_dir.join("src/commands.rs")).expect("read commands.rs");
 
     let registered_handlers: HashSet<String> = lib_rs
         .lines()
         .filter_map(|l| {
             let trimmed = l.trim();
             if trimmed.starts_with("commands::") {
-                Some(trimmed.trim_start_matches("commands::").trim_end_matches(',').trim().to_string())
+                Some(
+                    trimmed
+                        .trim_start_matches("commands::")
+                        .trim_end_matches(',')
+                        .trim()
+                        .to_string(),
+                )
             } else {
                 None
             }
@@ -54,7 +61,10 @@ fn test_all_tauri_commands_registered_in_lib() {
         }
     }
 
-    assert!(!command_names.is_empty(), "Failed to discover tauri commands");
+    assert!(
+        !command_names.is_empty(),
+        "Failed to discover tauri commands"
+    );
 
     let mut unregistered = Vec::new();
     for cmd in &command_names {
@@ -81,7 +91,13 @@ fn test_frontend_invokes_match_backend_commands() {
         .filter_map(|l| {
             let trimmed = l.trim();
             if trimmed.starts_with("commands::") {
-                Some(trimmed.trim_start_matches("commands::").trim_end_matches(',').trim().to_string())
+                Some(
+                    trimmed
+                        .trim_start_matches("commands::")
+                        .trim_end_matches(',')
+                        .trim()
+                        .to_string(),
+                )
             } else {
                 None
             }
@@ -90,7 +106,8 @@ fn test_frontend_invokes_match_backend_commands() {
 
     // Extract invoke targets from api.ts using regex
     let mut invoked_commands = HashSet::new();
-    let invoke_re = regex_lite::Regex::new(r#"invoke\s*(?:<[\s\S]*?>)?\s*\(\s*["']([^"']+)["']"#).unwrap();
+    let invoke_re =
+        regex_lite::Regex::new(r#"invoke\s*(?:<[\s\S]*?>)?\s*\(\s*["']([^"']+)["']"#).unwrap();
     for cap in invoke_re.captures_iter(&api_ts) {
         let cmd = &cap[1];
         if !cmd.is_empty() && !cmd.starts_with('.') && !cmd.starts_with('/') {
@@ -98,7 +115,10 @@ fn test_frontend_invokes_match_backend_commands() {
         }
     }
 
-    assert!(!invoked_commands.is_empty(), "Failed to discover invoke calls in api.ts");
+    assert!(
+        !invoked_commands.is_empty(),
+        "Failed to discover invoke calls in api.ts"
+    );
 
     for cmd in &invoked_commands {
         assert!(
