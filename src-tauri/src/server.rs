@@ -2832,15 +2832,69 @@ pub fn list_servers(
         .collect()
 }
 
+/// Estimated weight footprint in GB of a server definition: (main_model_gb, speculative_gb).
+///
+/// Accounts for both the main model weights and any speculative decoding draft model weights.
+/// Context / KV-cache memory is explicitly excluded.
+pub fn server_weights_gb(def: &ServerDef) -> (f64, f64) {
+    let mut main_weight = 0.0;
+    if let Some(p) = def.params_b.filter(|p| *p > 0.0) {
+        main_weight = estimate::weight_gb(p, &def.quant);
+    } else if let Some(p) = estimate::parse_params_from_name(&def.model_id) {
+        main_weight = estimate::weight_gb(p, &def.quant);
+    } else if let Some(ref path) = def.model_path {
+        if let Ok(meta) = std::fs::metadata(path) {
+            main_weight = meta.len() as f64 / 1_073_741_824.0;
+        } else if let Some(p) = estimate::parse_params_from_name(path) {
+            main_weight = estimate::weight_gb(p, if def.backend == "llamacpp" { "gguf" } else { &def.quant });
+        }
+    }
+
+    let mut spec_weight = 0.0;
+    if def.speculative_enabled {
+        if let Some(ref path) = def.speculative_model_path {
+            if let Ok(meta) = std::fs::metadata(path) {
+                spec_weight = meta.len() as f64 / 1_073_741_824.0;
+            } else if let Some(p) = estimate::parse_params_from_name(path) {
+                spec_weight = estimate::weight_gb(p, "gguf");
+            }
+        }
+        if spec_weight == 0.0 {
+            if let Some(ref model) = def.speculative_model {
+                if let Ok(meta) = std::fs::metadata(model) {
+                    spec_weight = meta.len() as f64 / 1_073_741_824.0;
+                } else if let Some(p) = estimate::parse_params_from_name(model) {
+                    let quant = if def.backend == "llamacpp" { "gguf" } else { "fp16" };
+                    spec_weight = estimate::weight_gb(p, quant);
+                }
+            }
+        }
+    }
+
+    (main_weight, spec_weight)
+}
+
+/// Estimated weight breakdown (total_gb, main_model_gb, speculative_gb)
+/// of all RUNNING servers — for the VRAM guidance bar vs. current free VRAM.
+pub fn running_weights_breakdown(state: &Arc<AppState>) -> (f64, f64, f64) {
+    let servers = state.servers.lock().unwrap();
+    let mut total_main = 0.0;
+    let mut total_spec = 0.0;
+    for ls in servers.values() {
+        if ls.status != ServerStatus::Running {
+            continue;
+        }
+        let (main_w, spec_w) = server_weights_gb(&ls.def);
+        total_main += main_w;
+        total_spec += spec_w;
+    }
+    (total_main + total_spec, total_main, total_spec)
+}
+
 /// Estimated weight footprint (GB) of all RUNNING servers — for the VRAM
 /// guidance bar vs. current free VRAM.
 pub fn running_weight_gb(state: &Arc<AppState>) -> f64 {
-    let servers = state.servers.lock().unwrap();
-    servers
-        .values()
-        .filter(|ls| ls.status == ServerStatus::Running && ls.def.params_b.is_some())
-        .map(|ls| estimate::weight_gb(ls.def.params_b.unwrap_or(0.0), &ls.def.quant))
-        .sum()
+    running_weights_breakdown(state).0
 }
 
 pub fn apply_vllm_auth(
@@ -5090,5 +5144,30 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let script = launch_script("~/llm-lp/.venv", &d, "", &adv, &BTreeMap::new());
         assert!(script.contains("--api-key 'test-vllm-dpapi-key'"));
         assert!(!script.contains("dpapi:"));
+    }
+
+    #[test]
+    fn test_server_weights_and_speculative_breakdown() {
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8125, "fp16", None);
+        d.params_b = Some(7.0);
+        let (main_w, spec_w) = server_weights_gb(&d);
+        assert!((main_w - 14.0).abs() < 1e-4);
+        assert_eq!(spec_w, 0.0);
+
+        // Enable speculative decoding with a 0.5B draft model
+        d.speculative_enabled = true;
+        d.speculative_model = Some("Qwen/Qwen2.5-0.5B-Instruct".into());
+        let (main_w, spec_w) = server_weights_gb(&d);
+        assert!((main_w - 14.0).abs() < 1e-4);
+        assert!((spec_w - 1.0).abs() < 1e-4);
+
+        // GGUF model with parseable name and draft path
+        let mut llama_d = def("unsloth/Qwen3.8-27B-GGUF", "instruct", 8126, "gguf", None);
+        llama_d.backend = "llamacpp".into();
+        llama_d.speculative_enabled = true;
+        llama_d.speculative_model_path = Some("C:\\models\\Qwen2.5-1.5B-draft.gguf".into());
+        let (main_w, spec_w) = server_weights_gb(&llama_d);
+        assert!((main_w - 14.85).abs() < 1e-4);
+        assert!((spec_w - 0.825).abs() < 1e-4);
     }
 }

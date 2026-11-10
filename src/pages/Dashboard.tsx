@@ -183,19 +183,39 @@ export default function Dashboard() {
       <FirstRunDiagnosticCard onOpenTrustModal={() => setShowTrustModal(true)} />
 
       {/* VRAM Pressure Alert */}
-      {gpu && (freeGb < 1.0 || (env && env.running_weight_gb > 0 && env.running_weight_gb > freeGb)) && (
-        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-amber-200 shadow-sm flex items-start gap-3">
-          <span className="text-xl">⚠️</span>
-          <div>
-            <div className="font-semibold text-amber-100">VRAM Pressure Warning</div>
-            <div className="text-xs text-amber-300/90 mt-0.5">
-              {freeGb < 1.0
-                ? `Critical VRAM headroom: only ${fmtNum(freeGb, 2)} GB free remaining. High risk of CUDA out-of-memory errors or fallback to CPU swap.`
-                : `Active model weights (${fmtGB(env?.running_weight_gb || 0)}) exceed available GPU VRAM headroom (${fmtNum(freeGb, 1)} GB free). Offloading to RAM or swap may be active.`}
+      {gpu && (freeGb < 1.0 || (env && env.running_weight_gb > 0 && env.running_weight_gb > freeGb)) && (() => {
+        const activeWeight = env?.running_weight_gb || 0;
+        const mainWeight = env?.running_model_weight_gb || 0;
+        const specWeight = env?.running_speculative_weight_gb || 0;
+        const loadedIntoRamGb = Math.max(0, activeWeight - freeGb);
+        const isLoadedIntoRam = activeWeight > 0 && loadedIntoRamGb > 0.01;
+
+        return (
+          <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-amber-200 shadow-sm flex items-start gap-3">
+            <span className="text-xl">⚠️</span>
+            <div>
+              <div className="font-semibold text-amber-100">
+                {isLoadedIntoRam
+                  ? "Low VRAM Warning — Model Loaded into System RAM"
+                  : "Low VRAM Available Warning"}
+              </div>
+              <div className="text-xs text-amber-300/90 mt-0.5">
+                {isLoadedIntoRam ? (
+                  <>
+                    Active model weights ({fmtGB(activeWeight)}
+                    {specWeight > 0 ? ` [model: ${fmtGB(mainWeight)}, speculative draft: ${fmtGB(specWeight)}]` : ""}
+                    ) exceed available GPU VRAM headroom ({fmtNum(freeGb, 2)} GB free).{" "}
+                    <strong>Your model is getting loaded into system RAM by ~{fmtGB(loadedIntoRamGb)}.</strong>{" "}
+                    (This counts model weights and speculative decoding weights; context is excluded). Running weights from system RAM will reduce generation speed.
+                  </>
+                ) : (
+                  `Low VRAM available: only ${fmtNum(freeGb, 2)} GB free remaining. Current model weights fit in VRAM (0 GB loaded into system RAM). Starting another server or expanding context length may cause CUDA out-of-memory errors.`
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Health row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -323,18 +343,26 @@ export default function Dashboard() {
               </div>
               {env.running_weight_gb > 0 && (
                 <div className="text-xs text-slate-500">
-                  est. weights: <span className="text-slate-300">{fmtGB(env.running_weight_gb)}</span> on {totalGb.toFixed(0)}{" "}
-                  GB GPU
+                  est. weights: <span className="text-slate-300">{fmtGB(env.running_weight_gb)}</span>
+                  {env.running_speculative_weight_gb && env.running_speculative_weight_gb > 0 ? (
+                    <span className="text-slate-400"> (spec: {fmtGB(env.running_speculative_weight_gb)})</span>
+                  ) : null}{" "}
+                  on {totalGb.toFixed(0)} GB GPU
                 </div>
               )}
-              {freeGb > 0 && env.running_weight_gb > 0.05 && (
-                <div className="text-xs">
-                  <span className={env.running_weight_gb > freeGb ? "text-red-300" : "text-emerald-300"}>
-                    {env.running_weight_gb > freeGb ? "over budget" : "fits"}
-                  </span>{" "}
-                  <span className="text-slate-600">(weights vs {freeGb.toFixed(1)} GB free)</span>
-                </div>
-              )}
+              {freeGb > 0 && env.running_weight_gb > 0.05 && (() => {
+                const loadedRam = Math.max(0, env.running_weight_gb - freeGb);
+                return (
+                  <div className="text-xs">
+                    <span className={loadedRam > 0.01 ? "text-amber-300 font-medium" : "text-emerald-300"}>
+                      {loadedRam > 0.01
+                        ? `~${fmtGB(loadedRam)} loaded into system RAM`
+                        : "fits in VRAM (0 GB in system RAM)"}
+                    </span>{" "}
+                    <span className="text-slate-600">(weights vs {freeGb.toFixed(1)} GB free)</span>
+                  </div>
+                );
+              })()}
             </div>
           ) : (
             <Spinner />

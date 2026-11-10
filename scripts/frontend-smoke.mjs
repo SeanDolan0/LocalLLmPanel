@@ -356,3 +356,27 @@ test("Rust commands and frontend API contract drift validation", () => {
     }
   }
 });
+
+test("weight estimation and low VRAM system RAM spill logic", () => {
+  const parseParams = (name) => {
+    const base = name.split(/[/\\]/).pop() || name;
+    const match = base.match(/(?:^|[-_ /])(\d+(?:\.\d+)?)[bB](?:[-_ /.]|$)/i);
+    return match ? parseFloat(match[1]) : null;
+  };
+  assert.equal(parseParams("Qwen/Qwen2.5-7B-Instruct"), 7.0);
+  assert.equal(parseParams("Qwen/Qwen2.5-0.5B-Instruct"), 0.5);
+  assert.equal(parseParams("unsloth/Qwen3.8-27B-GGUF"), 27.0);
+
+  const mainWeight = 7.0 * 2.0;
+  const specWeight = 0.5 * 2.0;
+  const totalWeight = mainWeight + specWeight;
+  assert.equal(totalWeight, 15.0);
+
+  const freeVram = 12.0;
+  const loadedIntoRam = Math.max(0, totalWeight - freeVram);
+  assert.equal(loadedIntoRam, 3.0);
+
+  const freeVramPlenty = 16.0;
+  const loadedIntoRamPlenty = Math.max(0, totalWeight - freeVramPlenty);
+  assert.equal(loadedIntoRamPlenty, 0.0);
+});

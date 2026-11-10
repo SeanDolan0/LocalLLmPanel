@@ -1,7 +1,7 @@
 import { ServerCompatibilityModal } from "../components/ServerCompatibilityModal";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { StoragePlanner } from "../components/StoragePlanner";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, events, fmtNum, fmtTokPerSec, quantLabel, statusColor } from "../api";
@@ -10,6 +10,7 @@ import { Sparkline } from "../components/Sparkline";
 import { ServerMetricsPanel } from "../components/ServerMetricsPanel";
 import { effectiveModelName } from "../types";
 import type { ContextFitReport, ServerListRow, ServerDef, ChatMessage, Conversation, BenchmarkRun, ServerMetricPoint, GpuSnapshot, LlamaDevice, LibraryEntry } from "../types";
+import { estimateServerWeights } from "../utils/weightEstimation";
 
 const SECRET_PLACEHOLDER = "__LLM_PANEL_SECRET_REDACTED__";
 
@@ -327,17 +328,51 @@ export default function Servers() {
   const selectedLog = selected ? logs[selected] ?? "" : "";
   const freeGb = gpu ? gpu.vram_free_mb / 1024 : null;
 
+  const runningWeights = useMemo(() => {
+    let mainWeightGb = 0;
+    let specWeightGb = 0;
+    for (const r of rows) {
+      if (r.status === "running") {
+        const est = estimateServerWeights(r.def);
+        mainWeightGb += est.mainWeightGb;
+        specWeightGb += est.specWeightGb;
+      }
+    }
+    return {
+      mainWeightGb,
+      specWeightGb,
+      totalWeightGb: mainWeightGb + specWeightGb,
+    };
+  }, [rows]);
+
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-5">
       {/* VRAM Pressure Alert */}
-      {gpu && freeGb !== null && freeGb < 1.0 && (
-        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm flex items-center gap-2.5">
-          <span className="text-base">⚠️</span>
-          <div>
-            <strong>VRAM Pressure Warning:</strong> Less than 1.0 GB GPU VRAM headroom remaining ({freeGb.toFixed(1)} GB free). Starting another server or expanding context length may cause CUDA out-of-memory errors.
+      {gpu && freeGb !== null && (freeGb < 1.0 || (runningWeights.totalWeightGb > 0 && runningWeights.totalWeightGb > freeGb)) && (() => {
+        const loadedIntoRamGb = Math.max(0, runningWeights.totalWeightGb - freeGb);
+        const isLoadedIntoRam = runningWeights.totalWeightGb > 0 && loadedIntoRamGb > 0.01;
+        return (
+          <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm flex items-center gap-2.5">
+            <span className="text-base">⚠️</span>
+            <div>
+              <strong>Low VRAM Warning:</strong>{" "}
+              {isLoadedIntoRam ? (
+                <>
+                  Active model weights ({runningWeights.totalWeightGb.toFixed(2)} GB
+                  {runningWeights.specWeightGb > 0 ? ` [model: ${runningWeights.mainWeightGb.toFixed(2)} GB, speculative draft: ${runningWeights.specWeightGb.toFixed(2)} GB]` : ""}
+                  ) exceed available GPU VRAM ({freeGb.toFixed(2)} GB free).{" "}
+                  <strong>Your model is getting loaded into system RAM by ~{loadedIntoRamGb.toFixed(2)} GB.</strong>{" "}
+                  (Counts model and speculative decoding weights; context is excluded).
+                </>
+              ) : (
+                <>
+                  Less than 1.0 GB GPU VRAM headroom remaining ({freeGb.toFixed(2)} GB free). Current model weights fit in VRAM (0 GB loaded into system RAM).
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-100">Servers</h1>
@@ -1473,11 +1508,47 @@ function NewServerForm({
   return (
     <Card className="border-indigo-500/30">
       <CardTitle>{isEditing ? "Edit server" : "Define new server"}</CardTitle>
-      {backend === "vllm" && freeGb !== null && freeGb !== undefined && freeGb < 1.0 && (
-        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
-          ⚠️ <strong>VRAM Pressure:</strong> Current free VRAM is only {freeGb.toFixed(1)} GB. Consider configuring Swap Space or CPU Offload below to avoid OOM errors.
-        </div>
-      )}
+      {freeGb !== null && freeGb !== undefined && (() => {
+        const est = estimateServerWeights(
+          {
+            model_id: modelId,
+            model_path: modelPath,
+            params_b: initialServer?.params_b ?? null,
+            quant,
+            backend,
+            speculative_enabled: speculativeEnabled,
+            speculative_model: speculativeModel,
+            speculative_model_path: speculativeModelPath,
+          },
+          libraryModels
+        );
+        const shouldWarn = freeGb < 1.0 || (est.totalWeightGb > 0 && est.totalWeightGb > freeGb);
+        if (!shouldWarn) return null;
+
+        const loadedRamGb = Math.max(0, est.totalWeightGb - freeGb);
+        const isLoadedIntoRam = est.totalWeightGb > 0 && loadedRamGb > 0.01;
+
+        return (
+          <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+            ⚠️ <strong>Low VRAM Warning:</strong>{" "}
+            {isLoadedIntoRam ? (
+              <>
+                Model weights ({est.totalWeightGb.toFixed(2)} GB
+                {speculativeEnabled && est.specWeightGb > 0
+                  ? ` [model: ${est.mainWeightGb.toFixed(2)} GB, speculative draft: ${est.specWeightGb.toFixed(2)} GB]`
+                  : ""}
+                ) exceed available GPU VRAM ({freeGb.toFixed(2)} GB free).{" "}
+                <strong>Your model will get loaded into system RAM by ~{loadedRamGb.toFixed(2)} GB.</strong>{" "}
+                (Counts model weights and speculative decoding weights; context is excluded). Consider enabling CPU Weight Offload or freeing GPU VRAM.
+              </>
+            ) : (
+              <>
+                Current free VRAM is only {freeGb.toFixed(2)} GB. Configured model weights ({est.totalWeightGb > 0 ? `${est.totalWeightGb.toFixed(2)} GB` : "estimated"}) fit in VRAM (0 GB loaded into system RAM), but available headroom is low.
+              </>
+            )}
+          </div>
+        );
+      })()}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="sm:col-span-2 rounded-lg border border-edge/60 bg-surface/50 p-3 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-1">

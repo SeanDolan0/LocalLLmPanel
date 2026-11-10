@@ -30,6 +30,8 @@ pub struct EnvStatus {
     pub gpu: Option<GpuSnapshot>,
     pub servers_running: usize,
     pub running_weight_gb: f64,
+    pub running_model_weight_gb: f64,
+    pub running_speculative_weight_gb: f64,
     pub gpu_bandwidth_gbs: f64,
     pub gpu_bw_known: bool,
     pub cpu_name: Option<String>,
@@ -91,7 +93,8 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
                 .filter(|ls| ls.status == crate::state::ServerStatus::Running)
                 .count()
         };
-        let running_weight_gb = server::running_weight_gb(&st);
+        let (running_weight_gb, running_model_weight_gb, running_speculative_weight_gb) =
+            server::running_weights_breakdown(&st);
         let apt_based = crate::wsl::is_apt_distro(&distro_detected);
 
         let (mut provisioned, mut env_report) =
@@ -184,6 +187,8 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             gpu,
             servers_running: running,
             running_weight_gb,
+            running_model_weight_gb,
+            running_speculative_weight_gb,
             gpu_bandwidth_gbs: bandwidth,
             gpu_bw_known: known,
             cpu_name,
