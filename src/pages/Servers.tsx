@@ -1180,10 +1180,10 @@ function NewServerForm({
       : ""
   );
   const [speculativeDraftCacheTypeK, setSpeculativeDraftCacheTypeK] = useState(
-    initialServer?.speculative_draft_cache_type_k ?? ""
+    initialServer?.speculative_draft_cache_type_k?.toLowerCase().replaceAll("-", "_") ?? ""
   );
   const [speculativeDraftCacheTypeV, setSpeculativeDraftCacheTypeV] = useState(
-    initialServer?.speculative_draft_cache_type_v ?? ""
+    initialServer?.speculative_draft_cache_type_v?.toLowerCase().replaceAll("-", "_") ?? ""
   );
   const [speculativeDraftNUbatch, setSpeculativeDraftNUbatch] = useState(
     initialServer?.speculative_draft_n_ubatch != null ? String(initialServer.speculative_draft_n_ubatch) : ""
@@ -1316,8 +1316,8 @@ function NewServerForm({
           ? "false"
           : ""
       );
-      setSpeculativeDraftCacheTypeK(initialServer.speculative_draft_cache_type_k || "");
-      setSpeculativeDraftCacheTypeV(initialServer.speculative_draft_cache_type_v || "");
+      setSpeculativeDraftCacheTypeK(initialServer.speculative_draft_cache_type_k?.toLowerCase().replaceAll("-", "_") || "");
+      setSpeculativeDraftCacheTypeV(initialServer.speculative_draft_cache_type_v?.toLowerCase().replaceAll("-", "_") || "");
       setSpeculativeDraftNUbatch(initialServer.speculative_draft_n_ubatch != null ? String(initialServer.speculative_draft_n_ubatch) : "");
       setSpeculativeDraftThreads(initialServer.speculative_draft_threads != null ? String(initialServer.speculative_draft_threads) : "");
       setSpeculativeDraftThreadsBatch(initialServer.speculative_draft_threads_batch != null ? String(initialServer.speculative_draft_threads_batch) : "");
@@ -1486,8 +1486,8 @@ function NewServerForm({
               ? false
               : null
             : null,
-        speculative_draft_cache_type_k: backend === "llamacpp" && speculativeEnabled && speculativeDraftCacheTypeK.trim() ? speculativeDraftCacheTypeK.trim() : null,
-        speculative_draft_cache_type_v: backend === "llamacpp" && speculativeEnabled && speculativeDraftCacheTypeV.trim() ? speculativeDraftCacheTypeV.trim() : null,
+        speculative_draft_cache_type_k: backend === "llamacpp" && speculativeEnabled && speculativeDraftCacheTypeK.trim() ? speculativeDraftCacheTypeK.trim().toLowerCase().replaceAll("-", "_") : null,
+        speculative_draft_cache_type_v: backend === "llamacpp" && speculativeEnabled && speculativeDraftCacheTypeV.trim() ? speculativeDraftCacheTypeV.trim().toLowerCase().replaceAll("-", "_") : null,
         speculative_draft_n_ubatch: backend === "llamacpp" && speculativeEnabled && speculativeDraftNUbatch.trim() ? parseInt(speculativeDraftNUbatch, 10) : null,
         speculative_draft_threads: backend === "llamacpp" && speculativeEnabled && speculativeDraftThreads.trim() ? parseInt(speculativeDraftThreads, 10) : null,
         speculative_draft_threads_batch: backend === "llamacpp" && speculativeEnabled && speculativeDraftThreadsBatch.trim() ? parseInt(speculativeDraftThreadsBatch, 10) : null,
@@ -1660,11 +1660,11 @@ function NewServerForm({
           backend === "llamacpp" && isLlamaSpecActive ? draftBackendSamplingBool : null,
         speculative_draft_cache_type_k:
           backend === "llamacpp" && isLlamaSpecActive && speculativeDraftCacheTypeK.trim()
-            ? speculativeDraftCacheTypeK.trim()
+            ? speculativeDraftCacheTypeK.trim().toLowerCase().replaceAll("-", "_")
             : null,
         speculative_draft_cache_type_v:
           backend === "llamacpp" && isLlamaSpecActive && speculativeDraftCacheTypeV.trim()
-            ? speculativeDraftCacheTypeV.trim()
+            ? speculativeDraftCacheTypeV.trim().toLowerCase().replaceAll("-", "_")
             : null,
         speculative_draft_n_ubatch:
           backend === "llamacpp" && isLlamaSpecActive && parsedDraftNUbatch !== null && !isNaN(parsedDraftNUbatch)
@@ -2332,28 +2332,48 @@ function NewServerForm({
 
                     <Field
                       label="Draft KV cache type K (-ctkd / --spec-draft-type-k)"
-                      help="KV cache quantization format for draft model keys (e.g. f16, q8_0, q4_0). Lower precision saves draft VRAM/RAM."
-                      hint="llama.cpp: -ctkd format / --spec-draft-type-k format"
+                      help="KV cache quantization format for draft model keys. Lower precision (q8_0/q4_0) saves draft VRAM/RAM; f16 is highest quality."
+                      hint="llama.cpp: -ctkd format / --spec-draft-type-k format. Default is f16."
                     >
-                      <input
+                      <select
                         className={inputCls}
-                        placeholder="auto (e.g. q8_0, f16)"
                         value={speculativeDraftCacheTypeK}
-                        onChange={(e) => setSpeculativeDraftCacheTypeK(e.target.value)}
-                      />
+                        onChange={(e) => setSpeculativeDraftCacheTypeK(e.target.value.toLowerCase().replaceAll("-", "_"))}
+                      >
+                        <option value="">Auto (llama.cpp default: f16)</option>
+                        <option value="q8_0">q8_0 (recommended)</option>
+                        <option value="q4_0">q4_0</option>
+                        <option value="q4_1">q4_1</option>
+                        <option value="q5_0">q5_0</option>
+                        <option value="q5_1">q5_1</option>
+                        <option value="iq4_nl">iq4_nl</option>
+                        <option value="f16">f16</option>
+                        <option value="bf16">bf16</option>
+                        <option value="f32">f32</option>
+                      </select>
                     </Field>
 
                     <Field
                       label="Draft KV cache type V (-ctvd / --spec-draft-type-v)"
-                      help="KV cache quantization format for draft model values (e.g. f16, q8_0, q4_0)."
-                      hint="llama.cpp: -ctvd format / --spec-draft-type-v format"
+                      help="KV cache quantization format for draft model values. Lower precision (q8_0/q4_0) saves draft VRAM/RAM."
+                      hint="llama.cpp: -ctvd format / --spec-draft-type-v format. Default is f16."
                     >
-                      <input
+                      <select
                         className={inputCls}
-                        placeholder="auto (e.g. q8_0, f16)"
                         value={speculativeDraftCacheTypeV}
-                        onChange={(e) => setSpeculativeDraftCacheTypeV(e.target.value)}
-                      />
+                        onChange={(e) => setSpeculativeDraftCacheTypeV(e.target.value.toLowerCase().replaceAll("-", "_"))}
+                      >
+                        <option value="">Auto (llama.cpp default: f16)</option>
+                        <option value="q8_0">q8_0 (recommended)</option>
+                        <option value="q4_0">q4_0</option>
+                        <option value="q4_1">q4_1</option>
+                        <option value="q5_0">q5_0</option>
+                        <option value="q5_1">q5_1</option>
+                        <option value="iq4_nl">iq4_nl</option>
+                        <option value="f16">f16</option>
+                        <option value="bf16">bf16</option>
+                        <option value="f32">f32</option>
+                      </select>
                     </Field>
 
                     <Field

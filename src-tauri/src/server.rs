@@ -945,11 +945,13 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
     ]);
     structured_flags.extend(["-fa", "--flash-attn"]);
     if !def.cache_type_k.is_empty() {
-        args.extend(["--cache-type-k".into(), def.cache_type_k.clone()]);
+        let norm_k = def.cache_type_k.trim().to_ascii_lowercase().replace('-', "_");
+        args.extend(["--cache-type-k".into(), norm_k]);
         structured_flags.extend(["--cache-type-k", "-ctk"]);
     }
     if !def.cache_type_v.is_empty() {
-        args.extend(["--cache-type-v".into(), def.cache_type_v.clone()]);
+        let norm_v = def.cache_type_v.trim().to_ascii_lowercase().replace('-', "_");
+        args.extend(["--cache-type-v".into(), norm_v]);
         structured_flags.extend(["--cache-type-v", "-ctv"]);
     }
     if let Some(threads) = def.threads.filter(|v| *v > 0) {
@@ -1146,7 +1148,7 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             }
 
             if let Some(ref ctk) = def.speculative_draft_cache_type_k {
-                let ctk = ctk.trim();
+                let ctk = ctk.trim().to_ascii_lowercase().replace('-', "_");
                 if !ctk.is_empty() {
                     let ctk_flag = if help_supports_flag(help, "--spec-draft-type-k") {
                         "--spec-draft-type-k"
@@ -1157,7 +1159,7 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                     } else {
                         "--spec-draft-type-k"
                     };
-                    args.extend([ctk_flag.into(), ctk.to_string()]);
+                    args.extend([ctk_flag.into(), ctk]);
                     structured_flags.extend([
                         "--spec-draft-type-k",
                         "-ctkd",
@@ -1167,7 +1169,7 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             }
 
             if let Some(ref ctv) = def.speculative_draft_cache_type_v {
-                let ctv = ctv.trim();
+                let ctv = ctv.trim().to_ascii_lowercase().replace('-', "_");
                 if !ctv.is_empty() {
                     let ctv_flag = if help_supports_flag(help, "--spec-draft-type-v") {
                         "--spec-draft-type-v"
@@ -1178,7 +1180,7 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
                     } else {
                         "--spec-draft-type-v"
                     };
-                    args.extend([ctv_flag.into(), ctv.to_string()]);
+                    args.extend([ctv_flag.into(), ctv]);
                     structured_flags.extend([
                         "--spec-draft-type-v",
                         "-ctvd",
@@ -1638,7 +1640,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             }
             if let Some(value) = args.get(i + 1) {
                 if target.is_some() {
-                    filtered.push(value.clone());
+                    filtered.push(value.trim().to_ascii_lowercase().replace('-', "_"));
                 }
                 i += 1;
             }
@@ -1658,7 +1660,7 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
             }
             if let Some(value) = args.get(i + 1) {
                 if target.is_some() {
-                    filtered.push(value.clone());
+                    filtered.push(value.trim().to_ascii_lowercase().replace('-', "_"));
                 }
                 i += 1;
             }
@@ -1924,7 +1926,22 @@ pub fn filter_llamacpp_args(args: Vec<String>, help: &str) -> Vec<String> {
                     | "--poll-draft"
             ) {
                 if let Some(value) = args.get(i + 1) {
-                    filtered.push(value.clone());
+                    let val = if matches!(
+                        arg.as_str(),
+                        "--cache-type-k"
+                            | "--cache-type-v"
+                            | "--spec-draft-type-k"
+                            | "-ctkd"
+                            | "--cache-type-k-draft"
+                            | "--spec-draft-type-v"
+                            | "-ctvd"
+                            | "--cache-type-v-draft"
+                    ) {
+                        value.trim().to_ascii_lowercase().replace('-', "_")
+                    } else {
+                        value.clone()
+                    };
+                    filtered.push(val);
                     i += 1;
                 }
             }
@@ -5746,7 +5763,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
         d.speculative_draft_device = Some("CUDA0".into());
         d.speculative_draft_sampling = Some("greedy".into());
         d.speculative_draft_backend_sampling = Some(true);
-        d.speculative_draft_cache_type_k = Some("q8_0".into());
+        d.speculative_draft_cache_type_k = Some("q8-0".into()); // tests normalization of hyphen to underscore
         d.speculative_draft_cache_type_v = Some("q8_0".into());
         d.speculative_draft_n_ubatch = Some(256);
         d.speculative_draft_threads = Some(8);

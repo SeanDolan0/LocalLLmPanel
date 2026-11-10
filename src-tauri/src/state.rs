@@ -883,13 +883,19 @@ impl ServerDef {
                 }
             }
             if let Some(ctk) = &self.speculative_draft_cache_type_k {
-                if ctk.trim().is_empty() {
+                let norm = ctk.trim().to_ascii_lowercase().replace('-', "_");
+                if norm.is_empty() {
                     self.speculative_draft_cache_type_k = None;
+                } else {
+                    self.speculative_draft_cache_type_k = Some(norm);
                 }
             }
             if let Some(ctv) = &self.speculative_draft_cache_type_v {
-                if ctv.trim().is_empty() {
+                let norm = ctv.trim().to_ascii_lowercase().replace('-', "_");
+                if norm.is_empty() {
                     self.speculative_draft_cache_type_v = None;
+                } else {
+                    self.speculative_draft_cache_type_v = Some(norm);
                 }
             }
             let is_ngram = self
@@ -965,6 +971,12 @@ impl ServerDef {
                 self.kv_cache_dtype = None;
                 self.task = "instruct".into();
                 self.env.clear();
+                if !self.cache_type_k.is_empty() {
+                    self.cache_type_k = self.cache_type_k.trim().to_ascii_lowercase().replace('-', "_");
+                }
+                if !self.cache_type_v.is_empty() {
+                    self.cache_type_v = self.cache_type_v.trim().to_ascii_lowercase().replace('-', "_");
+                }
                 if self.speculative_enabled && self.speculative_model_path.is_none() {
                     if let Some(m) = self.speculative_model.clone() {
                         if m.ends_with(".gguf") || m.contains('\\') || m.contains('/') {
