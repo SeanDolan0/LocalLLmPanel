@@ -2092,7 +2092,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "llm-panel"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "chrono",
