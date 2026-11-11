@@ -327,30 +327,46 @@ export default function Servers() {
   const selectedRow = rows.find((r) => r.def.id === selected) ?? null;
   const selectedLog = selected ? logs[selected] ?? "" : "";
   const freeGb = gpu ? gpu.vram_free_mb / 1024 : null;
+  const totalGb = gpu ? gpu.vram_total_mb / 1024 : 0;
 
   const runningWeights = useMemo(() => {
     let mainWeightGb = 0;
     let specWeightGb = 0;
+    let explicitOffloadGb = 0;
     for (const r of rows) {
       if (r.status === "running") {
         const est = estimateServerWeights(r.def);
         mainWeightGb += est.mainWeightGb;
         specWeightGb += est.specWeightGb;
+        if (r.def.cpu_offload_gb && r.def.cpu_offload_gb > 0) {
+          explicitOffloadGb += r.def.cpu_offload_gb;
+        } else if (r.def.backend === "llamacpp" && r.def.n_gpu_layers === 0) {
+          explicitOffloadGb += est.totalWeightGb;
+        }
       }
     }
     return {
       mainWeightGb,
       specWeightGb,
       totalWeightGb: mainWeightGb + specWeightGb,
+      explicitOffloadGb,
     };
   }, [rows]);
 
   return (
     <div className="mx-auto max-w-6xl p-6 space-y-5">
       {/* VRAM Pressure Alert */}
-      {gpu && freeGb !== null && (freeGb < 1.0 || (runningWeights.totalWeightGb > 0 && runningWeights.totalWeightGb > freeGb)) && (() => {
-        const loadedIntoRamGb = Math.max(0, runningWeights.totalWeightGb - freeGb);
+      {gpu && freeGb !== null && (() => {
+        const overheadGb = 1.0;
+        const usableCapacityGb = Math.max(0, totalGb - overheadGb);
+        const reqGpuWeightGb = Math.max(0, runningWeights.totalWeightGb - runningWeights.explicitOffloadGb);
+        const capacitySpillGb = totalGb > 0 ? Math.max(0, reqGpuWeightGb - usableCapacityGb) : 0;
+        const loadedIntoRamGb = runningWeights.explicitOffloadGb + capacitySpillGb;
         const isLoadedIntoRam = runningWeights.totalWeightGb > 0 && loadedIntoRamGb > 0.01;
+        const isLowHeadroom = freeGb < 1.0;
+
+        if (!isLoadedIntoRam && !isLowHeadroom) return null;
+
         return (
           <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm flex items-center gap-2.5">
             <span className="text-base">⚠️</span>
@@ -360,9 +376,9 @@ export default function Servers() {
                 <>
                   Active model weights ({runningWeights.totalWeightGb.toFixed(2)} GB
                   {runningWeights.specWeightGb > 0 ? ` [model: ${runningWeights.mainWeightGb.toFixed(2)} GB, speculative draft: ${runningWeights.specWeightGb.toFixed(2)} GB]` : ""}
-                  ) exceed available GPU VRAM ({freeGb.toFixed(2)} GB free).{" "}
+                  ) exceed GPU VRAM capacity ({totalGb.toFixed(2)} GB total, ~{usableCapacityGb.toFixed(2)} GB usable for weights).{" "}
                   <strong>Your model is getting loaded into system RAM by ~{loadedIntoRamGb.toFixed(2)} GB.</strong>{" "}
-                  (Counts model and speculative decoding weights; context is excluded).
+                  (Counts model and speculative decoding weights; context is excluded). Running weights from system RAM will reduce generation speed.
                 </>
               ) : (
                 <>
@@ -430,6 +446,7 @@ export default function Servers() {
       {showNew && (
         <NewServerForm
           freeGb={freeGb}
+          totalGb={totalGb}
           devices={llamaDevices}
           initialModelId={prefillModel ?? ""}
           initialBackend={prefillBackend}
@@ -931,6 +948,7 @@ function ContextFitResultPanel({
 
 function NewServerForm({
   freeGb,
+  totalGb,
   devices = [],
   initialModelId = "",
   initialBackend,
@@ -956,6 +974,7 @@ function NewServerForm({
   onErr,
 }: {
   freeGb?: number | null;
+  totalGb?: number | null;
   devices?: LlamaDevice[];
   initialModelId?: string;
   initialBackend?: "vllm" | "llamacpp";
@@ -1724,11 +1743,27 @@ function NewServerForm({
           },
           libraryModels
         );
-        const shouldWarn = freeGb < 1.0 || (est.totalWeightGb > 0 && est.totalWeightGb > freeGb);
-        if (!shouldWarn) return null;
+        // Compute effective available VRAM (accounting for currently editing server restarting)
+        const currentServerWeight = initialServer ? estimateServerWeights(initialServer).totalWeightGb : 0;
+        const effectiveFreeGb = (freeGb ?? 0) + (isEditing ? currentServerWeight : 0);
+        const totalVramGb = totalGb ?? 0;
+        const overheadGb = 1.0;
+        const usableTotalGb = Math.max(0, totalVramGb - overheadGb);
 
-        const loadedRamGb = Math.max(0, est.totalWeightGb - freeGb);
+        const cpuOffload = cpuOffloadGb ? parseFloat(cpuOffloadGb) || 0 : 0;
+        const isLlamaCpu = backend === "llamacpp" && nGpuLayers === "0";
+        const explicitRamWeightGb = isLlamaCpu ? est.totalWeightGb : cpuOffload;
+        const reqGpuWeightGb = Math.max(0, est.totalWeightGb - explicitRamWeightGb);
+
+        const capacitySpillGb = totalVramGb > 0 ? Math.max(0, reqGpuWeightGb - usableTotalGb) : 0;
+        const headroomShortfallGb = Math.max(0, reqGpuWeightGb - effectiveFreeGb);
+        const loadedRamGb = explicitRamWeightGb + (backend === "llamacpp" ? Math.max(capacitySpillGb, headroomShortfallGb) : capacitySpillGb);
         const isLoadedIntoRam = est.totalWeightGb > 0 && loadedRamGb > 0.01;
+        const willOomVllm = backend === "vllm" && cpuOffload === 0 && headroomShortfallGb > 0.01;
+        const isLowHeadroom = (freeGb ?? 0) < 1.0;
+
+        const shouldWarn = isLowHeadroom || isLoadedIntoRam || willOomVllm;
+        if (!shouldWarn) return null;
 
         return (
           <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
@@ -1739,9 +1774,14 @@ function NewServerForm({
                 {speculativeEnabled && est.specWeightGb > 0
                   ? ` [model: ${est.mainWeightGb.toFixed(2)} GB, speculative draft: ${est.specWeightGb.toFixed(2)} GB]`
                   : ""}
-                ) exceed available GPU VRAM ({freeGb.toFixed(2)} GB free).{" "}
-                <strong>Your model will get loaded into system RAM by ~{loadedRamGb.toFixed(2)} GB.</strong>{" "}
-                (Counts model weights and speculative decoding weights; context is excluded). Consider enabling CPU Weight Offload or freeing GPU VRAM.
+                ) will have <strong>~{loadedRamGb.toFixed(2)} GB loaded into system RAM</strong>{" "}
+                {explicitRamWeightGb > 0 ? "(via configured CPU offload)" : "(exceeds GPU VRAM capacity)"}.{" "}
+                (Counts model weights and speculative decoding weights; context is excluded). Running weights from system RAM will reduce generation speed.
+              </>
+            ) : willOomVllm ? (
+              <>
+                Model weights ({est.totalWeightGb.toFixed(2)} GB) exceed currently available GPU VRAM headroom ({effectiveFreeGb.toFixed(2)} GB available).{" "}
+                vLLM does not automatically offload weights to RAM without CPU Offload; starting this server may cause a CUDA out-of-memory error. Consider enabling CPU Weight Offload.
               </>
             ) : (
               <>

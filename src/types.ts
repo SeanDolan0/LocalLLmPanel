@@ -64,6 +64,7 @@ export interface EnvStatus {
   running_weight_gb: number;
   running_model_weight_gb?: number;
   running_speculative_weight_gb?: number;
+  running_ram_weight_gb?: number;
   gpu_bandwidth_gbs: number;
   gpu_bw_known: boolean;
   cpu_name?: string | null;

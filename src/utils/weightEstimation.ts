@@ -124,9 +124,14 @@ export function estimateServerWeights(
 
 export function calculateSystemRamSpill(
   weightGb: number,
-  freeVramGb: number
+  vramCapacityGb: number,
+  overheadGb: number = 0,
+  explicitOffloadGb: number = 0
 ): { loadedIntoRamGb: number; fitsInVram: boolean } {
-  const loadedIntoRamGb = Math.max(0, weightGb - freeVramGb);
+  const usableVram = Math.max(0, vramCapacityGb - overheadGb);
+  const reqGpuWeight = Math.max(0, weightGb - explicitOffloadGb);
+  const capacitySpill = Math.max(0, reqGpuWeight - usableVram);
+  const loadedIntoRamGb = explicitOffloadGb + capacitySpill;
   const fitsInVram = loadedIntoRamGb <= 0.001;
   return { loadedIntoRamGb, fitsInVram };
 }

@@ -20,6 +20,7 @@ pub mod provision;
 pub mod recommendation;
 pub mod security;
 pub mod server;
+pub mod server_manager;
 pub mod state;
 pub mod updater;
 pub mod wsl;

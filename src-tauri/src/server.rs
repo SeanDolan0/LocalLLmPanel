@@ -1,7 +1,7 @@
 //! Multi-instance vLLM server lifecycle: launch, monitor, stop, metrics, chat.
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -3272,7 +3272,7 @@ pub fn restart_server(
 // Metrics parsing
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Metrics {
     pub running: u64,
     pub waiting: u64,
@@ -3713,6 +3713,45 @@ pub fn running_weights_breakdown(state: &Arc<AppState>) -> (f64, f64, f64) {
 /// guidance bar vs. current free VRAM.
 pub fn running_weight_gb(state: &Arc<AppState>) -> f64 {
     running_weights_breakdown(state).0
+}
+
+/// Estimated RAM weight footprint in GB across all RUNNING servers:
+/// accounts for explicit CPU offloading (`--cpu-offload-gb`), CPU-only llama.cpp (`-ngl 0`),
+/// or weights spilling beyond physical GPU VRAM capacity.
+pub fn running_ram_weight_gb(
+    state: &Arc<AppState>,
+    gpu_total_mb: Option<u64>,
+    vram_overhead_mb: f64,
+) -> f64 {
+    let servers = state.servers.lock().unwrap();
+    let mut explicit_ram = 0.0;
+    let mut total_gpu_demanded = 0.0;
+
+    for ls in servers.values() {
+        if ls.status != ServerStatus::Running {
+            continue;
+        }
+        let (main_w, spec_w) = server_weights_gb(&ls.def);
+        let server_total = main_w + spec_w;
+
+        if let Some(offload) = ls.def.cpu_offload_gb.filter(|&gb| gb > 0) {
+            explicit_ram += offload as f64;
+            total_gpu_demanded += (server_total - offload as f64).max(0.0);
+        } else if ls.def.backend == "llamacpp" && ls.def.n_gpu_layers == Some(0) {
+            explicit_ram += server_total;
+        } else {
+            total_gpu_demanded += server_total;
+        }
+    }
+
+    let capacity_spill = if let Some(total_mb) = gpu_total_mb.filter(|&mb| mb > 0) {
+        let usable_gpu_gb = ((total_mb as f64 - vram_overhead_mb).max(0.0)) / 1024.0;
+        (total_gpu_demanded - usable_gpu_gb).max(0.0)
+    } else {
+        0.0
+    };
+
+    explicit_ram + capacity_spill
 }
 
 pub fn apply_vllm_auth(
@@ -6071,5 +6110,44 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let (main_w, spec_w) = server_weights_gb(&llama_d);
         assert!((main_w - 14.85).abs() < 1e-4);
         assert!((spec_w - 0.825).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_running_ram_weights_logic() {
+        let state = Arc::new(AppState::new());
+        let mut d = def("Qwen/Qwen2.5-7B-Instruct", "instruct", 8125, "fp16", None);
+        d.params_b = Some(7.0); // 14.0 GB weight
+        d.cpu_offload_gb = Some(4);
+
+        {
+            let mut servers = state.servers.lock().unwrap();
+            servers.insert(
+                d.id.clone(),
+                LiveServer {
+                    def: d,
+                    status: ServerStatus::Running,
+                    error: None,
+                    wsl_child: None,
+                    native_child: None,
+                    wsl_pid: None,
+                    log_ring: std::sync::Mutex::new(VecDequeLog::new()),
+                    last_metrics: None,
+                    stopping: false,
+                    crash_retry_count: 0,
+                },
+            );
+        }
+
+        // 16 GB GPU with 1024 MB overhead: usable is 15.0 GB.
+        // Server demands 10.0 GB on GPU (14 - 4) and 4.0 GB on RAM.
+        // 10.0 GB <= 15.0 GB, so capacity spill is 0. Explicit RAM is 4.0 GB.
+        let ram_w = running_ram_weight_gb(&state, Some(16_384), 1024.0);
+        assert!((ram_w - 4.0).abs() < 1e-4);
+
+        // On an 8 GB GPU with 1024 MB overhead: usable is 7.0 GB.
+        // Server demands 10.0 GB on GPU, which exceeds 7.0 GB by 3.0 GB.
+        // Total RAM = 4.0 explicit + 3.0 spill = 7.0 GB.
+        let ram_w_small = running_ram_weight_gb(&state, Some(8_192), 1024.0);
+        assert!((ram_w_small - 7.0).abs() < 1e-4);
     }
 }

@@ -626,7 +626,7 @@ fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
 }
 
 pub fn parse_driver_cuda_version(text: &str) -> Option<CudaVersion> {
-    let re = Regex::new(r"CUDA Version:\s*(\d+)\.(\d+)").ok()?;
+    let re = Regex::new(r"(?i)CUDA(?:\s+(?:UMD|Driver))?\s*Version:\s*(\d+)\.(\d+)").ok()?;
     let c = re.captures(text)?;
     Some(CudaVersion(
         c.get(1)?.as_str().parse().ok()?,
@@ -1399,6 +1399,46 @@ mod tests {
     }
 
     #[test]
+    fn selects_prism_release_on_host_driver() {
+        let fork = LlamaCppFork {
+            id: "prsimml".into(),
+            name: "PrismML".into(),
+            kind: "github".into(),
+            repo: "PrismML-Eng/llama.cpp".into(),
+            local_executable: None,
+            description: "".into(),
+            asset_regex: "^llama-.*-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$".into(),
+            runtime_regex: "^cudart-llama-bin-win-cuda-(\\d+)\\.(\\d+)-x64\\.zip$".into(),
+            main_prefix: "llama-".into(),
+            builtin: false,
+        };
+        let assets = vec![
+            Asset {
+                name: "llama-prism-b12128-d7b2896-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "url124".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-12.4-x64.zip".into(),
+                browser_download_url: "rt124".into(),
+            },
+            Asset {
+                name: "llama-prism-b12128-d7b2896-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "url133".into(),
+            },
+            Asset {
+                name: "cudart-llama-bin-win-cuda-13.3-x64.zip".into(),
+                browser_download_url: "rt133".into(),
+            },
+        ];
+        let driver = super::driver_cuda_version();
+        let cc = super::compute_capability();
+        let selected = choose_assets_for_machine(&fork, &assets, driver, cc).unwrap();
+        assert_eq!(selected.candidate.version, CudaVersion(13, 3));
+        assert_eq!(selected.candidate.main.browser_download_url, "url133");
+        assert_eq!(selected.candidate.runtime.unwrap().browser_download_url, "rt133");
+    }
+
+    #[test]
     fn diagnostic_lists_rejected_windows_assets() {
         let assets = vec![
             Asset {
@@ -1696,6 +1736,29 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("override acknowledgment"));
+    }
+
+    #[test]
+    fn test_parse_driver_cuda_version() {
+        let legacy = "| NVIDIA-SMI 550.54.14    Driver Version: 550.54.14    CUDA Version: 12.4     |";
+        assert_eq!(super::parse_driver_cuda_version(legacy), Some(CudaVersion(12, 4)));
+
+        let umd = "| NVIDIA-SMI 621.14                 KMD Version: 621.14        CUDA UMD Version: 13.5     |";
+        assert_eq!(super::parse_driver_cuda_version(umd), Some(CudaVersion(13, 5)));
+
+        let driver_var = "CUDA Driver Version: 12.8";
+        assert_eq!(super::parse_driver_cuda_version(driver_var), Some(CudaVersion(12, 8)));
+
+        let invalid = "No CUDA information here";
+        assert_eq!(super::parse_driver_cuda_version(invalid), None);
+    }
+
+    #[test]
+    fn host_driver_cuda_version_resolves() {
+        let v = super::driver_cuda_version();
+        assert!(v.is_some(), "nvidia-smi is present and should resolve host CUDA version");
+        let v = v.unwrap();
+        assert!(v.0 >= 12, "expected modern CUDA version >= 12, got {v}");
     }
 
     #[test]

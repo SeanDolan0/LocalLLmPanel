@@ -221,14 +221,12 @@ pub fn load_custom_forks() -> Vec<LlamaCppFork> {
                         custom_forks.push(fork);
                     }
                 }
+                return custom_forks;
             }
-        }
-        if !custom_forks.is_empty() {
-            return custom_forks;
         }
     }
 
-    // If custom_forks.json does not exist yet or is empty, rescue custom forks from config.json.bak and config.json
+    // If custom_forks.json does not exist yet or failed to parse, rescue custom forks from config.json.bak and config.json
     let config_dir = path
         .parent()
         .map(|p| p.to_path_buf())
@@ -267,10 +265,8 @@ pub fn load_custom_forks() -> Vec<LlamaCppFork> {
         }
     }
 
-    // If we rescued any forks, persist them to custom_forks.json immediately
-    if !custom_forks.is_empty() {
-        let _ = save_custom_forks(&custom_forks);
-    }
+    // If we rescued any forks or initialized from legacy config, persist them so custom_forks.json exists
+    let _ = save_custom_forks(&custom_forks);
 
     custom_forks
 }
@@ -279,6 +275,15 @@ pub fn auto_discover_disk_forks(
     llamacpp_dir: &str,
     forks: &mut Vec<LlamaCppFork>,
     channels: &mut BTreeMap<String, LlamaCppChannelConfig>,
+) {
+    auto_discover_disk_forks_internal(llamacpp_dir, forks, channels, true);
+}
+
+pub fn auto_discover_disk_forks_internal(
+    llamacpp_dir: &str,
+    forks: &mut Vec<LlamaCppFork>,
+    channels: &mut BTreeMap<String, LlamaCppChannelConfig>,
+    allow_new_forks: bool,
 ) {
     let root = PathBuf::from(llamacpp_dir);
     if !root.is_dir() {
@@ -305,7 +310,14 @@ pub fn auto_discover_disk_forks(
         } else if dir_name.starts_with("upstream-") {
             "upstream".to_string()
         } else if let Some((prefix, _)) = dir_name.split_once('-') {
-            prefix.to_string()
+            if prefix.starts_with('b')
+                && prefix.len() > 1
+                && prefix[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                "upstream".to_string()
+            } else {
+                prefix.to_string()
+            }
         } else {
             continue;
         };
@@ -315,6 +327,9 @@ pub fn auto_discover_disk_forks(
         }
 
         if !forks.iter().any(|f| f.id == fork_id) {
+            if !allow_new_forks {
+                continue;
+            }
             let (repo, name) = if fork_id == "prismml" || fork_id == "prism" {
                 ("PrismML-Eng/llama.cpp".to_string(), "PrismML".to_string())
             } else {
@@ -1329,6 +1344,16 @@ pub(crate) fn migrate_llamacpp_config(cfg: &mut PersistedConfig) {
             fork.builtin = false;
         }
     }
+    // Clean up any bogus forks created by older auto-discovery for upstream bXXXX tags
+    cfg.llamacpp_forks.retain(|fork| {
+        !(fork.id.starts_with('b')
+            && fork.id.len() > 1
+            && fork.id[1..].chars().all(|c| c.is_ascii_digit())
+            && fork.repo.starts_with("custom/b"))
+    });
+    cfg.llamacpp_channels.retain(|k, _| {
+        !(k.starts_with('b') && k.len() > 1 && k[1..].chars().all(|c| c.is_ascii_digit()))
+    });
     // Seed built-in forks for configs written before forks existed, and make
     // sure every fork has an install-state entry.
     for builtin in builtin_llamacpp_forks() {
@@ -1641,8 +1666,9 @@ impl PersistedConfig {
                 .insert("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string());
         }
         // Merge custom forks from persistent custom_forks.json / config.json.bak
+        let custom_forks_existed = custom_forks_path().exists();
         let custom = load_custom_forks();
-        for fork in custom {
+        for fork in &custom {
             if let Some(existing) = cfg.llamacpp_forks.iter_mut().find(|f| f.id == fork.id) {
                 if !existing.builtin
                     && existing.local_executable.is_none()
@@ -1651,15 +1677,25 @@ impl PersistedConfig {
                     existing.local_executable = fork.local_executable.clone();
                 }
             } else {
-                cfg.llamacpp_forks.push(fork);
+                cfg.llamacpp_forks.push(fork.clone());
             }
         }
+        if custom_forks_existed {
+            // custom_forks.json is the authoritative list of custom forks;
+            // prune any custom forks from cfg that are not in custom_forks.json
+            cfg.llamacpp_forks.retain(|f| {
+                f.builtin || f.id == "upstream" || custom.iter().any(|c| c.id == f.id)
+            });
+        }
 
-        // Auto-discover any installed fork directories on disk
-        auto_discover_disk_forks(
+        // Auto-discover any installed fork directories on disk.
+        // Only synthesize brand new custom forks if custom_forks.json did not exist yet (migration).
+        // Once custom_forks.json exists, it is authoritative and deleted forks must never be resurrected.
+        auto_discover_disk_forks_internal(
             &cfg.llamacpp_dir,
             &mut cfg.llamacpp_forks,
             &mut cfg.llamacpp_channels,
+            !custom_forks_existed,
         );
 
         migrate_llamacpp_config(&mut cfg);
@@ -2099,6 +2135,7 @@ pub struct AppState {
     pub discovery_cache: Arc<crate::hf_discovery::DiscoveryCache>,
     pub model_registry: Arc<crate::model_registry::ModelRegistry>,
     pub download_manager: Arc<crate::download_manager::DownloadManager>,
+    pub server_manager: Arc<crate::server_manager::ServerManager>,
 }
 
 pub const METRICS_SERIES_CAPACITY: usize = 60;
@@ -2177,6 +2214,7 @@ impl AppState {
         let download_manager = Arc::new(crate::download_manager::DownloadManager::new(Arc::clone(
             &model_registry,
         )));
+        let server_manager = Arc::new(crate::server_manager::ServerManager::new_app());
         AppState {
             config: Mutex::new(config),
             servers: Mutex::new(BTreeMap::new()),
@@ -2201,6 +2239,7 @@ impl AppState {
             discovery_cache,
             model_registry,
             download_manager,
+            server_manager,
         }
     }
 
@@ -3637,6 +3676,73 @@ mod tests {
             .as_ref()
             .unwrap()
             .ends_with("llama-server.exe"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_deleted_custom_forks_stay_deleted_when_reopened() {
+        let _lock = TEST_CONFIG_MUTEX.lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("llp-test-fork-del-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::env::set_var("LLM_TEST_CONFIG_DIR", &temp_dir);
+
+        // Simulate config.json.bak containing old forks from previous backup
+        let bak_path = temp_dir.join("config.json.bak");
+        let bak_content = r#"{
+            "llamacpp_forks": [
+                {
+                    "id": "upstream",
+                    "name": "Upstream",
+                    "builtin": true
+                },
+                {
+                    "id": "xhtoken",
+                    "name": "XHToken",
+                    "kind": "local",
+                    "local_executable": "C:\\build\\llama-server.exe",
+                    "builtin": false
+                }
+            ]
+        }"#;
+        std::fs::write(&bak_path, bak_content).unwrap();
+
+        // Simulate that the user deleted all custom forks, so custom_forks.json is empty list []
+        let empty_forks: Vec<LlamaCppFork> = vec![];
+        save_custom_forks(&empty_forks).unwrap();
+
+        // Reload config - deleted forks must NOT be resurrected from config.json.bak
+        let cfg = PersistedConfig::load();
+        assert_eq!(cfg.llamacpp_forks.len(), 1);
+        assert_eq!(cfg.llamacpp_forks[0].id, "upstream");
+        assert!(!cfg.llamacpp_forks.iter().any(|f| f.id == "xhtoken"));
+
+        let custom = load_custom_forks();
+        assert!(custom.is_empty(), "custom forks must remain empty");
+
+        std::env::remove_var("LLM_TEST_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_b_tag_directories_are_not_discovered_as_custom_forks() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("llp-test-discover-btag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let btag_dir = temp_dir.join("b11064-cuda-13.4");
+        std::fs::create_dir_all(&btag_dir).unwrap();
+        std::fs::write(btag_dir.join("llama-server.exe"), b"binary").unwrap();
+
+        let mut forks = builtin_llamacpp_forks();
+        let mut channels = BTreeMap::new();
+        auto_discover_disk_forks(temp_dir.to_str().unwrap(), &mut forks, &mut channels);
+
+        // b11064 is an upstream tag, so it must not be added to custom forks
+        assert!(!forks.iter().any(|f| f.id == "b11064"));
+        assert_eq!(forks.len(), 1);
+        assert_eq!(forks[0].id, "upstream");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

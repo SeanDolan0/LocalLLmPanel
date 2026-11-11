@@ -183,12 +183,20 @@ export default function Dashboard() {
       <FirstRunDiagnosticCard onOpenTrustModal={() => setShowTrustModal(true)} />
 
       {/* VRAM Pressure Alert */}
-      {gpu && (freeGb < 1.0 || (env && env.running_weight_gb > 0 && env.running_weight_gb > freeGb)) && (() => {
+      {gpu && (() => {
         const activeWeight = env?.running_weight_gb || 0;
         const mainWeight = env?.running_model_weight_gb || 0;
         const specWeight = env?.running_speculative_weight_gb || 0;
-        const loadedIntoRamGb = Math.max(0, activeWeight - freeGb);
+        const overheadGb = 1.0;
+        const usableCapacityGb = Math.max(0, totalGb - overheadGb);
+        const capacitySpillGb = totalGb > 0 ? Math.max(0, activeWeight - usableCapacityGb) : 0;
+        const loadedIntoRamGb = env?.running_ram_weight_gb != null && env.running_ram_weight_gb > 0
+          ? env.running_ram_weight_gb
+          : capacitySpillGb;
         const isLoadedIntoRam = activeWeight > 0 && loadedIntoRamGb > 0.01;
+        const isLowHeadroom = freeGb < 1.0;
+
+        if (!isLoadedIntoRam && !isLowHeadroom) return null;
 
         return (
           <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-amber-200 shadow-sm flex items-start gap-3">
@@ -204,7 +212,7 @@ export default function Dashboard() {
                   <>
                     Active model weights ({fmtGB(activeWeight)}
                     {specWeight > 0 ? ` [model: ${fmtGB(mainWeight)}, speculative draft: ${fmtGB(specWeight)}]` : ""}
-                    ) exceed available GPU VRAM headroom ({fmtNum(freeGb, 2)} GB free).{" "}
+                    ) exceed GPU VRAM capacity ({fmtNum(totalGb, 1)} GB total, ~{fmtNum(usableCapacityGb, 1)} GB usable for weights).{" "}
                     <strong>Your model is getting loaded into system RAM by ~{fmtGB(loadedIntoRamGb)}.</strong>{" "}
                     (This counts model weights and speculative decoding weights; context is excluded). Running weights from system RAM will reduce generation speed.
                   </>
@@ -351,7 +359,12 @@ export default function Dashboard() {
                 </div>
               )}
               {freeGb > 0 && env.running_weight_gb > 0.05 && (() => {
-                const loadedRam = Math.max(0, env.running_weight_gb - freeGb);
+                const overheadGb = 1.0;
+                const usableCapacityGb = Math.max(0, totalGb - overheadGb);
+                const capacitySpillGb = totalGb > 0 ? Math.max(0, env.running_weight_gb - usableCapacityGb) : 0;
+                const loadedRam = env?.running_ram_weight_gb != null && env.running_ram_weight_gb > 0
+                  ? env.running_ram_weight_gb
+                  : capacitySpillGb;
                 return (
                   <div className="text-xs">
                     <span className={loadedRam > 0.01 ? "text-amber-300 font-medium" : "text-emerald-300"}>
@@ -359,7 +372,11 @@ export default function Dashboard() {
                         ? `~${fmtGB(loadedRam)} loaded into system RAM`
                         : "fits in VRAM (0 GB in system RAM)"}
                     </span>{" "}
-                    <span className="text-slate-600">(weights vs {freeGb.toFixed(1)} GB free)</span>
+                    <span className="text-slate-600">
+                      {loadedRam > 0.01
+                        ? `(weights exceed ${usableCapacityGb.toFixed(1)} GB VRAM capacity)`
+                        : `(weights fit on ${totalGb.toFixed(0)} GB GPU · ${freeGb.toFixed(1)} GB free)`}
+                    </span>
                   </div>
                 );
               })()}

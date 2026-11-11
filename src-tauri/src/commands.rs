@@ -32,6 +32,7 @@ pub struct EnvStatus {
     pub running_weight_gb: f64,
     pub running_model_weight_gb: f64,
     pub running_speculative_weight_gb: f64,
+    pub running_ram_weight_gb: f64,
     pub gpu_bandwidth_gbs: f64,
     pub gpu_bw_known: bool,
     pub cpu_name: Option<String>,
@@ -95,6 +96,11 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
         };
         let (running_weight_gb, running_model_weight_gb, running_speculative_weight_gb) =
             server::running_weights_breakdown(&st);
+        let running_ram_weight_gb = server::running_ram_weight_gb(
+            &st,
+            gpu.as_ref().map(|g| g.vram_total_mb),
+            st.config().memory_settings.vram_overhead_mb,
+        );
         let apt_based = crate::wsl::is_apt_distro(&distro_detected);
 
         let (mut provisioned, mut env_report) =
@@ -189,6 +195,7 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
             running_weight_gb,
             running_model_weight_gb,
             running_speculative_weight_gb,
+            running_ram_weight_gb,
             gpu_bandwidth_gbs: bandwidth,
             gpu_bw_known: known,
             cpu_name,
@@ -478,7 +485,31 @@ pub async fn llamacpp_fork_remove(
         ));
     }
     cfg.llamacpp_forks.retain(|fork| fork.id != trimmed);
-    cfg.llamacpp_channels.remove(trimmed);
+    if let Some(ch) = cfg.llamacpp_channels.remove(trimmed) {
+        if !ch.dir.trim().is_empty() {
+            let ch_dir = PathBuf::from(&ch.dir);
+            let root = PathBuf::from(&cfg.llamacpp_dir);
+            if ch_dir.exists() && ch_dir.starts_with(&root) && ch_dir != root {
+                let _ = std::fs::remove_dir_all(&ch_dir);
+            }
+        }
+    }
+    let root = PathBuf::from(&cfg.llamacpp_dir);
+    if root.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            let prefix = format!("{}-", trimmed.to_ascii_lowercase());
+            let exact = trimmed.to_ascii_lowercase();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let dir_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    if dir_name == exact || dir_name.starts_with(&prefix) {
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                }
+            }
+        }
+    }
     cfg.save().map_err(|e| e.to_string())?;
     Ok(cfg.llamacpp_forks.clone())
 }
@@ -2066,24 +2097,7 @@ pub struct ServerListRow {
 
 #[tauri::command]
 pub fn servers_list(state: State<'_, Arc<AppState>>) -> Vec<ServerListRow> {
-    let st = (*state).clone();
-    server::list_servers(&st)
-        .into_iter()
-        .map(|(def, status, error, metrics)| {
-            let (process_alive, http_healthy) = match server::get_server_health(&def.id) {
-                Some(h) => (Some(h.process_alive), Some(h.http_healthy)),
-                None => (None, None),
-            };
-            ServerListRow {
-                def,
-                status: status.label().to_string(),
-                error,
-                metrics,
-                process_alive,
-                http_healthy,
-            }
-        })
-        .collect()
+    state.server_manager.list_server_rows(&state)
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -2565,24 +2579,15 @@ pub async fn servers_create(
 #[tauri::command]
 pub async fn servers_delete(
     state: State<'_, Arc<AppState>>,
-    app: AppHandle,
+    _app: AppHandle,
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    let st2 = st.clone();
-    let id2 = id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        server::stop_server(&st2, Some(&app), &id2).map_err(|e| e.to_string())
+        st.server_manager.delete_server(&st, &id)
     })
     .await
-    .map_err(|e| e.to_string())??;
-    st.server_metrics.lock().unwrap().remove(&id);
-    let mut cfg = st.config.lock().unwrap();
-    let mut next = cfg.clone();
-    next.servers.retain(|s| s.id != id);
-    next.save().map_err(|e| e.to_string())?;
-    *cfg = next;
-    Ok(())
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2592,7 +2597,7 @@ pub fn servers_start(
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    server::start_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+    st.server_manager.start_server(&st, Some(&app), &id).map(|_| ())
 }
 
 #[tauri::command]
@@ -2602,10 +2607,10 @@ pub async fn servers_stop(
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    tauri::async_runtime::spawn_blocking(move || server::stop_server(&st, Some(&app), &id))
+    tauri::async_runtime::spawn_blocking(move || st.server_manager.stop_server(&st, Some(&app), &id))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -2616,10 +2621,11 @@ pub async fn servers_restart(
 ) -> Result<(), String> {
     let st = (*state).clone();
     tauri::async_runtime::spawn_blocking(move || {
-        server::restart_server(&st, Some(&app), &id).map_err(|e| e.to_string())
+        st.server_manager.restart_server(&st, Some(&app), &id)
     })
     .await
     .map_err(|e| e.to_string())?
+    .map(|_| ())
 }
 
 #[derive(serde::Deserialize)]
