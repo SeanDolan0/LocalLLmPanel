@@ -26,14 +26,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [javascript-typescript, rust, actions]
+        # Rust is skipped on pushes to main: the PR that got merged already
+        # analyzed it, and the weekly schedule still covers direct pushes.
+        language: ${{ fromJSON(github.event_name == 'push' && '["javascript-typescript","actions"]' || '["javascript-typescript","rust","actions"]') }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      # ubuntu-latest ships with rustup/cargo, which is all build-mode: none needs.
+      # If CodeQL complains about the toolchain, restore dtolnay/rust-toolchain here.
+      - name: Cache cargo registry
         if: matrix.language == 'rust'
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: codeql-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: codeql-cargo-
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
