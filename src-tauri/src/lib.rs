@@ -10,6 +10,7 @@ mod estimate;
 pub mod fit;
 pub mod gateway;
 mod gguf;
+pub mod hardware_sizer;
 pub mod hf;
 pub mod hf_discovery;
 pub mod llamacpp_install;

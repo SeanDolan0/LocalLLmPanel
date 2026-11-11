@@ -27,3 +27,19 @@ _Avoid_: server status, server row, server state
 **VRAM Reservation**:
 An exclusive GPU memory allotment tracked during server startup to prevent concurrent memory oversubscription.
 _Avoid_: VRAM lock, memory guard, GPU allocation
+
+**Hardware Sizer**:
+The authoritative deep module managing hardware detection, memory topology, dynamic telemetry, VRAM reservations, and model fit scoring.
+_Avoid_: hardware detector, memory estimator, fit calculator
+
+**Hardware Snapshot**:
+A point-in-time view of host and WSL2 compute environments including CPU topology, GPUs, physical and effective free VRAM, and distinct host/WSL RAM pools.
+_Avoid_: system specs, gpu info, hardware profile
+
+**Allocation Report**:
+Precomputed resource pressure, active weight footprints, system RAM spill, and memory alert states calculated respecting user MemorySettings.
+_Avoid_: memory stats, vram breakdown, spill calc
+
+**Fit Report**:
+The authoritative verdict evaluating whether a model variant fits in memory, its execution mode (GPU, Hybrid Offload, CPU), estimated context capacity, and expected throughput.
+_Avoid_: score verdict, fit result, recommendation score

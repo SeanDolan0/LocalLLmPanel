@@ -47,6 +47,8 @@ pub struct EnvStatus {
     pub llamacpp_executable: Option<String>,
     pub llamacpp_cuda_available: bool,
     pub llamacpp_devices: Vec<crate::llamacpp_install::LlamaDevice>,
+    #[serde(default)]
+    pub allocation: Option<crate::hardware_sizer::AllocationReport>,
 }
 
 fn gpu_snapshot(distro: &str) -> Option<GpuSnapshot> {
@@ -94,13 +96,11 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
                 .filter(|ls| ls.status == crate::state::ServerStatus::Running)
                 .count()
         };
-        let (running_weight_gb, running_model_weight_gb, running_speculative_weight_gb) =
-            server::running_weights_breakdown(&st);
-        let running_ram_weight_gb = server::running_ram_weight_gb(
-            &st,
-            gpu.as_ref().map(|g| g.vram_total_mb),
-            st.config().memory_settings.vram_overhead_mb,
-        );
+        let alloc = st.hardware_sizer.running_allocation_report(&st);
+        let running_weight_gb = alloc.total_weight_gb;
+        let running_model_weight_gb = alloc.main_weight_gb;
+        let running_speculative_weight_gb = alloc.spec_weight_gb;
+        let running_ram_weight_gb = alloc.ram_spill_gb;
         let apt_based = crate::wsl::is_apt_distro(&distro_detected);
 
         let (mut provisioned, mut env_report) =
@@ -217,6 +217,7 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
                 .or(cfg.llamacpp_executable),
             llamacpp_cuda_available,
             llamacpp_devices,
+            allocation: Some(alloc),
         }
     })
     .await

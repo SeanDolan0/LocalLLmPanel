@@ -79,6 +79,19 @@ export interface EnvStatus {
   llamacpp_executable?: string | null;
   llamacpp_cuda_available?: boolean;
   llamacpp_devices?: LlamaDevice[];
+  allocation?: AllocationReport | null;
+}
+
+export interface AllocationReport {
+  running_servers_count: number;
+  total_weight_gb: number;
+  main_weight_gb: number;
+  spec_weight_gb: number;
+  ram_spill_gb: number;
+  total_reserved_vram_mb: number;
+  vram_pressure_pct: number;
+  is_low_vram: boolean;
+  warning_message: string | null;
 }
 
 export interface LlamaDevice {

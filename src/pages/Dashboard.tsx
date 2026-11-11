@@ -184,17 +184,19 @@ export default function Dashboard() {
 
       {/* VRAM Pressure Alert */}
       {gpu && (() => {
-        const activeWeight = env?.running_weight_gb || 0;
-        const mainWeight = env?.running_model_weight_gb || 0;
-        const specWeight = env?.running_speculative_weight_gb || 0;
+        const alloc = env?.allocation;
+        const activeWeight = alloc ? alloc.total_weight_gb : (env?.running_weight_gb || 0);
+        const mainWeight = alloc ? alloc.main_weight_gb : (env?.running_model_weight_gb || 0);
+        const specWeight = alloc ? alloc.spec_weight_gb : (env?.running_speculative_weight_gb || 0);
         const overheadGb = 1.0;
         const usableCapacityGb = Math.max(0, totalGb - overheadGb);
-        const capacitySpillGb = totalGb > 0 ? Math.max(0, activeWeight - usableCapacityGb) : 0;
-        const loadedIntoRamGb = env?.running_ram_weight_gb != null && env.running_ram_weight_gb > 0
-          ? env.running_ram_weight_gb
-          : capacitySpillGb;
-        const isLoadedIntoRam = activeWeight > 0 && loadedIntoRamGb > 0.01;
-        const isLowHeadroom = freeGb < 1.0;
+        const loadedIntoRamGb = alloc
+          ? alloc.ram_spill_gb
+          : (env?.running_ram_weight_gb != null && env.running_ram_weight_gb > 0
+              ? env.running_ram_weight_gb
+              : (totalGb > 0 ? Math.max(0, activeWeight - usableCapacityGb) : 0));
+        const isLoadedIntoRam = alloc ? alloc.ram_spill_gb > 0.01 : (activeWeight > 0 && loadedIntoRamGb > 0.01);
+        const isLowHeadroom = alloc ? alloc.is_low_vram : (freeGb < 1.0);
 
         if (!isLoadedIntoRam && !isLowHeadroom) return null;
 
