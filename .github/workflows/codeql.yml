@@ -31,7 +31,7 @@ jobs:
         language: ${{ fromJSON(github.event_name == 'push' && '["javascript-typescript","actions"]' || '["javascript-typescript","rust","actions"]') }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # ubuntu-latest ships with rustup/cargo, which is all build-mode: none needs.
       # If CodeQL complains about the toolchain, restore dtolnay/rust-toolchain here.
