@@ -1,0 +1,51 @@
+name: Warm Rust cache
+
+# Tag-triggered releases can only read caches from the default branch,
+# so this keeps a fresh one there for draft-release.yml to reuse.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/**"
+      - "package-lock.json"
+  workflow_dispatch:
+
+jobs:
+  warm:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release
+
+      - name: Ensure LLVM linker
+        shell: pwsh
+        run: |
+          $llvmBin = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvmBin 'lld-link.exe'))) {
+            choco install llvm --yes --no-progress
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      # Compiles all dependencies in release mode without producing installers.
+      - name: Build (no bundle)
+        run: npx tauri build --no-bundle

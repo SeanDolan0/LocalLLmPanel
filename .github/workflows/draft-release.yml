@@ -27,6 +27,9 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      # Step-level `if:` can't see step-level env, so expose this at job level.
+      HAS_AUTHENTICODE: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
@@ -38,13 +41,26 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
 
-      - name: Install LLVM linker
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Adjust if your Cargo.toml lives somewhere other than src-tauri
+          workspaces: src-tauri -> target
+          shared-key: release
+          # Tag refs can read the default branch's cache but not each other's.
+          # Only save from main (see cache-warm.yml) so tags don't waste cache space.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure LLVM linker
         shell: pwsh
         run: |
-          choco install llvm --yes --no-progress
+          # windows-latest already ships LLVM; only install if it's missing.
           $llvmBin = 'C:\Program Files\LLVM\bin'
           if (-not (Test-Path (Join-Path $llvmBin 'lld-link.exe'))) {
-            throw "LLVM installed but lld-link.exe was not found in $llvmBin"
+            choco install llvm --yes --no-progress
+          }
+          if (-not (Test-Path (Join-Path $llvmBin 'lld-link.exe'))) {
+            throw "lld-link.exe was not found in $llvmBin"
           }
           Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
 
@@ -81,8 +97,8 @@ jobs:
           REQUIRE_SIGNED_RELEASE: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '1' || '0' }}
         run: npm run build:setup
 
-      - name: Authenticode sign executables (if certificate secret configured)
-        if: env.WINDOWS_CERTIFICATE_BASE64 != ''
+      - name: Authenticode sign executables
+        if: env.HAS_AUTHENTICODE == 'true'
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -95,14 +111,28 @@ jobs:
           if (-not (Test-Path $signtool)) {
             $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Select-Object -First 1).FullName
           }
-          if ($signtool) {
-            Get-ChildItem dist-release -Filter "*.exe" | ForEach-Object {
-              & $signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 $_.FullName
-            }
-          } else {
+          if (-not $signtool) {
             throw "signtool.exe not found on runner"
           }
-          Remove-Item -Force $certPath
+          try {
+            Get-ChildItem dist-release -Filter "*.exe" | ForEach-Object {
+              & $signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($_.Name)" }
+            }
+          } finally {
+            Remove-Item -Force $certPath -ErrorAction SilentlyContinue
+          }
+
+      - name: Regenerate exe checksums after signing
+        if: env.HAS_AUTHENTICODE == 'true'
+        shell: pwsh
+        run: |
+          # Signing changes the exe bytes, so the checksums from the build are stale.
+          # Assumes the "<hash>  <filename>" format; match this to your build script.
+          Get-ChildItem dist-release -Filter "*.exe" | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "$($_.FullName).sha256" -Value "$hash  $($_.Name)" -NoNewline
+          }
 
       - name: Validate release files, signatures, and SHA-256 checksums
         env:
