@@ -1,11 +1,74 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FirstRunDiagnosticCard } from "../components/FirstRunDiagnosticCard";
 import { SmartScreenTrustModal } from "../components/SmartScreenTrustModal";
 import { ErrorAlert } from "../components/ErrorAlert";
-import { useCallback, useEffect, useRef, useState } from "react";
 import { api, events, fmtGB, fmtNum } from "../api";
-import { Button, Card, CardTitle, Collapsible, Gauge, Spinner } from "../ui";
+import { Button, Card, CardTitle, Collapsible, Gauge, Spinner, InsetGroup, SettingsRow, SquircleIcon, Badge } from "../ui";
 import { Sparkline } from "../components/Sparkline";
 import type { EnvStatus, ProvisionReport, SystemMetricPoint, WslLogEvent, FlashInferReady } from "../types";
+
+function RefreshIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M16 16h5v5" />
+    </svg>
+  );
+}
+
+function ServerStackIcon() {
+  return (
+    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect width="20" height="8" x="2" y="2" rx="2" />
+      <rect width="20" height="8" x="2" y="14" rx="2" />
+      <line x1="6" x2="6.01" y1="6" y2="6" />
+      <line x1="6" x2="6.01" y1="18" y2="18" />
+    </svg>
+  );
+}
+
+function GpuChipIcon() {
+  return (
+    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect width="16" height="16" x="4" y="4" rx="2" />
+      <rect width="6" height="6" x="9" y="9" rx="1" />
+      <path d="M15 2v2" /><path d="M15 20v2" /><path d="M2 15h2" /><path d="M2 9h2" />
+      <path d="M20 15h2" /><path d="M20 9h2" /><path d="M9 2v2" /><path d="M9 20v2" />
+    </svg>
+  );
+}
+
+function TerminalIcon() {
+  return (
+    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" x2="20" y1="19" y2="19" />
+    </svg>
+  );
+}
+
+function CpuIcon() {
+  return (
+    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect width="16" height="16" x="4" y="4" rx="2" />
+      <path d="M9 9h6v6H9z" />
+      <path d="M9 2v2" /><path d="M9 20v2" /><path d="M20 9h2" /><path d="M2 9h2" />
+      <path d="M15 2v2" /><path d="M15 20v2" /><path d="M20 15h2" /><path d="M2 15h2" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg className="h-5 w-5 text-warn shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}
 
 export default function Dashboard() {
   const [env, setEnv] = useState<EnvStatus | null>(null);
@@ -100,7 +163,6 @@ export default function Dashboard() {
     setCheckingFlashInfer(true);
     try {
       await api.installCudaBuildTools();
-      // Re-check after install
       const ready = await api.checkFlashInferReady();
       setFlashInferReady(ready);
     } catch (e) {
@@ -148,16 +210,23 @@ export default function Dashboard() {
   const totalGb = gpu ? gpu.vram_total_mb / 1024 : 0;
 
   return (
-    <div className="mx-auto max-w-6xl p-6 space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-100">Dashboard</h1>
-        <div className="flex gap-2">
+    <div className="mx-auto max-w-6xl p-6 space-y-6">
+      {/* Top Header Row */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold text-slate-100 tracking-tight">Dashboard</h1>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Hardware allocation, local runtime engines, and system telemetry
+          </p>
+        </div>
+        <div className="flex items-center gap-2.5">
           <Button variant="ghost" onClick={() => setRefreshKey((k) => k + 1)}>
-            ↻ Refresh
+            <RefreshIcon />
+            <span>Refresh</span>
           </Button>
           {(!env || !env.provisioned) && (
             <Button onClick={runProvision} disabled={provisioning}>
-              {provisioning ? <Spinner label="Provisioning…" /> : "⚡ Provision WSL"}
+              {provisioning ? <Spinner label="Provisioning WSL…" /> : "Provision WSL"}
             </Button>
           )}
         </div>
@@ -201,25 +270,25 @@ export default function Dashboard() {
         if (!isLoadedIntoRam && !isLowHeadroom) return null;
 
         return (
-          <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-amber-200 shadow-sm flex items-start gap-3">
-            <span className="text-xl">⚠️</span>
+          <div className="rounded-2xl border border-warn/30 bg-warn/10 p-4 text-amber-200 shadow-sm flex items-start gap-3.5">
+            <AlertIcon />
             <div>
-              <div className="font-semibold text-amber-100">
+              <div className="font-semibold text-amber-100 text-sm">
                 {isLoadedIntoRam
-                  ? "Low VRAM Warning — Model Loaded into System RAM"
+                  ? "VRAM Limit Warning — Weights Loaded into System RAM"
                   : "Low VRAM Available Warning"}
               </div>
-              <div className="text-xs text-amber-300/90 mt-0.5">
+              <div className="text-xs text-amber-200/90 mt-1 leading-relaxed">
                 {isLoadedIntoRam ? (
                   <>
                     Active model weights ({fmtGB(activeWeight)}
-                    {specWeight > 0 ? ` [model: ${fmtGB(mainWeight)}, speculative draft: ${fmtGB(specWeight)}]` : ""}
-                    ) exceed GPU VRAM capacity ({fmtNum(totalGb, 1)} GB total, ~{fmtNum(usableCapacityGb, 1)} GB usable for weights).{" "}
-                    <strong>Your model is getting loaded into system RAM by ~{fmtGB(loadedIntoRamGb)}.</strong>{" "}
-                    (This counts model weights and speculative decoding weights; context is excluded). Running weights from system RAM will reduce generation speed.
+                    {specWeight > 0 ? ` [model: ${fmtGB(mainWeight)}, draft: ${fmtGB(specWeight)}]` : ""}
+                    ) exceed dedicated GPU VRAM capacity ({fmtNum(totalGb, 1)} GB total, ~{fmtNum(usableCapacityGb, 1)} GB usable).{" "}
+                    <strong>Model weights spilled into system RAM by ~{fmtGB(loadedIntoRamGb)}.</strong>{" "}
+                    Running weights from system RAM will reduce generation tokens/sec.
                   </>
                 ) : (
-                  `Low VRAM available: only ${fmtNum(freeGb, 2)} GB free remaining. Current model weights fit in VRAM (0 GB loaded into system RAM). Starting another server or expanding context length may cause CUDA out-of-memory errors.`
+                  `Only ${fmtNum(freeGb, 2)} GB free VRAM remaining. Current weights fit within GPU memory. Starting an additional server or expanding context length may cause CUDA out-of-memory errors.`
                 )}
               </div>
             </div>
@@ -227,181 +296,159 @@ export default function Dashboard() {
         );
       })()}
 
-      {/* Health row */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Card>
-          <CardTitle>llama.cpp</CardTitle>
-          <div className="space-y-1.5 text-sm">
-            <div className="flex items-center gap-2">
-              <span className={`h-2 w-2 rounded-full ${env?.llamacpp_installed ? "bg-emerald-400" : "bg-amber-400"}`} />
-              <span className="font-medium text-slate-200">
-                {env?.llamacpp_installed ? "installed" : "not installed"}
-              </span>
-            </div>
-            <div className="text-xs text-slate-500">{env?.llamacpp_version ?? "Native Windows backend"}</div>
-            <div className="text-xs text-slate-400">
-              {env?.llamacpp_cuda_available ? "CUDA ready" : "CUDA device not detected"}
-              {env?.llamacpp_devices?.length ? ` · ${env.llamacpp_devices.map((d) => d.id).join(", ")}` : ""}
-            </div>
-            {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
-              <Button
-                variant="subtle"
-                onClick={installLlamacpp}
-                disabled={installingLlamacpp}
-                className="mt-2 w-full"
-              >
-                {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
-              </Button>
-            )}
-          </div>
-        </Card>
-        <Card>
-          <CardTitle>WSL</CardTitle>
-          {env ? (
-            <div className="space-y-1.5 text-sm">
-              <div className="flex items-center gap-2">
-                <span className={`h-2 w-2 rounded-full ${env.wsl_ok ? "bg-emerald-400" : "bg-slate-400"}`} />
-                <span className="font-medium text-slate-200">{env.distro}</span>
-              </div>
-              <div className="text-xs text-slate-500">
-                {env.wsl_ok ? "running" : "powered down (starts on demand)"} ·{" "}
-                {env.apt_based ? "apt-based" : "not apt-based"}
-              </div>
-              <div className="text-xs text-slate-500">
-                vLLM:{" "}
-                {rep?.vllm_version ? (
-                  <span className="text-emerald-300">{rep.vllm_version}</span>
+      {/* Primary Inset Groups (Apple/Fluent Settings Layout) */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        {/* Left Column: Inference Engines & Servers */}
+        <div>
+          <InsetGroup header="Inference Engines & Runtimes">
+            {/* WSL / vLLM Row */}
+            <SettingsRow
+              icon={<SquircleIcon color="green" icon={<TerminalIcon />} />}
+              title="vLLM Inference Engine"
+              subtitle={
+                env ? (
+                  <span>
+                    {env.distro} ({env.wsl_ok ? "WSL2 running" : "standby"}) ·{" "}
+                    {rep?.vllm_version ? (
+                      <span className="text-emerald-400 font-mono">v{rep.vllm_version}</span>
+                    ) : (
+                      <span className="text-amber-400">Not provisioned</span>
+                    )}
+                  </span>
+                ) : "Loading WSL2 environment…"
+              }
+              right={
+                env?.provisioned ? (
+                  <Badge color="emerald">Ready</Badge>
                 ) : (
-                  <span className="text-amber-300">not installed</span>
-                )}
-              </div>
-              {!env.provisioned && (
-                <div className="text-xs text-amber-300">Not provisioned yet — hit “Provision WSL”.</div>
-              )}
-            </div>
-          ) : (
-            <Spinner />
-          )}
-        </Card>
+                  <Button variant="ghost" className="text-xs h-7 px-2" onClick={runProvision} disabled={provisioning}>
+                    Provision
+                  </Button>
+                )
+              }
+            />
 
-        <Card>
-          <CardTitle>GPU</CardTitle>
-          {gpu ? (
-            <div className="space-y-2 text-sm">
-              <div className="font-medium text-slate-200">{gpu.name}</div>
-              <div className="text-xs text-slate-500">
-                {fmtNum(gpu.vram_free_mb / 1024, 1)} / {fmtNum(gpu.vram_total_mb / 1024, 0)} GB free · util{" "}
-                {gpu.util_percent}%
-              </div>
-              <div className="text-xs text-slate-500">
-                est. bandwidth{" "}
-                <span className="text-slate-300">{env?.gpu_bandwidth_gbs ?? "?"} GB/s</span>
-                {!env?.gpu_bw_known && <span className="text-amber-300"> (default)</span>}
-              </div>
-              <div className="text-xs text-slate-500">
-                CUDA: {rep?.torch_version ?? "n/a"} · bf16 {rep?.bf16_supported ? "✓" : "✗"}
-              </div>
-              <div className="pt-1">
-                <Sparkline
-                  label="Core Util"
-                  data={systemSeries.map((p) => p.gpu_util_pct)}
-                  height={28}
-                  min={0}
-                  max={100}
-                  color="#34d399"
-                  unit="%"
-                  currentValue={`${gpu.util_percent}%`}
-                  showMinMax={false}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="text-sm text-slate-500">nvidia-smi not visible inside WSL.</div>
-          )}
-        </Card>
-
-        <Card>
-          <CardTitle>System & Memory</CardTitle>
-          {env ? (
-            <div className="space-y-1.5 text-sm">
-              <div className="font-medium text-slate-200 truncate" title={env.cpu_name ?? undefined}>
-                {env.cpu_name ? env.cpu_name.replace("(R)", "").replace("(TM)", "") : "Host CPU"}
-              </div>
-              <div className="text-xs text-slate-500">
-                {env.cpu_cores ? `${env.cpu_cores} cores · ` : ""}
-                RAM: {env.available_ram_gb ? fmtNum(env.available_ram_gb, 1) : "?"} / {env.total_ram_gb ? fmtNum(env.total_ram_gb, 1) : "?"} GB free
-              </div>
-              <div className="text-xs text-slate-500">
-                est. RAM bandwidth <span className="text-slate-300 font-mono">{env.ram_bandwidth_gbps ?? "?"} GB/s</span>
-              </div>
-              <div className="text-xs text-slate-500">
-                Runtimes: <span className="text-emerald-300">{env.providers_detected && env.providers_detected.length > 0 ? env.providers_detected.join(", ") : "llama.cpp, vLLM"}</span>
-              </div>
-            </div>
-          ) : (
-            <Spinner />
-          )}
-        </Card>
-
-        <Card>
-          <CardTitle>Servers</CardTitle>
-          {env ? (
-            <div className="space-y-1.5 text-sm">
-              <div>
-                <span className="font-medium text-slate-200">{env.servers_running}</span>{" "}
-                <span className="text-slate-500">running</span>
-              </div>
-              {env.running_weight_gb > 0 && (
-                <div className="text-xs text-slate-500">
-                  est. weights: <span className="text-slate-300">{fmtGB(env.running_weight_gb)}</span>
-                  {env.running_speculative_weight_gb && env.running_speculative_weight_gb > 0 ? (
-                    <span className="text-slate-400"> (spec: {fmtGB(env.running_speculative_weight_gb)})</span>
-                  ) : null}{" "}
-                  on {totalGb.toFixed(0)} GB GPU
-                </div>
-              )}
-              {freeGb > 0 && env.running_weight_gb > 0.05 && (() => {
-                const overheadGb = 1.0;
-                const usableCapacityGb = Math.max(0, totalGb - overheadGb);
-                const capacitySpillGb = totalGb > 0 ? Math.max(0, env.running_weight_gb - usableCapacityGb) : 0;
-                const loadedRam = env?.running_ram_weight_gb != null && env.running_ram_weight_gb > 0
-                  ? env.running_ram_weight_gb
-                  : capacitySpillGb;
-                return (
-                  <div className="text-xs">
-                    <span className={loadedRam > 0.01 ? "text-amber-300 font-medium" : "text-emerald-300"}>
-                      {loadedRam > 0.01
-                        ? `~${fmtGB(loadedRam)} loaded into system RAM`
-                        : "fits in VRAM (0 GB in system RAM)"}
-                    </span>{" "}
-                    <span className="text-slate-600">
-                      {loadedRam > 0.01
-                        ? `(weights exceed ${usableCapacityGb.toFixed(1)} GB VRAM capacity)`
-                        : `(weights fit on ${totalGb.toFixed(0)} GB GPU · ${freeGb.toFixed(1)} GB free)`}
+            {/* llama.cpp Row */}
+            <SettingsRow
+              icon={<SquircleIcon color="blue" icon={<ServerStackIcon />} />}
+              title="llama.cpp Native Engine"
+              subtitle={
+                env ? (
+                  <span>
+                    {env.llamacpp_installed ? "Native Windows backend" : "Not installed"} ·{" "}
+                    <span className={env.llamacpp_cuda_available ? "text-emerald-400" : "text-slate-400"}>
+                      {env.llamacpp_cuda_available ? "CUDA acceleration active" : "CPU only"}
                     </span>
-                  </div>
-                );
-              })()}
-            </div>
-          ) : (
-            <Spinner />
-          )}
-        </Card>
+                  </span>
+                ) : "Checking native backend…"
+              }
+              right={
+                env?.llamacpp_installed ? (
+                  <Badge color="emerald">Installed</Badge>
+                ) : (
+                  <Button variant="ghost" className="text-xs h-7 px-2" onClick={installLlamacpp} disabled={installingLlamacpp}>
+                    Install
+                  </Button>
+                )
+              }
+            />
+
+            {/* Active Servers Summary */}
+            <SettingsRow
+              icon={<SquircleIcon color="purple" icon={<ServerStackIcon />} />}
+              title="Active Server Processes"
+              subtitle={
+                env && env.servers_running > 0 ? (
+                  <span>
+                    {env.servers_running} active {env.servers_running === 1 ? "engine" : "engines"} ·{" "}
+                    <span className="font-mono text-slate-300">{fmtGB(env.running_weight_gb)}</span> weights
+                  </span>
+                ) : (
+                  "No local inference servers currently running"
+                )
+              }
+              right={
+                <Badge color={env && env.servers_running > 0 ? "emerald" : "slate"}>
+                  {env ? `${env.servers_running} Running` : "0"}
+                </Badge>
+              }
+            />
+          </InsetGroup>
+        </div>
+
+        {/* Right Column: Hardware & Host Resources */}
+        <div>
+          <InsetGroup header="Hardware & Memory Capacity">
+            {/* GPU Row */}
+            <SettingsRow
+              icon={<SquircleIcon color="orange" icon={<GpuChipIcon />} />}
+              title={gpu ? gpu.name : "NVIDIA Graphics Card"}
+              subtitle={
+                gpu ? (
+                  <span>
+                    {fmtNum(gpu.vram_free_mb / 1024, 1)} GB free of {fmtNum(gpu.vram_total_mb / 1024, 0)} GB ·{" "}
+                    {env?.gpu_bandwidth_gbs ?? 700} GB/s bandwidth
+                  </span>
+                ) : (
+                  "NVIDIA GPU not detected"
+                )
+              }
+              right={
+                gpu ? (
+                  <span className="font-mono text-xs text-slate-300 bg-surface-3 px-2 py-0.5 rounded-md border border-edge">
+                    {gpu.util_percent}% util
+                  </span>
+                ) : (
+                  <Badge color="slate">N/A</Badge>
+                )
+              }
+            />
+
+            {/* CPU & RAM Row */}
+            <SettingsRow
+              icon={<SquircleIcon color="slate" icon={<CpuIcon />} />}
+              title={env?.cpu_name ? env.cpu_name.replace("(R)", "").replace("(TM)", "") : "Host Processor & RAM"}
+              subtitle={
+                env ? (
+                  <span>
+                    {env.cpu_cores ? `${env.cpu_cores} cores · ` : ""}
+                    {env.available_ram_gb ? fmtNum(env.available_ram_gb, 1) : "?"} / {env.total_ram_gb ? fmtNum(env.total_ram_gb, 1) : "?"} GB RAM available
+                  </span>
+                ) : (
+                  "Detecting host hardware…"
+                )
+              }
+              right={
+                env?.ram_bandwidth_gbps ? (
+                  <span className="font-mono text-xs text-slate-400">
+                    {env.ram_bandwidth_gbps} GB/s
+                  </span>
+                ) : null
+              }
+            />
+          </InsetGroup>
+        </div>
       </div>
 
-      {/* VRAM gauge + Time-series Sparklines */}
-      <Card className="flex flex-col justify-between p-4 gap-4">
-        <CardTitle>GPU & VRAM History (last 5 min)</CardTitle>
-        <div className="flex flex-col sm:flex-row items-center justify-around gap-6 my-auto">
-          <Gauge pct={vramPct} label={gpu ? `${vramPct}%` : "?"} sub={gpu ? `${fmtNum(freeGb, 1)} GB free / ${fmtNum(totalGb, 0)} GB` : "no GPU"} />
-          <div className="flex-1 w-full space-y-3">
+      {/* GPU & VRAM Live Telemetry Card */}
+      <Card className="p-5 space-y-4">
+        <CardTitle right={<span className="text-xs text-slate-400 font-mono">5-minute window</span>}>
+          Real-time Hardware Telemetry
+        </CardTitle>
+        <div className="flex flex-col md:flex-row items-center justify-around gap-8">
+          <Gauge
+            pct={vramPct}
+            label={gpu ? `${vramPct}%` : "—"}
+            sub={gpu ? `${fmtNum(freeGb, 1)} GB free / ${fmtNum(totalGb, 0)} GB` : "No GPU"}
+          />
+          <div className="flex-1 w-full space-y-4">
             <Sparkline
-              label="VRAM Used"
+              label="VRAM Allocation"
               data={systemSeries.map((p) => p.vram_used_mb / 1024)}
               unit="GB"
               min={0}
               max={totalGb || 24}
-              color="#38bdf8"
+              color="#0a84ff"
               currentValue={gpu ? `${((gpu.vram_total_mb - gpu.vram_free_mb) / 1024).toFixed(1)} GB` : undefined}
               formatValue={(v) => `${v.toFixed(1)}`}
             />
@@ -411,7 +458,7 @@ export default function Dashboard() {
               unit="%"
               min={0}
               max={100}
-              color="#34d399"
+              color="#30d158"
               currentValue={gpu ? `${gpu.util_percent}%` : undefined}
               formatValue={(v) => `${Math.round(v)}`}
             />
@@ -419,35 +466,40 @@ export default function Dashboard() {
         </div>
       </Card>
 
-      {/* Setup & diagnostics — advanced, folded away for everyday use. Forced open while provisioning. */}
+      {/* Setup & Diagnostics Collapsible */}
       <Collapsible
         key={provisioning ? "diag-open" : "diag-closed"}
         defaultOpen={provisioning || !!provisionErr}
-        title="Setup & diagnostics"
-        subtitle="Provisioning log, FlashInfer JIT build tools, and repair actions"
+        title="Environment Diagnostics & Maintenance"
+        subtitle="WSL provisioning logs, FlashInfer JIT build tools, and engine updates"
       >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <Card>
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+          {/* Provisioning Logs */}
+          <Card className="p-4 space-y-3">
             <CardTitle
               right={
-                provisioning ? <Spinner label="running…" /> : <span className="text-[11px] text-slate-600">{logs.length} lines</span>
+                provisioning ? (
+                  <Spinner label="Running…" />
+                ) : (
+                  <span className="text-xs text-slate-500 font-mono">{logs.length} lines</span>
+                )
               }
             >
-              Provisioning log
+              WSL Execution Log
             </CardTitle>
-            <div className="h-64 overflow-y-auto rounded-md bg-black/30 p-3 font-mono text-[11px] leading-relaxed">
+            <div className="h-64 overflow-y-auto rounded-xl bg-surface p-3 font-mono text-[11px] leading-relaxed border border-edge-subtle">
               {logs.length === 0 ? (
-                <span className="text-slate-600">
+                <span className="text-slate-500">
                   {provisioning
-                    ? "waiting for output…"
+                    ? "Waiting for output stream…"
                     : env?.provisioned
-                      ? "Provisioned ✓ — re-run to verify / repair. To upgrade vLLM, use “Update vLLM” below."
-                      : "Run “Provision WSL” — first run installs apt basics, a uv venv (CPython 3.12) and vLLM CUDA wheels."}
+                    ? "Environment provisioned. Re-run to verify or repair packages."
+                    : "Hit 'Provision WSL' to initialize apt packages, python virtualenv, and vLLM wheels."}
                 </span>
               ) : (
                 logs.map((l, i) => (
                   <div key={i}>
-                    <span className="text-indigo-400/70">[{l.phase}]</span>{" "}
+                    <span className="text-accent/80">[{l.phase}]</span>{" "}
                     <span className="text-slate-300">{l.line}</span>
                   </div>
                 ))
@@ -455,91 +507,93 @@ export default function Dashboard() {
               <div ref={logEndRef} />
             </div>
             {env?.provisioned && !provisioning && (
-              <div className="mt-3 flex gap-2">
-                <Button variant="subtle" onClick={runProvision}>
-                  Re-run setup (verify / repair)
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button variant="ghost" className="text-xs h-7 px-2.5" onClick={runProvision}>
+                  Verify / Repair WSL
                 </Button>
-                <Button variant="subtle" onClick={updateVllm} disabled={updatingVllm}>
-                  {updatingVllm ? <Spinner label="Updating vLLM…" /> : "Update vLLM"}
+                <Button variant="ghost" className="text-xs h-7 px-2.5" onClick={updateVllm} disabled={updatingVllm}>
+                  {updatingVllm ? <Spinner label="Updating…" /> : "Update vLLM"}
                 </Button>
                 {env && (!env.llamacpp_installed || !env.llamacpp_cuda_available) && (
-                  <Button variant="subtle" onClick={installLlamacpp} disabled={installingLlamacpp}>
-                    {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Reinstall CUDA build" : "Install llama.cpp"}
+                  <Button variant="ghost" className="text-xs h-7 px-2.5" onClick={installLlamacpp} disabled={installingLlamacpp}>
+                    {installingLlamacpp ? <Spinner label="Installing…" /> : env.llamacpp_installed ? "Rebuild CUDA" : "Install llama.cpp"}
                   </Button>
                 )}
               </div>
             )}
             {(updatingVllm || vllmUpdateMsg) && (
-              <div className="mt-2 text-[11px] text-slate-400">
-                {updatingVllm ? "Upgrading vLLM in WSL — this can take a few minutes on first run…" : vllmUpdateMsg}
+              <div className="text-xs text-slate-400 mt-1">
+                {updatingVllm ? "Upgrading vLLM in WSL — this may take a few minutes…" : vllmUpdateMsg}
               </div>
             )}
           </Card>
 
-          <Card>
+          {/* FlashInfer JIT Tools */}
+          <Card className="p-4 space-y-3">
             <CardTitle
               right={
-                <div className="flex items-center gap-1">
-                  <Button variant="ghost" className="text-[11px]" onClick={checkFlashInfer} disabled={checkingFlashInfer}>
-                    {checkingFlashInfer ? <Spinner label="checking…" /> : "Check"}
+                <div className="flex items-center gap-1.5">
+                  <Button variant="ghost" className="text-xs h-7 px-2" onClick={checkFlashInfer} disabled={checkingFlashInfer}>
+                    {checkingFlashInfer ? <Spinner label="Checking…" /> : "Check"}
                   </Button>
-                  {flashInferReady && (!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev) ? (
-                    <Button variant="subtle" className="text-[11px]" onClick={installCudaTools} disabled={checkingFlashInfer}>
-                      Install CUDA Build Tools
+                  {flashInferReady && (!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev) && (
+                    <Button variant="primary" className="text-xs h-7 px-2.5" onClick={installCudaTools} disabled={checkingFlashInfer}>
+                      Install CUDA Tools
                     </Button>
-                  ) : null}
+                  )}
                 </div>
               }
             >
-              FlashInfer JIT build tools
+              FlashInfer JIT Build Tools
             </CardTitle>
             {flashInferReady ? (
-              <div className="space-y-1.5 text-sm">
+              <div className="space-y-2 text-xs">
                 {[
-                  ["nvcc", "nvcc", "bg-emerald-400", "bg-red-400"],
-                  ["gcc", "gcc", "bg-emerald-400", "bg-red-400"],
-                  ["ninja", "ninja", "bg-emerald-400", "bg-red-400"],
-                  ["python3.12-dev", "python_dev", "bg-emerald-400", "bg-red-400"],
-                ].map(([label, key, foundColor, missingColor]) => (
-                  <div key={key} className="flex items-center gap-2 text-xs">
-                    <span className={`h-2 w-2 rounded-full ${flashInferReady[key as keyof typeof flashInferReady] ? foundColor : missingColor}`} />
-                    <span className="font-mono">{label}</span>
-                    <span className={flashInferReady[key as keyof typeof flashInferReady] ? "text-emerald-300" : "text-red-300"}>
-                      {flashInferReady[key as keyof typeof flashInferReady] ? "found" : "missing"}
-                    </span>
-                  </div>
-                ))}
+                  ["nvcc (NVIDIA Compiler)", "nvcc"],
+                  ["gcc (GNU C Compiler)", "gcc"],
+                  ["ninja (Build System)", "ninja"],
+                  ["python3.12-dev (Headers)", "python_dev"],
+                ].map(([label, key]) => {
+                  const present = Boolean(flashInferReady[key as keyof typeof flashInferReady]);
+                  return (
+                    <div key={key} className="flex items-center justify-between py-1 border-b border-edge-subtle">
+                      <span className="font-medium text-slate-300">{label}</span>
+                      <Badge color={present ? "emerald" : "red"}>{present ? "Found" : "Missing"}</Badge>
+                    </div>
+                  );
+                })}
                 {flashInferReady.cuda_home && (
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="h-2 w-2 rounded-full bg-cyan-400" />
-                    <span className="font-mono">CUDA_HOME</span>
-                    <span className="text-cyan-300 font-mono text-[10px] truncate max-w-[200px]">{flashInferReady.cuda_home}</span>
+                  <div className="flex items-center justify-between py-1 border-b border-edge-subtle">
+                    <span className="text-slate-400">CUDA_HOME</span>
+                    <span className="font-mono text-[10px] text-slate-300 truncate max-w-[220px]">{flashInferReady.cuda_home}</span>
                   </div>
                 )}
                 {flashInferReady.torch_cuda_version && (
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="h-2 w-2 rounded-full bg-indigo-400" />
-                    <span className="font-mono">PyTorch CUDA</span>
-                    <span className="text-indigo-300">{flashInferReady.torch_cuda_version}</span>
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-slate-400">PyTorch CUDA Target</span>
+                    <span className="font-mono text-xs text-accent">{flashInferReady.torch_cuda_version}</span>
                   </div>
                 )}
                 {!flashInferReady.nvcc || !flashInferReady.gcc || !flashInferReady.ninja || !flashInferReady.python_dev ? (
-                  <div className="mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
-                    Missing build tools. Install in WSL: <code className="bg-black/40 px-1 py-0.5 rounded">sudo apt update && sudo apt install -y gcc ninja-build python3.12-dev</code> + CUDA toolkit from NVIDIA WSL repo.
+                  <div className="mt-2.5 p-3 rounded-xl bg-warn/10 border border-warn/25 text-xs text-amber-200 leading-relaxed">
+                    Missing build tools for JIT compilation. Click <strong>Install CUDA Tools</strong> to provision gcc, ninja, and python dev packages automatically in WSL.
                   </div>
                 ) : (
-                  <div className="mt-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
-                    All FlashInfer JIT build tools present. First compilation will be slow (~30-60s), subsequent runs cached.
+                  <div className="mt-2.5 p-3 rounded-xl bg-good/10 border border-good/25 text-xs text-emerald-200">
+                    All FlashInfer JIT build tools present and configured.
                   </div>
                 )}
               </div>
             ) : (
-              <div className="text-sm text-slate-500">Click "Check" to verify nvcc, gcc, ninja, and python3.12-dev in WSL.</div>
+              <div className="text-xs text-slate-400 py-6 text-center">
+                Click <strong>Check</strong> to inspect nvcc, gcc, ninja, and python dev tools in WSL.
+              </div>
             )}
           </Card>
         </div>
       </Collapsible>
-          <SmartScreenTrustModal isOpen={showTrustModal} onClose={() => setShowTrustModal(false)} />
+
+      <SmartScreenTrustModal isOpen={showTrustModal} onClose={() => setShowTrustModal(false)} />
     </div>
   );
 }

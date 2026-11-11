@@ -424,7 +424,7 @@ export default function Servers() {
               </div>
             )}
             <textarea
-              className="w-full h-44 rounded-lg border border-edge bg-surface-2 p-3 font-mono text-xs text-slate-200 focus:border-indigo-500 focus:outline-none"
+              className="w-full h-44 rounded-lg border border-edge bg-surface-2 p-3 font-mono text-xs text-slate-200 focus:border-accent focus:outline-none"
               placeholder={'{\n  "schema": "local-llm-panel/server-recipe/v1",\n  "model_id": "meta-llama/Llama-3.1-8B-Instruct",\n  "task": "instruct",\n  "port": 8000,\n  "gpu_mem_util": 0.9,\n  "quant": "awq"\n}'}
               value={recipeInput}
               onChange={(e) => setRecipeInput(e.target.value)}
@@ -492,7 +492,7 @@ export default function Servers() {
       ) : (
         <div className="space-y-2.5">
           {rows.map((r) => (
-            <Card key={r.def.id} className={`p-3.5 ${selected === r.def.id ? "ring-1 ring-indigo-500/50" : ""}`}>
+            <Card key={r.def.id} className={`p-4 rounded-2xl border border-edge/80 bg-surface-2 transition-all hover:border-accent/40 ${selected === r.def.id ? "ring-1 ring-accent/50 bg-surface-2/95" : ""}`}>
               <div className="flex flex-wrap items-center gap-3">
                 <button className="min-w-0 flex-1 text-left group" onClick={() => setSelected(selected === r.def.id ? null : r.def.id)}>
                   <div className="flex items-center gap-2">
@@ -508,7 +508,7 @@ export default function Servers() {
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-slate-500 group-hover:text-slate-400">
                     <span>{r.def.model_id}</span>
-                    <span className="text-indigo-300">{r.def.backend === "llamacpp" ? "llama.cpp · Windows" : "vLLM · WSL2"}</span>
+                    <span className="text-accent">{r.def.backend === "llamacpp" ? "llama.cpp · Windows" : "vLLM · WSL2"}</span>
                     <span>·</span>
                     <span>port {r.def.port}</span>
                     <span>·</span>
@@ -1727,7 +1727,7 @@ function NewServerForm({
   };
 
   return (
-    <Card className="border-indigo-500/30">
+    <Card className="border-accent/30">
       <CardTitle>{isEditing ? "Edit server" : "Define new server"}</CardTitle>
       {freeGb !== null && freeGb !== undefined && (() => {
         const est = estimateServerWeights(
@@ -2043,8 +2043,8 @@ function NewServerForm({
                   <option value="graphs">CUDA graphs (higher throughput)</option>
                 </select>
               </Field>
-              <div className="sm:col-span-2 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-xs text-slate-400">
-                <span className="font-semibold text-indigo-200">vLLM 0.30+ defaults:</span> attention backend Auto, prefix caching enabled, and chunked prefill managed by vLLM. KV precision can be inherited globally or overridden per server above.
+              <div className="sm:col-span-2 rounded-lg border border-accent/20 bg-accent/5 p-3 text-xs text-slate-400">
+                <span className="font-semibold text-sky-200">vLLM 0.30+ defaults:</span> attention backend Auto, prefix caching enabled, and chunked prefill managed by vLLM. KV precision can be inherited globally or overridden per server above.
               </div>
               <EnvironmentVarsEditor initialEnv={env} onChange={setEnv} />
               <Field label="GPU memory utilization" help="Fraction of GPU VRAM vLLM may reserve for weights + KV cache. Higher fits longer contexts and more concurrency but leaves less headroom (out-of-memory risk). 0.85 default." hint="Fraction of GPU memory vLLM may reserve (0–1). Default 0.85.">
@@ -3127,14 +3127,14 @@ function ChatDrawer({
                 }}
                 className={`group flex items-center justify-between rounded-lg px-2.5 py-2 text-xs cursor-pointer transition-colors ${
                   c.id === activeId
-                    ? "bg-indigo-500/15 text-indigo-200 border border-indigo-500/30"
+                    ? "bg-accent/15 text-sky-200 border border-accent/30"
                     : "text-slate-400 hover:bg-surface-3 hover:text-slate-200"
                 }`}
               >
                 {editingTitleId === c.id ? (
                   <input
                     autoFocus
-                    className="w-full rounded bg-surface-1 px-1.5 py-0.5 text-xs text-slate-100 border border-indigo-500 outline-hidden"
+                    className="w-full rounded bg-surface-1 px-1.5 py-0.5 text-xs text-slate-100 border border-accent outline-hidden"
                     value={editingTitleText}
                     onChange={(e) => setEditingTitleText(e.target.value)}
                     onBlur={() => saveRename(c.id)}
@@ -3181,7 +3181,7 @@ function ChatDrawer({
                 onClick={() => setShowSettings((s) => !s)}
                 className={`rounded border px-2.5 py-1 text-xs transition-colors ${
                   showSettings
-                    ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-200"
+                    ? "border-accent/50 bg-accent/10 text-sky-200"
                     : "border-edge bg-surface-3 text-slate-400 hover:text-slate-200"
                 }`}
               >
@@ -3208,7 +3208,7 @@ function ChatDrawer({
                   step="0.05"
                   value={temperature}
                   onChange={(e) => setTemperature(parseFloat(e.target.value))}
-                  className="w-48 accent-indigo-500"
+                  className="w-48 accent-accent"
                 />
                 <span className="font-mono text-slate-300 w-8">{temperature.toFixed(2)}</span>
               </div>
@@ -3234,7 +3234,7 @@ function ChatDrawer({
                       api.conversationsSave(updated).catch(console.error);
                     }
                   }}
-                  className="flex-1 rounded-md border border-edge bg-surface-1 p-2 text-xs text-slate-200 outline-hidden focus:border-indigo-500"
+                  className="flex-1 rounded-md border border-edge bg-surface-1 p-2 text-xs text-slate-200 outline-hidden focus:border-accent"
                   placeholder="System instructions..."
                 />
               </div>
@@ -3253,7 +3253,7 @@ function ChatDrawer({
                   <div
                     className={`max-w-[85%] rounded-xl px-4 py-3 text-sm shadow-xs ${
                       m.role === "user"
-                        ? "bg-indigo-600 text-white rounded-br-xs"
+                        ? "bg-accent text-white rounded-br-xs"
                         : "border border-edge bg-surface-2 text-slate-200 rounded-bl-xs"
                     }`}
                   >
@@ -3281,8 +3281,8 @@ function ChatDrawer({
                 </div>
               ))}
             {streaming && (
-              <div className="flex items-center gap-2 text-xs text-indigo-300">
-                <span className="inline-block h-2 w-2 animate-ping rounded-full bg-indigo-400" />
+              <div className="flex items-center gap-2 text-xs text-accent">
+                <span className="inline-block h-2 w-2 animate-ping rounded-full bg-accent" />
                 <span>Streaming tokens...</span>
               </div>
             )}
@@ -3501,7 +3501,7 @@ function BenchmarkDrawer({
 
           {/* Progress / Status */}
           {statusMsg && (
-            <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-200 flex items-center justify-between">
+            <div className="rounded-lg border border-accent/30 bg-accent/10 p-3 text-xs text-sky-200 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 {running && <Spinner />}
                 <span>{statusMsg}</span>
@@ -3547,7 +3547,7 @@ function BenchmarkDrawer({
                         {new Date(h.timestamp * 1000).toLocaleString()}
                       </td>
                       <td className="px-3.5 py-2.5">
-                        <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] text-indigo-300">
+                        <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] text-accent">
                           {h.quant || "native"}
                         </span>
                       </td>

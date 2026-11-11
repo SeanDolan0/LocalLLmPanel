@@ -1,6 +1,6 @@
 import { StoragePlanner } from "../components/StoragePlanner";
 import { ErrorAlert } from "../components/ErrorAlert";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -221,11 +221,11 @@ function PullStateButton({
         <div className="flex items-center gap-2 min-w-[130px] max-w-[200px]">
           <div className="flex-1 h-2 rounded-full bg-surface-3 overflow-hidden">
             <div
-              className="h-full rounded-full bg-indigo-500 transition-all duration-300 ease-out"
+              className="h-full rounded-full bg-accent transition-all duration-300 ease-out"
               style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
             />
           </div>
-          <span className="font-mono text-xs text-indigo-300 shrink-0">{percent.toFixed(0)}%</span>
+          <span className="font-mono text-xs text-accent shrink-0">{percent.toFixed(0)}%</span>
           {onCancelPull && (
             <button
               onClick={() => onCancelPull(targetId, quant)}
@@ -312,7 +312,7 @@ function ErrorBanner({ message, color: _color, onSettingsClick }: ErrorBannerPro
         <div className="flex justify-end">
           <button
             onClick={onSettingsClick}
-            className="rounded bg-indigo-500/20 px-2.5 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/30 transition-colors"
+            className="rounded bg-accent/20 px-2.5 py-1 text-xs font-medium text-sky-200 hover:bg-accent/30 transition-colors"
           >
             Open Settings to add HF Token
           </button>
@@ -352,16 +352,87 @@ function getBestVariant(m: ModelWithFit): QuantVariantWithFit | undefined {
   return m.variants[0];
 }
 
-const CATEGORIES: { key: DiscoveryCategory; label: string; desc: string; icon: string }[] = [
-  { key: "for_you", label: "For You", desc: "Best overall models tailored to your GPU VRAM, compute, and context", icon: "✨" },
-  { key: "trending", label: "New & Trending", desc: "Recently released and fast-rising models on Hugging Face Hub", icon: "🔥" },
-  { key: "coding", label: "Coding", desc: "Specialized models for code generation, agentic coding, and tool calling", icon: "💻" },
-  { key: "reasoning", label: "Reasoning", desc: "Deep multi-step reasoning, mathematical, and logic models", icon: "🧠" },
-  { key: "chat", label: "General Chat", desc: "Top conversational instruction-tuned assistant models", icon: "💬" },
-  { key: "small", label: "Small & Fast", desc: "Low-footprint models with ultra-fast token generation", icon: "⚡" },
-  { key: "embeddings", label: "Embeddings / RAG", desc: "Models for semantic search, document embeddings, and retrieval", icon: "📚" },
-  { key: "vision", label: "Vision", desc: "Multimodal models capable of image understanding", icon: "👁️" },
+function SparklesIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+    </svg>
+  );
+}
+
+function FlameIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />
+    </svg>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
+  );
+}
+
+function BrainIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+      <path d="M12 5v14" />
+    </svg>
+  );
+}
+
+function MessageIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+    </svg>
+  );
+}
+
+function ZapIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </svg>
+  );
+}
+
+function LayersIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </svg>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+const CATEGORIES: { key: DiscoveryCategory; label: string; desc: string; icon: ReactNode }[] = [
+  { key: "for_you", label: "For You", desc: "Best overall models tailored to your GPU VRAM, compute, and context", icon: <SparklesIcon /> },
+  { key: "trending", label: "New & Trending", desc: "Recently released and fast-rising models on Hugging Face Hub", icon: <FlameIcon /> },
+  { key: "coding", label: "Coding", desc: "Specialized models for code generation, agentic coding, and tool calling", icon: <CodeIcon /> },
+  { key: "reasoning", label: "Reasoning", desc: "Deep multi-step reasoning, mathematical, and logic models", icon: <BrainIcon /> },
+  { key: "chat", label: "General Chat", desc: "Top conversational instruction-tuned assistant models", icon: <MessageIcon /> },
+  { key: "small", label: "Small & Fast", desc: "Low-footprint models with ultra-fast token generation", icon: <ZapIcon /> },
+  { key: "embeddings", label: "Embeddings / RAG", desc: "Models for semantic search, document embeddings, and retrieval", icon: <LayersIcon /> },
+  { key: "vision", label: "Vision", desc: "Multimodal models capable of image understanding", icon: <EyeIcon /> },
 ];
+
 
 function matchesCategory(m: ModelWithFit, cat: string): boolean {
   if (cat === "for_you" || cat === "all") return true;
@@ -449,7 +520,7 @@ export function DownloadProgress({ pullState, onCancel }: DownloadProgressProps)
       <div className="flex items-center gap-2">
         <div className="flex-1 h-2 rounded-full bg-surface-3 overflow-hidden">
           <div
-            className="h-full rounded-full bg-indigo-500 transition-all duration-300 ease-out"
+            className="h-full rounded-full bg-accent transition-all duration-300 ease-out"
             style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
           />
         </div>
@@ -943,8 +1014,8 @@ export default function Search() {
               }}
               className={`rounded-full px-2.5 py-1 text-xs transition-colors flex items-center gap-1 ${
                 activeCategory === key && results === null
-                  ? "bg-indigo-600 text-white font-medium shadow-sm"
-                  : "bg-surface-2 border border-edge text-slate-400 hover:text-slate-200"
+                  ? "bg-accent text-white font-medium shadow-sm"
+                  : "bg-surface-2 border border-edge/80 text-slate-300 hover:text-white hover:bg-surface-3 transition-all active:scale-95"
               }`}
             >
               <span>{icon}</span>
@@ -956,7 +1027,7 @@ export default function Search() {
               <button
                 onClick={() => loadFeed(activeCategory, true)}
                 disabled={feedRefreshing}
-                className="rounded-full border border-edge bg-surface-2 px-2.5 py-1 text-xs text-indigo-400 hover:text-indigo-300 hover:bg-surface-3 transition-colors flex items-center gap-1.5"
+                className="rounded-full border border-edge bg-surface-2 px-2.5 py-1 text-xs text-accent hover:text-accent-hover hover:bg-surface-3 transition-colors flex items-center gap-1.5"
                 title="Force refresh discovery feed from Hugging Face Hub (bypasses cache)"
               >
                 <span className={feedRefreshing ? "animate-spin" : ""}>↻</span>
@@ -977,7 +1048,7 @@ export default function Search() {
               type="checkbox"
               checked={onlyRecommended}
               onChange={(e) => setOnlyRecommended(e.target.checked)}
-              className="rounded border-edge bg-surface-2 text-indigo-500 focus:ring-0"
+              className="rounded border-edge bg-surface-2 accent-accent focus:ring-0"
             />
             <span>Show only compatible (Comfortable / Constrained)</span>
           </label>
@@ -987,7 +1058,7 @@ export default function Search() {
               <button
                 onClick={() => setViewMode("grid")}
                 className={`rounded px-2 py-0.5 text-xs transition-colors ${
-                  viewMode === "grid" ? "bg-indigo-600 text-white font-medium" : "text-slate-400 hover:text-slate-200"
+                  viewMode === "grid" ? "bg-accent text-white font-medium shadow-xs" : "text-slate-400 hover:text-slate-200"
                 }`}
                 title="Grid card view"
               >
@@ -996,7 +1067,7 @@ export default function Search() {
               <button
                 onClick={() => setViewMode("table")}
                 className={`rounded px-2 py-0.5 text-xs transition-colors ${
-                  viewMode === "table" ? "bg-indigo-600 text-white font-medium" : "text-slate-400 hover:text-slate-200"
+                  viewMode === "table" ? "bg-accent text-white font-medium shadow-xs" : "text-slate-400 hover:text-slate-200"
                 }`}
                 title="Table list view"
               >
@@ -1093,7 +1164,7 @@ export default function Search() {
             </div>
             <button
               onClick={clearSearch}
-              className="text-xs text-indigo-400 hover:underline"
+              className="text-xs text-accent hover:underline"
             >
               ← Back to Recommended Models
             </button>
@@ -1155,12 +1226,12 @@ export default function Search() {
                       >
                         <td className="px-3 py-2.5 max-w-[280px]">
                           <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="font-medium text-slate-200 truncate hover:text-indigo-300" title={m.id}>
+                            <span className="font-medium text-slate-200 truncate hover:text-accent" title={m.id}>
                               {m.id}
                             </span>
                             <HfLink
                               modelId={m.id}
-                              className="text-slate-500 hover:text-indigo-300 p-0.5 rounded transition-colors shrink-0"
+                              className="text-slate-500 hover:text-accent p-0.5 rounded transition-colors shrink-0"
                             />
                           </div>
                           <div className="flex items-center gap-2 text-[11px] text-slate-500">
@@ -1176,7 +1247,7 @@ export default function Search() {
                                 <RunModeBadge mode={fit.run_mode} />
                               </div>
                               <div className="flex items-center gap-1">
-                                <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                                <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-accent/15 text-accent border border-accent/30">
                                   Rec: {variant?.label || variant?.format || "FP16"}
                                 </span>
                                 {(variant?.format === "GGUF" || fit?.format_support === "Experimental") && (
@@ -1356,7 +1427,7 @@ function ModelCard({
   return (
     <div
       onClick={onSelect}
-      className="group flex flex-col justify-between rounded-xl border border-edge bg-surface-2 p-4 transition-all hover:border-indigo-500/60 hover:bg-surface-2/95 cursor-pointer shadow-sm hover:shadow-md"
+      className="group flex flex-col justify-between rounded-2xl border border-edge/80 bg-surface-2 p-5 transition-all hover:border-accent/60 hover:bg-surface-2/95 cursor-pointer shadow-sm hover:shadow-md active:scale-[0.99]"
     >
       <div className="space-y-3">
         {/* Top Status & Recommendation Bar */}
@@ -1376,7 +1447,7 @@ function ModelCard({
                   model.publisher_tier === "official"
                     ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
                     : model.publisher_tier === "trusted"
-                    ? "bg-indigo-500/15 text-indigo-300 border-indigo-500/30"
+                    ? "bg-accent/15 text-accent border-accent/30"
                     : "bg-surface-3 text-slate-400 border-edge"
                 }`}
               >
@@ -1400,7 +1471,7 @@ function ModelCard({
                 {model.runtime}
               </span>
             )}
-            <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium bg-accent/15 text-accent border border-accent/30">
               Rec: {model.best_quant || variant?.label || variant?.format || "FP16"}
             </span>
             {isGguf && (
@@ -1426,14 +1497,14 @@ function ModelCard({
         <div className="space-y-1">
           <div className="flex items-start justify-between gap-2">
             <h3
-              className="font-bold text-slate-100 text-base group-hover:text-indigo-300 transition-colors leading-snug line-clamp-2"
+              className="font-bold text-slate-100 text-base group-hover:text-accent transition-colors leading-snug line-clamp-2"
               title={model.id}
             >
               {modelName}
             </h3>
             <HfLink
               modelId={model.id}
-              className="text-slate-500 hover:text-indigo-400 p-0.5 rounded hover:bg-surface-3 transition-colors shrink-0 mt-0.5"
+              className="text-slate-500 hover:text-accent p-0.5 rounded hover:bg-surface-3 transition-colors shrink-0 mt-0.5"
             />
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
@@ -1567,8 +1638,8 @@ function ModelCard({
 
         {/* Recommendation Explanation & Highlights */}
         {model.explanation && (
-          <div className="rounded-lg bg-indigo-500/10 border border-indigo-500/20 p-2.5 space-y-1 text-xs">
-            <div className="flex items-center gap-1 font-semibold text-indigo-300 text-[11px]">
+          <div className="rounded-lg bg-accent/10 border border-accent/20 p-2.5 space-y-1 text-xs">
+            <div className="flex items-center gap-1 font-semibold text-accent text-[11px]">
               <span>💡 Why recommended:</span>
             </div>
             <p className="text-slate-300 text-[11px] leading-relaxed">
@@ -1579,7 +1650,7 @@ function ModelCard({
                 {model.explanation_highlights.map((h, i) => (
                   <span
                     key={i}
-                    className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-200 border border-indigo-500/30"
+                    className="text-[10px] px-1.5 py-0.2 rounded bg-accent/20 text-sky-200 border border-accent/30"
                   >
                     ✓ {h}
                   </span>
@@ -1594,7 +1665,7 @@ function ModelCard({
           <div className="space-y-0.5 text-[10px] text-slate-400">
             {model.notes.slice(0, 1).map((n, i) => (
               <div key={i} className="flex items-center gap-1">
-                <span className="text-indigo-400">•</span>
+                <span className="text-accent">•</span>
                 <span className="truncate">{n}</span>
               </div>
             ))}
@@ -1609,7 +1680,7 @@ function ModelCard({
       >
         <button
           onClick={onSelect}
-          className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors underline-offset-2 hover:underline flex items-center gap-1 font-medium"
+          className="text-xs text-accent hover:text-accent-hover transition-colors underline-offset-2 hover:underline flex items-center gap-1 font-medium"
         >
           <span>
             {model.variants && model.variants.length > 1
@@ -1790,7 +1861,7 @@ function ModelDetailModal({
                     model.publisher_tier === "official"
                       ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
                       : model.publisher_tier === "trusted"
-                      ? "bg-indigo-500/15 text-indigo-300 border-indigo-500/30"
+                      ? "bg-accent/15 text-accent border-accent/30"
                       : "bg-surface-3 text-slate-400 border-edge"
                   }`}
                 >
@@ -1802,7 +1873,7 @@ function ModelDetailModal({
                 </span>
               )}
               {model.pipeline_tag && (
-                <span className="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                <span className="text-xs px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/20">
                   {model.pipeline_tag}
                 </span>
               )}
@@ -1812,7 +1883,7 @@ function ModelDetailModal({
               <HfLink
                 modelId={model.id}
                 showText
-                className="text-indigo-400 hover:text-indigo-300 hover:underline flex items-center gap-1 font-sans text-[11px] cursor-pointer"
+                className="text-accent hover:text-accent-hover hover:underline flex items-center gap-1 font-sans text-[11px] cursor-pointer"
               />
             </div>
           </div>
@@ -1868,8 +1939,8 @@ function ModelDetailModal({
 
         {/* Recommendation Rationale */}
         {model.explanation && (
-          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3.5 space-y-1.5 text-xs">
-            <div className="flex items-center gap-1.5 font-bold text-indigo-300 text-sm">
+          <div className="rounded-xl border border-indigo-500/30 bg-accent/10 p-3.5 space-y-1.5 text-xs">
+            <div className="flex items-center gap-1.5 font-bold text-accent text-sm">
               <span>💡 Recommendation Rationale</span>
             </div>
             <p className="text-slate-200 leading-relaxed text-xs">
@@ -1880,7 +1951,7 @@ function ModelDetailModal({
                 {model.explanation_highlights.map((h, i) => (
                   <span
                     key={i}
-                    className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-200 border border-indigo-500/30 font-medium"
+                    className="text-xs px-2 py-0.5 rounded-full bg-accent/20 text-sky-200 border border-accent/30 font-medium"
                   >
                     ✓ {h}
                   </span>
@@ -1895,7 +1966,7 @@ function ModelDetailModal({
           <div className="rounded-xl border border-edge bg-surface-3/30 p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge/60 pb-2.5">
               <div className="flex items-center gap-2">
-                <span className="text-base font-bold text-indigo-300">
+                <span className="text-base font-bold text-accent">
                   ★ Score: {model.score?.toFixed(1)}/100
                 </span>
                 {model.fit_level && (
@@ -1914,7 +1985,7 @@ function ModelDetailModal({
                   <span>Recommended Runtime: <strong className="text-emerald-300">{model.runtime}</strong></span>
                 )}
                 {model.best_quant && (
-                  <span>Optimal Quant: <strong className="text-indigo-300">{model.best_quant}</strong></span>
+                  <span>Optimal Quant: <strong className="text-accent">{model.best_quant}</strong></span>
                 )}
               </div>
             </div>
@@ -1934,7 +2005,7 @@ function ModelDetailModal({
               </div>
               <div className="rounded-lg bg-surface-2/70 p-2 text-center">
                 <div className="text-[10px] text-slate-500 uppercase">Context (Capacity)</div>
-                <div className="text-base font-bold text-indigo-300 mt-0.5">{(model.score_components.context ?? 0).toFixed(1)}</div>
+                <div className="text-base font-bold text-accent mt-0.5">{(model.score_components.context ?? 0).toFixed(1)}</div>
               </div>
             </div>
 
@@ -1943,7 +2014,7 @@ function ModelDetailModal({
                 <div className="text-[11px] font-semibold text-slate-400">Hardware Evaluation Notes:</div>
                 {model.notes.map((note, i) => (
                   <div key={i} className="flex items-start gap-1.5 text-slate-300 text-[11px]">
-                    <span className="text-indigo-400 mt-0.5">•</span>
+                    <span className="text-accent mt-0.5">•</span>
                     <span>{note}</span>
                   </div>
                 ))}
@@ -2027,7 +2098,7 @@ function ModelDetailModal({
                     key={`${variant.repo_id}-${variant.label}-${idx}`}
                     className={`rounded-xl border p-4 transition-colors ${
                       isBest
-                        ? "border-indigo-500/60 bg-indigo-500/5 ring-1 ring-indigo-500/20"
+                        ? "border-accent/60 bg-accent/5 ring-1 ring-accent/20"
                         : "border-edge bg-surface-3/30 hover:bg-surface-3/50"
                     }`}
                   >
@@ -2043,7 +2114,7 @@ function ModelDetailModal({
                           </span>
                           {isExternalQuantizer && (
                             <span
-                              className="inline-flex items-center gap-1 rounded bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 text-[10px] text-indigo-300 font-medium"
+                              className="inline-flex items-center gap-1 rounded bg-accent/10 border border-indigo-500/30 px-2 py-0.5 text-[10px] text-accent font-medium"
                               title={`Community quantizer: ${variant.repo_id}`}
                             >
                               via {(variant.repo_id ?? "").split("/")[0]}
@@ -2076,7 +2147,7 @@ function ModelDetailModal({
                           <span className="truncate">{variant.repo_id}</span>
                           <HfLink
                             modelId={variant.repo_id}
-                            className="text-indigo-400/80 hover:text-indigo-300 transition-colors p-0.5 inline-flex items-center cursor-pointer shrink-0"
+                            className="text-accent/80 hover:text-accent transition-colors p-0.5 inline-flex items-center cursor-pointer shrink-0"
                           />
                           {variant.gguf_file && (
                             <span className="text-amber-300/90 ml-1.5 font-sans">

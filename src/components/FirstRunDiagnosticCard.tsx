@@ -8,6 +8,50 @@ interface FirstRunDiagnosticCardProps {
   className?: string;
 }
 
+function CheckIcon() {
+  return (
+    <svg className="h-4 w-4 text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg className="h-4 w-4 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg className="h-4 w-4 text-red-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function SkipIcon() {
+  return (
+    <svg className="h-4 w-4 text-slate-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="8" y1="12" x2="16" y2="12" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg className={`h-3.5 w-3.5 text-slate-400 transition-transform duration-150 ${open ? "rotate-180" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
 export function FirstRunDiagnosticCard({
   onOpenTrustModal,
   className = "",
@@ -51,7 +95,6 @@ export function FirstRunDiagnosticCard({
     setExportMsg(null);
     try {
       const bundleJson = await api.diagnosticsExportBundle();
-      // Copy to clipboard and trigger download
       await navigator.clipboard?.writeText(bundleJson);
       
       const blob = new Blob([bundleJson], { type: "application/json" });
@@ -89,27 +132,31 @@ export function FirstRunDiagnosticCard({
   const statusIcon = (s: DiagnosticStep["status"]) => {
     switch (s) {
       case "pass":
-        return <span className="text-emerald-400 font-bold">✓</span>;
+        return <CheckIcon />;
       case "warning":
-        return <span className="text-amber-400 font-bold">⚠️</span>;
+        return <AlertIcon />;
       case "fail":
-        return <span className="text-red-400 font-bold">✗</span>;
+        return <XIcon />;
       default:
-        return <span className="text-slate-500">○</span>;
+        return <SkipIcon />;
     }
   };
 
   return (
-    <Card className={`p-5 space-y-4 shadow-sm border-edge ${className}`}>
+    <Card className={`space-y-4 shadow-sm border-edge ${className}`}>
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-edge pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-edge-subtle pb-3">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-lg select-none">🩺</span>
-            <CardTitle>Unified First-Run Diagnostic & System Readiness</CardTitle>
+            <div className="h-6 w-6 rounded-md bg-accent/15 text-accent flex items-center justify-center">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
+              </svg>
+            </div>
+            <CardTitle>System Readiness & Diagnostic Sequence</CardTitle>
           </div>
           <div className="text-xs text-slate-400 mt-0.5">
-            Windows 10/11 & NVIDIA CUDA hardware validation sequence (8 ordered stages)
+            Windows 10/11 & NVIDIA CUDA hardware validation sequence (8 stages)
           </div>
         </div>
 
@@ -117,10 +164,10 @@ export function FirstRunDiagnosticCard({
           {onOpenTrustModal && (
             <Button
               variant="ghost"
-              className="text-xs h-7 px-2.5 text-indigo-300 hover:text-indigo-200"
+              className="text-xs h-7 px-2.5 text-accent hover:text-accent-hover"
               onClick={onOpenTrustModal}
             >
-              🛡️ SmartScreen & Trust
+              SmartScreen & Trust
             </Button>
           )}
           <Button
@@ -130,7 +177,7 @@ export function FirstRunDiagnosticCard({
             disabled={exporting || loading}
             title="Export a comprehensive diagnostic bundle with all secrets redacted"
           >
-            {exporting ? <Spinner label="Exporting…" /> : "📥 Export Redacted Bundle"}
+            {exporting ? <Spinner label="Exporting…" /> : "Export Redacted Bundle"}
           </Button>
           <Button
             variant="ghost"
@@ -138,13 +185,13 @@ export function FirstRunDiagnosticCard({
             onClick={() => void runDiagnostics()}
             disabled={loading}
           >
-            {loading ? <Spinner label="Testing…" /> : "↻ Re-run"}
+            {loading ? <Spinner label="Testing…" /> : "Re-run"}
           </Button>
         </div>
       </div>
 
       {exportMsg && (
-        <div className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-2.5 text-xs text-cyan-200 flex items-center justify-between">
+        <div className="rounded-xl border border-accent/30 bg-accent/10 p-2.5 text-xs text-slate-100 flex items-center justify-between">
           <span>{exportMsg}</span>
           <button onClick={() => setExportMsg(null)} className="text-slate-400 hover:text-white font-bold ml-2">
             ✕
@@ -157,15 +204,21 @@ export function FirstRunDiagnosticCard({
         <div
           className={`rounded-xl p-3.5 border flex items-center justify-between gap-3 text-xs ${
             report.passed && report.gpu_usable
-              ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"
+              ? "bg-good/10 border-good/30 text-emerald-200"
               : !report.gpu_usable
-              ? "bg-red-500/10 border-red-500/40 text-red-200"
-              : "bg-amber-500/10 border-amber-500/30 text-amber-200"
+              ? "bg-bad/10 border-bad/30 text-red-200"
+              : "bg-warn/10 border-warn/30 text-amber-200"
           }`}
         >
           <div className="flex items-center gap-2.5">
-            <span className="text-xl">
-              {report.passed && report.gpu_usable ? "🚀" : !report.gpu_usable ? "🚫" : "⚠️"}
+            <span className="shrink-0">
+              {report.passed && report.gpu_usable ? (
+                <CheckIcon />
+              ) : !report.gpu_usable ? (
+                <XIcon />
+              ) : (
+                <AlertIcon />
+              )}
             </span>
             <div>
               <div className="font-semibold text-sm">
@@ -209,20 +262,20 @@ export function FirstRunDiagnosticCard({
           return (
             <div
               key={step.id}
-              className={`rounded-lg border text-xs transition-all ${
+              className={`rounded-xl border text-xs transition-all ${
                 step.status === "fail"
-                  ? "border-red-500/30 bg-red-950/20"
+                  ? "border-bad/30 bg-bad/5"
                   : step.status === "warning"
-                  ? "border-amber-500/30 bg-amber-950/20"
-                  : "border-white/5 bg-surface-3/30 hover:border-white/10"
+                  ? "border-warn/30 bg-warn/5"
+                  : "border-edge-subtle bg-surface-3/40 hover:border-edge"
               }`}
             >
               <button
-                className="w-full flex items-center justify-between p-2.5 text-left group"
+                className="w-full flex items-center justify-between p-3 text-left group"
                 onClick={() => toggleStep(step.id)}
               >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span className="w-5 text-center shrink-0">{statusIcon(step.status)}</span>
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="w-5 flex justify-center shrink-0">{statusIcon(step.status)}</span>
                   <div className="flex items-center gap-2 truncate">
                     <span className="font-mono text-slate-500 text-[11px] shrink-0">
                       Step {step.order}:
@@ -231,25 +284,23 @@ export function FirstRunDiagnosticCard({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0 ml-2">
+                <div className="flex items-center gap-2.5 shrink-0 ml-2">
                   <span className="font-mono text-[11px] text-slate-300 truncate max-w-[200px]">
                     {step.value}
                   </span>
                   {statusBadge(step.status)}
-                  <span className="text-slate-500 text-xs w-3 text-center">
-                    {isExpanded ? "▾" : "▸"}
-                  </span>
+                  <ChevronIcon open={isExpanded} />
                 </div>
               </button>
 
               {isExpanded && (
-                <div className="px-3 pb-3 pt-1 border-t border-white/5 space-y-2 text-[11px] leading-relaxed">
+                <div className="px-3.5 pb-3 pt-1 border-t border-edge-subtle space-y-2 text-[11px] leading-relaxed">
                   {step.details && (
                     <div className="text-slate-300 font-mono text-[11px]">{step.details}</div>
                   )}
 
                   {step.fix_recommendation && (
-                    <div className="rounded-md bg-black/40 border border-amber-500/20 p-2 text-amber-200 space-y-1">
+                    <div className="rounded-lg bg-surface-2 border border-warn/25 p-2.5 text-amber-200 space-y-1.5">
                       <div className="font-semibold text-amber-300">Actionable Fix Recommendation:</div>
                       <div className="whitespace-pre-wrap font-mono text-[11px]">
                         {step.fix_recommendation}
@@ -257,7 +308,7 @@ export function FirstRunDiagnosticCard({
                       <div className="pt-1 flex gap-2">
                         <Button
                           variant="ghost"
-                          className="text-[10px] h-5 px-1.5"
+                          className="text-[10px] h-6 px-2"
                           onClick={() => {
                             if (step.fix_recommendation) {
                               void navigator.clipboard?.writeText(step.fix_recommendation);
@@ -269,12 +320,12 @@ export function FirstRunDiagnosticCard({
                         {step.doc_url && (
                           <Button
                             variant="ghost"
-                            className="text-[10px] h-5 px-1.5 text-indigo-300 hover:text-indigo-200"
+                            className="text-[10px] h-6 px-2 text-accent hover:text-accent-hover"
                             onClick={() => {
                               if (step.doc_url) void api.openUrl(step.doc_url);
                             }}
                           >
-                            Open Documentation ↗
+                            Open Documentation →
                           </Button>
                         )}
                       </div>

@@ -1,13 +1,55 @@
-import { StoragePlanner } from "../components/StoragePlanner";
-import { ErrorAlert } from "../components/ErrorAlert";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
+import { StoragePlanner } from "../components/StoragePlanner";
+import { ErrorAlert } from "../components/ErrorAlert";
 import { api, events, fmtNum } from "../api";
 import { ActiveDownloadsPanel } from "../components/ActiveDownloadsPanel";
 import { useDownloads } from "../context/DownloadContext";
-import { Badge, Button, Card, CardTitle, Spinner, inputCls } from "../ui";
+import { Badge, Button, Card, CardTitle, Spinner, inputCls, SegmentedControl, SquircleIcon } from "../ui";
 import type { LibraryEntry, PullStatus } from "../types";
+
+function RefreshIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M16 16h5v5" />
+    </svg>
+  );
+}
+
+function FolderImportIcon() {
+  return (
+    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+      <path d="M12 10v6" />
+      <path d="m9 13 3 3 3-3" />
+    </svg>
+  );
+}
+
+function HardDriveIcon() {
+  return (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="22" x2="2" y1="12" y2="12" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+      <line x1="6" x2="6.01" y1="16" y2="16" />
+      <line x1="10" x2="10.01" y1="16" y2="16" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18" />
+      <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+      <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+    </svg>
+  );
+}
 
 export default function Library() {
   const navigate = useNavigate();
@@ -138,31 +180,35 @@ export default function Library() {
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-xl font-bold text-slate-100">Model Library</h1>
+          <h1 className="text-xl font-bold text-slate-100 tracking-tight">Model Library</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Locally downloaded HuggingFace models cached in WSL (<code>~/.cache/huggingface/hub</code>).
+            Locally downloaded model weights cached in WSL (<code className="font-mono text-slate-300">~/.cache/huggingface/hub</code>) and Windows GGUF folders.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" onClick={refresh}>↻ Refresh</Button>
-          <Button variant="primary" onClick={() => setImportOpen(true)}>📂 Import Local GGUF</Button>
+        <div className="flex items-center gap-2.5">
+          <Button variant="ghost" onClick={refresh}>
+            <RefreshIcon />
+            <span>Refresh</span>
+          </Button>
+          <Button variant="primary" onClick={() => setImportOpen(true)}>
+            <FolderImportIcon />
+            <span>Import GGUF</span>
+          </Button>
         </div>
       </div>
 
-      {/* Disk Usage Banner */}
-      <Card className="bg-gradient-to-r from-surface-2 to-surface-3 border-indigo-500/20">
+      {/* Disk Usage Overview Card */}
+      <Card className="p-5 border-edge/80 bg-surface-2 shadow-sm">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-              💾
-            </div>
+          <div className="flex items-center gap-3.5">
+            <SquircleIcon color="purple" icon={<HardDriveIcon />} size="md" />
             <div>
-              <div className="text-sm font-semibold text-slate-200">
-                Local cache: <span className="text-indigo-300 font-bold">{totalGb} GB</span> used across{" "}
-                <span className="text-slate-100 font-bold">{entries.length}</span> {entries.length === 1 ? "model" : "models"}
+              <div className="text-sm font-semibold text-slate-100">
+                Local cache: <span className="text-accent font-bold font-mono">{totalGb} GB</span> used across{" "}
+                <span className="text-slate-100 font-bold font-mono">{entries.length}</span> {entries.length === 1 ? "model" : "models"}
               </div>
-              <div className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-2">
-                <span>vLLM uses this cache directly when spinning up servers.</span>
+              <div className="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-2">
+                <span>Inference engines load directly from this local cache.</span>
                 <span>·</span>
                 <StoragePlanner modelWeightGb={0} compact />
               </div>
@@ -171,7 +217,7 @@ export default function Library() {
           <div className="flex items-center gap-2">
             <Link to="/search">
               <Button variant="ghost" className="text-xs">
-                + Browse More Models
+                Browse Hugging Face →
               </Button>
             </Link>
           </div>
@@ -181,42 +227,19 @@ export default function Library() {
       {/* Consolidated Active Downloads Panel */}
       <ActiveDownloadsPanel className="mb-4" />
 
-      {/* Filter and Search Bar */}
+      {/* Filter and Search Bar with Segmented Control */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setTaskFilter("all")}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              taskFilter === "all"
-                ? "bg-indigo-600 text-white"
-                : "bg-surface-2 border border-edge text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            All ({entries.length})
-          </button>
-          <button
-            onClick={() => setTaskFilter("instruct")}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              taskFilter === "instruct"
-                ? "bg-indigo-600 text-white"
-                : "bg-surface-2 border border-edge text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            Instruct ({instructCount})
-          </button>
-          <button
-            onClick={() => setTaskFilter("embed")}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              taskFilter === "embed"
-                ? "bg-indigo-600 text-white"
-                : "bg-surface-2 border border-edge text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            Embed ({embedCount})
-          </button>
-        </div>
+        <SegmentedControl
+          value={taskFilter}
+          onChange={setTaskFilter}
+          options={[
+            { value: "all", label: "All", count: entries.length },
+            { value: "instruct", label: "Instruct", count: instructCount },
+            { value: "embed", label: "Embeddings", count: embedCount },
+          ]}
+        />
 
-        <div className="w-full sm:w-64">
+        <div className="w-full sm:w-72">
           <input
             type="text"
             className={inputCls}
@@ -227,20 +250,20 @@ export default function Library() {
         </div>
       </div>
 
-      {/* List */}
+      {/* Model Cards Grid */}
       {loading ? (
-        <Card className="flex items-center justify-center p-8">
-          <Spinner label="Scanning HF cache in WSL…" />
+        <Card className="flex items-center justify-center p-12">
+          <Spinner label="Scanning HF cache and local GGUFs…" />
         </Card>
       ) : entries.length === 0 ? (
-        <Card className="p-8 text-center space-y-3">
+        <Card className="p-12 text-center space-y-3">
           <CardTitle>No models pulled yet</CardTitle>
-          <div className="text-sm text-slate-400 max-w-md mx-auto">
-            Your local cache is empty. Use <Link className="text-indigo-300 hover:underline font-medium" to="/search">Search</Link> to find compatible models and deploy or download them.
+          <div className="text-sm text-slate-400 max-w-md mx-auto leading-relaxed">
+            Your local storage is empty. Use <Link className="text-accent hover:underline font-medium" to="/search">Search</Link> to discover hardware-compatible models and download them.
           </div>
         </Card>
       ) : filteredEntries.length === 0 ? (
-        <Card className="p-6 text-center text-sm text-slate-400">
+        <Card className="p-8 text-center text-sm text-slate-400">
           No cached models matched your filter criteria.
         </Card>
       ) : (
@@ -255,75 +278,76 @@ export default function Library() {
               pull?.state === "downloading";
             const sizeGb = (e.size_mb / 1024).toFixed(1);
             const stableKey = `${e.model_id}:${e.quant || "default"}:${e.model_path || ""}`;
+
             return (
-              <Card key={stableKey} className="flex flex-col justify-between hover:border-edge/90 transition-colors">
+              <Card key={stableKey} className="flex flex-col justify-between hover:border-accent/50 transition-all p-5 shadow-sm active:scale-[0.99]">
                 <div>
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start justify-between gap-2.5">
                     <div className="min-w-0 flex-1">
-                      <div className="truncate font-semibold text-slate-200" title={e.model_id}>
+                      <div className="truncate font-semibold text-slate-100 text-sm leading-snug" title={e.model_id}>
                         {e.model_id}
                       </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-400 font-mono">
                         <span>{sizeGb} GB ({fmtNum(e.size_mb)} MB)</span>
                         <span>·</span>
                         <span>{fmtNum(e.files)} files</span>
                       </div>
                     </div>
                     {isDownloading ? (
-                      <Badge color="indigo">downloading</Badge>
+                      <Badge color="indigo">Downloading</Badge>
                     ) : pull ? (
                       <Badge color={pull.state === "complete" ? "emerald" : pull.state === "failed" ? "red" : "indigo"}>
                         {pull.state}
                       </Badge>
                     ) : e.in_use ? (
                       <Badge color="amber" title={`Running on server: ${e.in_use_server || "active"}`}>
-                        in use
+                        In Use
                       </Badge>
                     ) : e.is_local ? (
-                      <Badge color="indigo">Folder</Badge>
+                      <Badge color="slate">Local File</Badge>
                     ) : (
-                      <Badge color="emerald">cached</Badge>
+                      <Badge color="emerald">Cached</Badge>
                     )}
                   </div>
 
                   {/* Metadata Chips */}
-                  <div className="mt-3 flex flex-wrap gap-1.5">
+                  <div className="mt-3.5 flex flex-wrap gap-1.5">
                     {e.params_b && (
-                      <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 border border-slate-700">
+                      <span className="rounded-md bg-surface-3 px-2 py-0.5 text-[11px] font-mono font-medium text-slate-300 border border-edge">
                         {e.params_b}B
                       </span>
                     )}
                     {e.quant && (
-                      <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 border border-slate-700">
+                      <span className="rounded-md bg-surface-3 px-2 py-0.5 text-[11px] font-mono font-medium text-slate-300 border border-edge">
                         {e.quant}
                       </span>
                     )}
                     {e.task && (
-                      <span className="rounded bg-indigo-950/60 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300 border border-indigo-800/40">
+                      <span className="rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent border border-accent/25">
                         {e.task}
                       </span>
                     )}
                     {e.in_use && e.in_use_server && (
-                      <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 border border-amber-800/40">
+                      <span className="rounded-md bg-warn/15 px-2 py-0.5 text-[11px] font-medium text-amber-300 border border-warn/30">
                         Server: {e.in_use_server}
                       </span>
                     )}
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-edge/60 flex items-center justify-between gap-2">
+                <div className="mt-4 pt-3.5 border-t border-edge-subtle flex items-center justify-between gap-2">
                   {e.is_local && !e.model_path ? (
                     <span
                       className="text-[11px] text-slate-500"
-                      title="Managed on disk outside the HF cache — not removed by Delete"
+                      title="Managed on disk outside the HF cache"
                     >
-                      local folder on disk
+                      Local folder on disk
                     </span>
                   ) : isDownloading ? (
                     <Button
                       variant="danger"
                       onClick={() => handleCancelPull(activeJob?.id || e.model_id, e.quant)}
-                      className="text-xs"
+                      className="text-xs h-7 px-2.5"
                     >
                       Cancel
                     </Button>
@@ -332,7 +356,7 @@ export default function Library() {
                       variant="danger"
                       disabled
                       title={`Model is currently in use by server "${e.in_use_server || "active"}". Stop the server before deleting.`}
-                      className="text-xs opacity-40 cursor-not-allowed"
+                      className="text-xs h-7 px-2.5 opacity-40 cursor-not-allowed"
                     >
                       Delete
                     </Button>
@@ -340,7 +364,7 @@ export default function Library() {
                     <Button
                       variant="danger"
                       onClick={() => setDeleteTarget(e)}
-                      className="text-xs"
+                      className="text-xs h-7 px-2.5"
                     >
                       Delete
                     </Button>
@@ -348,7 +372,7 @@ export default function Library() {
 
                   <Button
                     variant="ghost"
-                    className="text-xs"
+                    className="text-xs h-7 px-3"
                     disabled={isDownloading}
                     onClick={() =>
                       navigate("/servers", {
@@ -377,20 +401,18 @@ export default function Library() {
 
       {/* Import Local GGUF Modal */}
       {importOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-indigo-500/30 bg-surface-2 p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-indigo-300">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-indigo-500/10 border border-indigo-500/20 text-xl">
-                📂
-              </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-2xl border border-edge bg-surface-2 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <SquircleIcon color="blue" icon={<FolderImportIcon />} size="md" />
               <div>
                 <h3 className="text-base font-semibold text-slate-100">Import Local GGUF</h3>
                 <p className="text-xs text-slate-400">Choose an existing .gguf file or enter its path</p>
               </div>
             </div>
 
-            <div className="text-sm text-slate-300 space-y-2">
-              <label className="block text-xs font-medium text-slate-400" htmlFor="import-path">
+            <div className="text-sm text-slate-300 space-y-3">
+              <label className="block text-xs font-medium text-slate-300" htmlFor="import-path">
                 GGUF file path (optional)
               </label>
               <input
@@ -404,14 +426,14 @@ export default function Library() {
                 }}
                 autoFocus
               />
-              <div className="rounded-lg bg-surface-3 p-3 border border-edge text-xs space-y-1 text-slate-400">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-indigo-300">Windows:</span>
-                  <span className="font-mono">D:\AI\qwen</span>
+              <div className="rounded-xl bg-surface-3 p-3 border border-edge text-xs space-y-1.5 text-slate-300">
+                <div className="flex items-center gap-2">
+                  <span className="text-accent font-semibold">Windows:</span>
+                  <span className="font-mono text-slate-400">D:\AI\qwen</span>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-emerald-300">WSL:</span>
-                  <span className="font-mono">/mnt/d/AI/qwen</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-emerald-400 font-semibold">WSL:</span>
+                  <span className="font-mono text-slate-400">/mnt/d/AI/qwen</span>
                 </div>
                 <p className="pt-1 text-slate-500">
                   The selected file is added to the native llama.cpp library.
@@ -427,7 +449,7 @@ export default function Library() {
               )}
             </div>
 
-            <div className="flex items-center justify-end gap-3 pt-2">
+            <div className="flex items-center justify-end gap-2.5 pt-2">
               <Button
                 variant="ghost"
                 onClick={() => {
@@ -449,37 +471,35 @@ export default function Library() {
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-red-500/30 bg-surface-2 p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-red-400">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-red-500/10 border border-red-500/20 text-xl font-bold">
-                ⚠️
-              </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-2xl border border-bad/30 bg-surface-2 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <SquircleIcon color="red" icon={<TrashIcon />} size="md" />
               <div>
                 <h3 className="text-base font-semibold text-slate-100">Delete Model from Disk?</h3>
                 <p className="text-xs text-slate-400">
-                  {deleteTarget.model_path ? "Permanent deletion from Windows GGUF library" : "Permanent deletion from local WSL cache"}
+                  {deleteTarget.model_path ? "Permanent removal from Windows GGUF library" : "Permanent removal from local WSL cache"}
                 </p>
               </div>
             </div>
 
-            <div className="text-sm text-slate-300 space-y-2">
+            <div className="text-sm text-slate-300 space-y-2.5">
               <p>
                 Are you sure you want to delete <strong className="text-slate-100">{deleteTarget.model_id}{deleteTarget.quant ? ` (${deleteTarget.quant})` : ""}</strong>?
               </p>
-              <div className="rounded-lg bg-surface-3 p-3 border border-edge text-xs space-y-1">
+              <div className="rounded-xl bg-surface-3 p-3 border border-edge text-xs space-y-1.5">
                 <div className="flex justify-between text-slate-300">
                   <span>Freed space:</span>
-                  <span className="font-semibold text-emerald-400">
+                  <span className="font-semibold text-emerald-400 font-mono">
                     ~{(deleteTarget.size_mb / 1024).toFixed(1)} GB ({fmtNum(deleteTarget.size_mb)} MB)
                   </span>
                 </div>
                 <div className="flex justify-between text-slate-400">
                   <span>Files removed:</span>
-                  <span>{fmtNum(deleteTarget.files)}</span>
+                  <span className="font-mono">{fmtNum(deleteTarget.files)}</span>
                 </div>
               </div>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-500 leading-relaxed">
                 {deleteTarget.model_path
                   ? "This frees space on your Windows disk. If needed later, re-download the GGUF from Search."
                   : "This frees disk space in your WSL virtual hard disk. If needed later, vLLM will automatically re-download it."}
@@ -495,7 +515,7 @@ export default function Library() {
               />
             )}
 
-            <div className="flex items-center justify-end gap-3 pt-2">
+            <div className="flex items-center justify-end gap-2.5 pt-2">
               <Button
                 variant="ghost"
                 onClick={() => {
@@ -511,7 +531,7 @@ export default function Library() {
                 onClick={handleDelete}
                 disabled={isDeleting}
               >
-                {isDeleting ? <Spinner label="Deleting…" /> : "Yes, Delete from Disk"}
+                {isDeleting ? <Spinner label="Deleting…" /> : "Delete from Disk"}
               </Button>
             </div>
           </div>
