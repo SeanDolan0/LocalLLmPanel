@@ -43,3 +43,23 @@ _Avoid_: memory stats, vram breakdown, spill calc
 **Fit Report**:
 The authoritative verdict evaluating whether a model variant fits in memory, its execution mode (GPU, Hybrid Offload, CPU), estimated context capacity, and expected throughput.
 _Avoid_: score verdict, fit result, recommendation score
+
+**Model Catalog**:
+The authoritative deep module managing online model discovery, HuggingFace metadata resolution, local artifact inventory reconciliation, chat template extraction, and draft model compatibility.
+_Avoid_: model service, discovery manager, model indexer
+
+**Catalog Model**:
+A normalized model candidate with publisher tier, family taxonomy, parameter scale, available quant formats, and sizing scores.
+_Avoid_: model DTO, discovery item, feed row
+
+**Catalog Model Details**:
+Comprehensive model card metadata including architectural context limits, layer/head geometry, verified quantization variants with fit verdicts, and natural language explanations.
+_Avoid_: model info, model card data, stats payload
+
+**Installed Model**:
+A verified runnable model present on local disk (WSL Hugging Face hub cache, imported folder, or native GGUF directory).
+_Avoid_: local model, downloaded model, library item
+
+**Draft Model Association**:
+A catalog relationship mapping a primary target model to compatible low-latency draft models sharing architecture and tokenizer vocabulary for speculative decoding.
+_Avoid_: speculative pair, draft config, assistant model

@@ -2137,6 +2137,7 @@ pub struct AppState {
     pub download_manager: Arc<crate::download_manager::DownloadManager>,
     pub server_manager: Arc<crate::server_manager::ServerManager>,
     pub hardware_sizer: Arc<crate::hardware_sizer::HardwareSizer>,
+    pub model_catalog: Arc<crate::model_catalog::ModelCatalog>,
 }
 
 pub const METRICS_SERIES_CAPACITY: usize = 60;
@@ -2217,6 +2218,10 @@ impl AppState {
         )));
         let server_manager = Arc::new(crate::server_manager::ServerManager::new_app());
         let hardware_sizer = Arc::new(crate::hardware_sizer::HardwareSizer::default_system());
+        let model_catalog = Arc::new(crate::model_catalog::ModelCatalog::default_app(
+            http.clone(),
+            Arc::clone(&hardware_sizer),
+        ));
         AppState {
             config: Mutex::new(config),
             servers: Mutex::new(BTreeMap::new()),
@@ -2243,6 +2248,7 @@ impl AppState {
             download_manager,
             server_manager,
             hardware_sizer,
+            model_catalog,
         }
     }
 

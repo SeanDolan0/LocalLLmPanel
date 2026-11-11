@@ -15,6 +15,7 @@ pub mod hf;
 pub mod hf_discovery;
 pub mod llamacpp_install;
 pub mod llmfit_adapter;
+pub mod model_catalog;
 pub mod model_intelligence;
 pub mod model_registry;
 pub mod provision;
