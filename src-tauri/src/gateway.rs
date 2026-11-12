@@ -1256,6 +1256,40 @@ fn model_row_with_template(
     row["max_tokens"] = serde_json::json!(if is_instruct { output_tokens } else { None });
     row["input"] = serde_json::json!(input_modalities);
     row["permission"] = serde_json::json!([]);
+
+    let mut advertised_reasoning_levels: Vec<&str> = Vec::new();
+    if traits.reasoning_mode == ReasoningMode::Effort && !levels.iter().any(|l| *l == "none") {
+        advertised_reasoning_levels.push("none");
+    }
+    advertised_reasoning_levels.extend(levels.iter().copied());
+
+    let default_reasoning_level_val = if traits.reasoning_mode != ReasoningMode::None {
+        default_level.clone()
+    } else {
+        None
+    };
+
+    let compat = serde_json::json!({
+        "supportsReasoningEffort": supports_effort_parameter,
+        "supportsThinking": traits.reasoning,
+        "reasoningDisableMode": if traits.reasoning_mode == ReasoningMode::Effort {
+            Some("none-effort")
+        } else {
+            None
+        },
+    });
+
+    let metadata = serde_json::json!({
+        "supported_reasoning_levels": advertised_reasoning_levels,
+        "default_reasoning_level": default_reasoning_level_val,
+        "reasoning": traits.reasoning,
+    });
+
+    row["supported_reasoning_levels"] = serde_json::json!(advertised_reasoning_levels);
+    row["default_reasoning_level"] = serde_json::json!(default_reasoning_level_val);
+    row["metadata"] = metadata;
+    row["compat"] = compat;
+
     if traits.reasoning {
         row["thinkingLevelMap"] = thinking_level_map.clone();
         row["thinking_level_map"] = thinking_level_map;
@@ -2091,6 +2125,11 @@ fn harness_effort(object: &serde_json::Map<String, serde_json::Value>) -> Option
         .get("reasoning_effort")
         .and_then(serde_json::Value::as_str)
         .or_else(|| {
+            object
+                .get("thinking_effort")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
             nested("reasoning")
                 .and_then(|value| value.get("effort"))
                 .and_then(serde_json::Value::as_str)
@@ -2105,10 +2144,25 @@ fn harness_effort(object: &serde_json::Map<String, serde_json::Value>) -> Option
                 .and_then(|value| value.get("level"))
                 .and_then(serde_json::Value::as_str)
         })
+        .or_else(|| {
+            nested("thinking")
+                .and_then(|value| value.get("effort"))
+                .and_then(serde_json::Value::as_str)
+        })
         .or_else(|| object.get("think").and_then(think_level))
         .or_else(|| {
             nested("chat_template_kwargs")
                 .and_then(|value| value.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            nested("extra_body")
+                .and_then(|value| value.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            nested("extra_body")
+                .and_then(|value| value.get("thinking_effort"))
                 .and_then(serde_json::Value::as_str)
         })?;
     let value = value.trim();
@@ -2140,6 +2194,12 @@ fn harness_toggle(object: &serde_json::Map<String, serde_json::Value>) -> Option
                 _ => {}
             }
         }
+        if let Some(value) = thinking.get("enabled").and_then(json_bool) {
+            return Some(value);
+        }
+    }
+    if let Some(value) = object.get("enable_thinking").and_then(json_bool) {
+        return Some(value);
     }
     if let Some(value) = object.get("think").and_then(think_toggle) {
         return Some(value);
@@ -2149,6 +2209,7 @@ fn harness_toggle(object: &serde_json::Map<String, serde_json::Value>) -> Option
         .and_then(serde_json::Value::as_object)
         .and_then(|value| value.get("enabled"))
         .and_then(json_bool)
+        .or_else(|| object.get("thinking").and_then(json_bool))
 }
 
 /// Every budget spelling seen from harnesses. Zero is meaningful in both
@@ -6110,6 +6171,70 @@ mod tests {
         assert_eq!(row["reasoning_config"]["default_level"], "medium");
         assert_eq!(row["reasoning_config"]["control"], "reasoning_effort");
         assert_eq!(row["reasoning_config"]["mandatory"], false);
+    }
+
+    #[test]
+    fn test_bonsai_and_openai_models_report_advertised_reasoning_for_harnesses() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.backend = "llamacpp".into();
+        let path = r"D:\models\ternary\Ternary-Bonsai-2-27B-PQ2_0.gguf".to_string();
+        def.model_path = Some(path.clone());
+        def.model_id = path;
+        def.served_model_name = None;
+        def.jinja = true;
+        let row = model_row(&def, Some(32_768), "configured", &[]);
+
+        // Oh My Pi discovery reads supported_reasoning_levels and default_reasoning_level
+        assert_eq!(
+            row["supported_reasoning_levels"],
+            serde_json::json!(["none", "low", "medium", "high"])
+        );
+        assert_eq!(row["default_reasoning_level"], "medium");
+
+        // Oh My Pi also accepts them under metadata
+        assert_eq!(
+            row["metadata"]["supported_reasoning_levels"],
+            serde_json::json!(["none", "low", "medium", "high"])
+        );
+        assert_eq!(row["metadata"]["default_reasoning_level"], "medium");
+
+        // Harness compatibility block for OpenAI/Pi reasoning effort
+        assert_eq!(row["compat"]["supportsReasoningEffort"], true);
+        assert_eq!(row["compat"]["supportsThinking"], true);
+        assert_eq!(row["compat"]["reasoningDisableMode"], "none-effort");
+
+        // Always-on reasoning model (e.g. DeepSeek-R1) does NOT advertise "none"
+        let mut r1_def = running_map().remove("srv-a").unwrap().def;
+        r1_def.model_id = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B".into();
+        let r1_args = vec!["--reasoning-parser".to_string(), "deepseek_r1".to_string()];
+        let r1_row = model_row(&r1_def, None, "unknown", &r1_args);
+        assert_eq!(
+            r1_row["supported_reasoning_levels"],
+            serde_json::json!(["low", "medium", "high"])
+        );
+        assert_eq!(r1_row["default_reasoning_level"], "medium");
+        assert_eq!(r1_row["compat"]["supportsReasoningEffort"], true);
+        assert_eq!(r1_row["compat"]["reasoningDisableMode"], serde_json::Value::Null);
+
+        // Non-reasoning model reports empty levels and false reasoning
+        let mut base_def = running_map().remove("srv-a").unwrap().def;
+        base_def.model_id = "meta-llama/Llama-3.2-3B-Instruct".into();
+        base_def.served_model_name = Some("llama-3.2".into());
+        let base_row = model_row(&base_def, Some(8192), "configured", &[]);
+        assert_eq!(base_row["supported_reasoning_levels"], serde_json::json!([]));
+        assert_eq!(base_row["default_reasoning_level"], serde_json::Value::Null);
+        assert_eq!(base_row["compat"]["supportsReasoningEffort"], false);
+        assert_eq!(base_row["metadata"]["reasoning"], false);
+
+        // Verify harness request shapes: thinking_effort, extra_body, top-level enable_thinking
+        let req_extra = r#"{"model":"m","messages":[],"extra_body":{"reasoning_effort":"high"}}"#;
+        let norm_extra = normalized(req_extra, "llamacpp", Some(8_192));
+        assert_eq!(norm_extra["reasoning_effort"], "high");
+        assert_eq!(norm_extra["chat_template_kwargs"]["enable_thinking"], true);
+
+        let req_top_toggle = r#"{"model":"m","messages":[],"enable_thinking":true}"#;
+        let norm_toggle = normalized(req_top_toggle, "llamacpp", Some(8_192));
+        assert_eq!(norm_toggle["chat_template_kwargs"]["enable_thinking"], true);
     }
 
     #[test]

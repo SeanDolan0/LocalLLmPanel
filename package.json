@@ -1,7 +1,7 @@
 {
   "name": "local-llm-panel",
   "private": true,
-  "version": "2.8.0",
+  "version": "2.8.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
     "test:contract": "node --test scripts/frontend-smoke.mjs",
     "test:smoke": "npm run test:contract",
     "check": "node scripts/build.mjs --check",
+    "clean": "cargo clean --manifest-path src-tauri/Cargo.toml",
     "build:fast": "node scripts/build.mjs --fast",
     "build:setup": "node scripts/build.mjs --setup",
     "build:all": "node scripts/build.mjs --all",

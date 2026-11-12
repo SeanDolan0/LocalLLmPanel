@@ -8,6 +8,7 @@ Tauri 2 (Rust + React/TypeScript) desktop app managing vLLM in WSL2 and native l
 |------|---------|
 | Dev server | `npm run tauri dev` |
 | Preflight (type check + cargo check + frontend contracts) | `npm run check` |
+| Rust clean (free disk space) | `npm run clean` |
 | Release metadata | `npm run release:check` |
 | Frontend contract tests | `npm run test:contract` |
 | Frontend build | `npm run build` |
@@ -36,6 +37,11 @@ Build script and `npm run release:check` validate version synchronization.
 - **WiX MSI slow**: Only enabled via `npm run build:all`; default is NSIS only.
 - **Release profile**: `Cargo.toml` uses `lto = false`, `incremental = false`, `codegen-units = 16` for fast linking.
 
+## Disk Space & Build Hygiene
+
+- **Clean after compiling**: Run `npm run clean` (or `cargo clean --manifest-path src-tauri/Cargo.toml`) at the completion of any task that compiles, tests, or builds Rust code (`npm run check`, `cargo test`, `npm run build:*`).
+- **Verify on completion**: Confirm `src-tauri/target` is absent before concluding a turn or task.
+
 ## Test Notes
 
 - Frontend contract checks run with `npm run test:contract`.
@@ -63,6 +69,7 @@ Build script and `npm run release:check` validate version synchronization.
 5. Verify the contents of `dist-release/` and the adjacent SHA-256 checksums.
 6. Commit and push the versioned source, then create and push an annotated `vX.Y.Z` tag.
 7. The `Draft release` workflow builds and uploads the Windows executable, NSIS installer, and checksums as a **draft** GitHub Release. Review the draft and publish it when ready.
+8. Reclaim disk space by running `npm run clean`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidance and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full manual release SOP.
 
