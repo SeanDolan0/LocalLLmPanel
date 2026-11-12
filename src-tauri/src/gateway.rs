@@ -1004,8 +1004,7 @@ fn model_row_with_template(
     // parses reasoning tags. The gateway canonicalizes reasoning_effort
     // across all reasoning models and formats.
     let supports_effort_parameter = traits.reasoning_mode != ReasoningMode::None
-        && supports_template_controls
-        && !is_toggle_only;
+        && supports_template_controls;
     let supports_thinking_toggle =
         traits.reasoning_mode == ReasoningMode::Effort && supports_template_controls;
     let budget_parameter = if traits.reasoning_mode == ReasoningMode::None {
@@ -1051,6 +1050,12 @@ fn model_row_with_template(
         supported_parameters.extend(["tools", "tool_choice", "parallel_tool_calls"]);
     }
     if traits.reasoning_mode != ReasoningMode::None {
+        if !supported_parameters.contains(&"reasoning") {
+            supported_parameters.push("reasoning");
+        }
+        if !supported_parameters.contains(&"include_reasoning") {
+            supported_parameters.push("include_reasoning");
+        }
         if supports_thinking_toggle {
             supported_parameters.push("chat_template_kwargs");
         }
@@ -1064,7 +1069,7 @@ fn model_row_with_template(
 
     let supported_efforts: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
         (ReasoningMode::None, _) => Vec::new(),
-        _ if is_toggle_only => vec!["none", "minimal", "low", "medium", "high", "max"],
+        _ if is_toggle_only => vec!["none", "high"],
         (ReasoningMode::Effort, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::Effort, None) => {
@@ -1074,13 +1079,13 @@ fn model_row_with_template(
     };
     let levels: Vec<&str> = match (traits.reasoning_mode, effort_ladder) {
         (ReasoningMode::None, _) => Vec::new(),
-        _ if is_toggle_only => vec!["low", "medium", "high"],
+        _ if is_toggle_only => vec!["high"],
         (ReasoningMode::Effort, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (ReasoningMode::AlwaysOn, Some(ladder)) => ladder.iter().map(String::as_str).collect(),
         (mode, None) => mode.levels().to_vec(),
     };
     let default_level: Option<String> = if is_toggle_only {
-        Some("medium".to_string())
+        Some("high".to_string())
     } else {
         match traits.reasoning_mode {
             ReasoningMode::None => None,
@@ -1099,6 +1104,13 @@ fn model_row_with_template(
         if traits.reasoning_mode == ReasoningMode::None {
             return serde_json::Value::Null;
         }
+        if is_toggle_only {
+            if level == "high" {
+                return serde_json::json!("high");
+            } else {
+                return serde_json::Value::Null;
+            }
+        }
         let is_supported = match effort_ladder {
             Some(ladder) => ladder.iter().any(|l| l.eq_ignore_ascii_case(level)),
             None => true,
@@ -1112,6 +1124,7 @@ fn model_row_with_template(
     let thinking_level_map = if traits.reasoning_mode == ReasoningMode::None {
         serde_json::json!({
             "off": "off",
+            "none": "none",
             "minimal": serde_json::Value::Null,
             "low": serde_json::Value::Null,
             "medium": serde_json::Value::Null,
@@ -1120,8 +1133,14 @@ fn model_row_with_template(
             "max": serde_json::Value::Null,
         })
     } else {
+        let off_val = if traits.reasoning_mode == ReasoningMode::AlwaysOn {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!("none")
+        };
         serde_json::json!({
-            "off": if traits.reasoning_mode == ReasoningMode::AlwaysOn { serde_json::Value::Null } else { serde_json::json!("none") },
+            "off": off_val.clone(),
+            "none": off_val,
             "minimal": level_map_val("minimal"),
             "low": level_map_val("low"),
             "medium": level_map_val("medium"),
@@ -1290,6 +1309,21 @@ fn model_row_with_template(
     row["metadata"] = metadata;
     row["compat"] = compat;
 
+    row["supportsReasoning"] = serde_json::json!(traits.reasoning);
+    row["supportsReasoningEffort"] = serde_json::json!(advertised_reasoning_levels);
+    row["supportsReasoningBinary"] = serde_json::json!(is_toggle_only);
+
+    if traits.reasoning {
+        row["reasoning"] = serde_json::json!({
+            "mandatory": traits.reasoning_mode == ReasoningMode::AlwaysOn,
+            "default_enabled": traits.reasoning_enabled,
+            "default_effort": default_reasoning_level_val,
+            "supported_efforts": advertised_reasoning_levels,
+        });
+    } else {
+        row["reasoning"] = serde_json::Value::Null;
+    }
+
     if traits.reasoning {
         row["thinkingLevelMap"] = thinking_level_map.clone();
         row["thinking_level_map"] = thinking_level_map;
@@ -1427,6 +1461,7 @@ async fn fetch_runtime_context(state: &Arc<AppState>, def: &ServerDef) -> Option
 /// `/props`. Long enough to avoid a probe per completion, short enough that a
 /// restart with a different model on the same port is picked up quickly.
 const EFFORT_LADDER_TTL_MS: u64 = 30_000;
+const RETRY_LADDER_TTL_MS: u64 = 3_000;
 
 fn read_symlink_or_file(path: &std::path::Path) -> Option<String> {
     if let Ok(content) = std::fs::read_to_string(path) {
@@ -1718,7 +1753,12 @@ async fn template_info_for(
     {
         let cache = state.template_effort_cache.lock().unwrap();
         if let Some((fetched_at, info)) = cache.get(&def.port) {
-            if now.saturating_sub(*fetched_at) < EFFORT_LADDER_TTL_MS {
+            let ttl = if info.template.is_some() {
+                EFFORT_LADDER_TTL_MS
+            } else {
+                RETRY_LADDER_TTL_MS
+            };
+            if now.saturating_sub(*fetched_at) < ttl {
                 return info.clone();
             }
         }
@@ -1793,7 +1833,10 @@ fn decode_path_component(value: &str) -> Option<String> {
 }
 
 fn model_id_from_path(path: &str) -> Option<String> {
-    let raw = path.split('?').next()?.strip_prefix("/v1/models/")?;
+    let clean = path.split('?').next()?;
+    let raw = clean
+        .strip_prefix("/v1/models/")
+        .or_else(|| clean.strip_prefix("/models/"))?;
     if raw.is_empty() {
         None
     } else {
@@ -3662,8 +3705,10 @@ async fn route(
 
     eprintln!("[gateway] [{request_id}] {} {}", head.method, head.target);
 
-    // Auth check for all /v1/* and /api/* routes except /health, /v1/health, /, and /api/version
-    let is_protected = (head.target.starts_with("/v1/") || head.target.starts_with("/api/"))
+    // Auth check for all /v1/*, /models/*, /models, and /api/* routes except /health, /v1/health, /, and /api/version
+    let is_protected = (head.target.starts_with("/v1/")
+        || head.target.starts_with("/api/")
+        || head.target.starts_with("/models"))
         && head.target != "/health"
         && head.target != "/v1/health"
         && head.target != "/"
@@ -3679,7 +3724,7 @@ async fn route(
 
     let path = head.target.split('?').next().unwrap_or("");
     match (head.method.as_str(), path) {
-        ("GET", "/v1/models") => {
+        ("GET", "/v1/models") | ("GET", "/models") => {
             let text = serde_json::json!({
                 "object": "list",
                 "data": model_rows_for_state(state).await,
@@ -3689,8 +3734,9 @@ async fn route(
                 .await
                 .map_err(|e| ApiError::new(500, e, "internal_error"))
         }
-        (candidate_path, _)
-            if head.method == "GET" && candidate_path.starts_with("/v1/models/") =>
+        ("GET", candidate_path)
+            if candidate_path.starts_with("/v1/models/")
+                || candidate_path.starts_with("/models/") =>
         {
             let Some(model_id) = model_id_from_path(candidate_path) else {
                 return Err(ApiError::bad_request(
@@ -3801,7 +3847,9 @@ async fn route(
                 }
                 if row["capabilities"]["thinking"].as_bool().unwrap_or(false)
                     || row["capabilities"]["reasoning"].as_bool().unwrap_or(false)
+                    || row["supportsReasoning"].as_bool().unwrap_or(false)
                     || row["reasoning"].as_bool().unwrap_or(false)
+                    || row["reasoning"].is_object()
                 {
                     capabilities.push("thinking");
                 }
@@ -6033,9 +6081,9 @@ mod tests {
         assert_eq!(row["publisher"], "Qwen");
         assert_eq!(row["capabilities"]["reasoning"], true);
         assert_eq!(row["capabilities"]["thinking"], true);
-        // Boolean top-level field so OpenAI-compatible harnesses detect a
-        // reasoning model; details stay in reasoning_config/thinking.
-        assert_eq!(row["reasoning"], true);
+        // OpenRouter object contract and root camelCase compatibility
+        assert!(row["reasoning"].is_object());
+        assert_eq!(row["supportsReasoning"], true);
         assert_eq!(row["supports_reasoning"], true);
         assert_eq!(row["thinking"]["mode"], "effort");
         assert_eq!(row["reasoning_config"]["supported"], true);
@@ -6159,8 +6207,9 @@ mod tests {
         let row = model_row(&def, Some(32_768), "configured", &[]);
         // llama.cpp exposes the GGUF stem, not the filesystem path.
         assert_eq!(row["id"], "Ternary-Bonsai-2-27B-PQ2_0");
-        // Pi's compat extension reads boolean `reasoning`.
-        assert_eq!(row["reasoning"], true);
+        // OpenRouter object contract and root camelCase compatibility
+        assert!(row["reasoning"].is_object());
+        assert_eq!(row["supportsReasoning"], true);
         assert_eq!(row["supports_reasoning"], true);
         assert_eq!(row["reasoning_config"]["supported"], true);
         assert_eq!(row["reasoning_config"]["mode"], "effort");
@@ -7408,16 +7457,20 @@ mod tests {
         assert_eq!(row["reasoning_config"]["control"], "enable_thinking");
         assert_eq!(
             row["reasoning_config"]["parameters"]["reasoning_effort"],
-            false
+            true
         );
         assert_eq!(
             row["reasoning_config"]["parameters"]["chat_template_kwargs"]["enable_thinking"],
             true
         );
-        assert_eq!(row["reasoning"], true);
+        assert!(row["reasoning"].is_object());
+        assert_eq!(row["supportsReasoning"], true);
+        assert_eq!(row["supportsReasoningBinary"], true);
+        assert_eq!(
+            row["supportsReasoningEffort"],
+            serde_json::json!(["none", "high"])
+        );
         assert_eq!(row["thinkingLevelMap"]["off"], "none");
-        assert_eq!(row["thinkingLevelMap"]["medium"], "medium");
-        assert_eq!(row["thinkingLevelMap"]["low"], "low");
         assert_eq!(row["thinkingLevelMap"]["high"], "high");
     }
 
@@ -8737,5 +8790,239 @@ mod tests {
         }
         assert!(resp2.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(resp2.contains("is still starting"));
+    }
+
+    #[test]
+    fn test_root_level_multi_harness_compatibility_schema() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.name = "Spark-X2.6-4B-Q4_K_M".into();
+        def.model_id = "XHToken/Spark-X2.6-4B-GGUF".into();
+        def.backend = "llamacpp".into();
+        def.jinja = true;
+
+        let ladder = vec!["low".to_string(), "high".to_string()];
+        let info = crate::state::TemplateEffortInfo {
+            ladder: Some(ladder.clone()),
+            default_effort: Some("high".to_string()),
+            is_reasoning: true,
+            is_toggle_only: false,
+            is_always_on: false,
+            template: None,
+        };
+
+        let row = model_row_with_template(&def, Some(32768), "configured", &[], &info);
+
+        // 1. Roo Code / Cline root-level camelCase contracts
+        assert_eq!(row["supportsReasoning"], serde_json::json!(true));
+        assert_eq!(
+            row["supportsReasoningEffort"],
+            serde_json::json!(["none", "low", "high"])
+        );
+
+        // 2. OpenRouter object contract at row["reasoning"]
+        assert!(row["reasoning"].is_object());
+        assert_eq!(
+            row["reasoning"]["supported_efforts"],
+            serde_json::json!(["none", "low", "high"])
+        );
+        assert_eq!(row["reasoning"]["default_effort"], "high");
+
+        // 3. Backward compatibility preservation
+        assert_eq!(row["capabilities"]["reasoning"], true);
+        assert_eq!(row["compat"]["supportsReasoningEffort"], true);
+    }
+
+    #[test]
+    fn test_toggle_only_model_truthful_advertising() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.name = "Qwen2.5-Coder-32B-Instruct".into();
+        def.model_id = "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF".into();
+        def.backend = "llamacpp".into();
+        def.jinja = true;
+
+        let info = crate::state::TemplateEffortInfo {
+            ladder: None,
+            default_effort: None,
+            is_reasoning: true,
+            is_toggle_only: true,
+            is_always_on: false,
+            template: Some("{% if enable_thinking %}...{% endif %}".into()),
+        };
+
+        let row = model_row_with_template(&def, Some(32768), "configured", &[], &info);
+
+        // 1. Binary indicator
+        assert_eq!(row["supportsReasoningBinary"], serde_json::json!(true));
+
+        // 2. Truthful Off vs On effort tiers
+        assert_eq!(
+            row["supportsReasoningEffort"],
+            serde_json::json!(["none", "high"])
+        );
+        assert_eq!(
+            row["reasoning"]["supported_efforts"],
+            serde_json::json!(["none", "high"])
+        );
+
+        // 3. Parameters include reasoning, include_reasoning, and reasoning_effort
+        let params: Vec<&str> = row["supported_parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect();
+        assert!(params.contains(&"reasoning"));
+        assert!(params.contains(&"include_reasoning"));
+        assert!(params.contains(&"reasoning_effort"));
+    }
+
+    #[test]
+    fn test_sparse_ladder_and_pi_normalization() {
+        let mut def = running_map().remove("srv-a").unwrap().def;
+        def.name = "Spark-X2.6-4B-Q4_K_M".into();
+        def.model_id = "XHToken/Spark-X2.6-4B-GGUF".into();
+        def.backend = "llamacpp".into();
+        def.jinja = true;
+
+        let ladder = vec!["low".to_string(), "high".to_string()];
+        let info = crate::state::TemplateEffortInfo {
+            ladder: Some(ladder),
+            default_effort: Some("high".to_string()),
+            is_reasoning: true,
+            is_toggle_only: false,
+            is_always_on: false,
+            template: None,
+        };
+
+        let row = model_row_with_template(&def, Some(32768), "configured", &[], &info);
+
+        let map = &row["thinkingLevelMap"];
+        // 1. Both off and none keys populated
+        assert_eq!(map["off"], "none");
+        assert_eq!(map["none"], "none");
+
+        // 2. Exact supported tiers present
+        assert_eq!(map["low"], "low");
+        assert_eq!(map["high"], "high");
+
+        // 3. Truthful nulls for unsupported tiers
+        assert_eq!(map["minimal"], serde_json::Value::Null);
+        assert_eq!(map["medium"], serde_json::Value::Null);
+        assert_eq!(map["xhigh"], serde_json::Value::Null);
+        assert_eq!(map["max"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_models_route_alias() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mut servers = BTreeMap::new();
+        let mut s_a = live_server(
+            "srv-a",
+            "Qwen/Qwen2.5-7B",
+            Some("qwen2.5-7b"),
+            8010,
+            "instruct",
+            ServerStatus::Running,
+        );
+        s_a.def.max_model_len = Some(4096);
+        servers.insert("srv-a".into(), s_a);
+
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_port = gateway_listener.local_addr().unwrap().port();
+
+        let state = Arc::new(AppState::new());
+        *state.servers.lock().unwrap() = servers;
+        state
+            .config
+            .lock()
+            .unwrap()
+            .advanced_settings
+            .api_key = Some("test-key".into());
+
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = gateway_listener.accept().await {
+                    let st = Arc::clone(&state_clone);
+                    tokio::spawn(handle_connection(stream, st));
+                }
+            }
+        });
+
+        // 1. GET /models returns HTTP 200 with object: "list"
+        let req_models = format!(
+            "GET /models HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nConnection: close\r\n\r\n"
+        );
+        let mut client1 = tokio::net::TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
+        client1.write_all(req_models.as_bytes()).await.unwrap();
+        let mut resp1 = String::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = client1.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            resp1.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp1.starts_with("HTTP/1.1 200 OK"), "resp1 was: {resp1}");
+        assert!(resp1.contains(r#""object":"list""#));
+        assert!(resp1.contains("qwen2.5-7b"));
+
+        // 2. GET /models/qwen2.5-7b returns HTTP 200 with model object
+        let req_single = format!(
+            "GET /models/qwen2.5-7b HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer test-key\r\nConnection: close\r\n\r\n"
+        );
+        let mut client2 = tokio::net::TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
+            .await
+            .unwrap();
+        client2.write_all(req_single.as_bytes()).await.unwrap();
+        let mut resp2 = String::new();
+        while let Ok(n) = client2.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            resp2.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(resp2.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp2.contains(r#""id":"qwen2.5-7b""#));
+    }
+
+    #[tokio::test]
+    async fn test_resilient_template_cache_retry() {
+        let state = Arc::new(AppState::new());
+        let def = ServerDef {
+            port: 9999,
+            backend: "llamacpp".into(),
+            task: "instruct".into(),
+            model_id: "test/uninitialized-model".into(),
+            ..ServerDef::default()
+        };
+
+        let now = crate::state::now_ms();
+        // Insert an empty template result cached 4 seconds ago
+        let empty_info = crate::state::TemplateEffortInfo::default();
+        state
+            .template_effort_cache
+            .lock()
+            .unwrap()
+            .insert(def.port, (now - 4_000, empty_info));
+
+        let _ = template_info_for(&state, &def).await;
+
+        let updated_time = state
+            .template_effort_cache
+            .lock()
+            .unwrap()
+            .get(&def.port)
+            .unwrap()
+            .0;
+
+        assert!(
+            updated_time >= now,
+            "Cache should have re-fetched and updated timestamp because 4s > 3s retry TTL"
+        );
     }
 }
