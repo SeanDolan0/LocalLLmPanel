@@ -1003,6 +1003,11 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             .as_deref()
             .map(|t| t.contains("ngram"))
             .unwrap_or(false);
+        let is_mtp = def
+            .speculative_type
+            .as_deref()
+            .map(|t| t.to_ascii_lowercase().contains("mtp"))
+            .unwrap_or(false);
 
         let draft_model = def
             .speculative_model_path
@@ -1011,21 +1016,24 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
             .filter(|s| !s.trim().is_empty());
 
         if let Some(draft_model) = draft_model {
-            let draft_flag = if help_supports_flag(help, "--model-draft") {
-                "--model-draft"
-            } else if help_supports_flag(help, "--spec-draft-model") {
-                "--spec-draft-model"
-            } else if help_supports_flag(help, "-md") {
-                "-md"
-            } else {
-                "--model-draft"
-            };
-            args.extend([draft_flag.into(), draft_model.into()]);
-            structured_flags.extend(["--model-draft", "--spec-draft-model", "-md"]);
+            if !is_mtp {
+                let draft_flag = if help_supports_flag(help, "--model-draft") {
+                    "--model-draft"
+                } else if help_supports_flag(help, "--spec-draft-model") {
+                    "--spec-draft-model"
+                } else if help_supports_flag(help, "-md") {
+                    "-md"
+                } else {
+                    "--model-draft"
+                };
+                args.extend([draft_flag.into(), draft_model.into()]);
+                structured_flags.extend(["--model-draft", "--spec-draft-model", "-md"]);
+            }
         }
 
-        if draft_model.is_some() || is_ngram {
-            let tokens = def.speculative_num_tokens.unwrap_or(5);
+        if draft_model.is_some() || is_ngram || is_mtp {
+            let default_tokens = if is_mtp { 2 } else { 5 };
+            let tokens = def.speculative_num_tokens.unwrap_or(default_tokens);
             let token_flag = if help_supports_flag(help, "--spec-draft-n-max") {
                 "--spec-draft-n-max"
             } else if help_supports_flag(help, "--draft-max") {
@@ -2303,6 +2311,11 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     .as_deref()
                     .map(|t| t.contains("ngram"))
                     .unwrap_or(false);
+                let is_mtp = def
+                    .speculative_type
+                    .as_deref()
+                    .map(|t| t.to_ascii_lowercase().contains("mtp"))
+                    .unwrap_or(false);
                 let draft_raw = def
                     .speculative_model_path
                     .as_deref()
@@ -2310,19 +2323,21 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
                 if let Some(draft_raw) = draft_raw {
-                    if let Some(resolved) =
-                        resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro)
-                    {
-                        let path_str = resolved.to_string_lossy().into_owned();
-                        def.speculative_model_path = Some(path_str.clone());
-                        def.speculative_model = Some(path_str);
-                    } else if !std::path::Path::new(draft_raw).is_file() {
-                        bail!(
-                            "Speculative decoding draft GGUF model file not found for '{draft_raw}'. Please provide a valid path to a .gguf file or ensure the draft model is downloaded to your GGUF directory ({}).",
-                            cfg.gguf_dir
-                        );
+                    if !is_mtp {
+                        if let Some(resolved) =
+                            resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro)
+                        {
+                            let path_str = resolved.to_string_lossy().into_owned();
+                            def.speculative_model_path = Some(path_str.clone());
+                            def.speculative_model = Some(path_str);
+                        } else if !std::path::Path::new(draft_raw).is_file() {
+                            bail!(
+                                "Speculative decoding draft GGUF model file not found for '{draft_raw}'. Please provide a valid path to a .gguf file or ensure the draft model is downloaded to your GGUF directory ({}).",
+                                cfg.gguf_dir
+                            );
+                        }
                     }
-                } else if !is_ngram {
+                } else if !is_ngram && !is_mtp {
                     bail!(
                         "Speculative decoding is enabled for server '{}' but no draft model was specified. Please select a draft GGUF model file.",
                         def.name
@@ -2347,12 +2362,28 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                         def.name
                     );
                 }
-                let draft_display = def
-                    .speculative_model_path
+                let is_mtp = def
+                    .speculative_type
                     .as_deref()
-                    .or(def.speculative_model.as_deref())
-                    .unwrap_or("none");
-                let tokens = def.speculative_num_tokens.unwrap_or(5);
+                    .map(|t| t.to_ascii_lowercase().contains("mtp"))
+                    .unwrap_or(false);
+                let is_ngram = def
+                    .speculative_type
+                    .as_deref()
+                    .map(|t| t.contains("ngram"))
+                    .unwrap_or(false);
+                let draft_display = if is_mtp {
+                    "self-drafting (MTP)"
+                } else if is_ngram {
+                    "ngram cache"
+                } else {
+                    def.speculative_model_path
+                        .as_deref()
+                        .or(def.speculative_model.as_deref())
+                        .unwrap_or("none")
+                };
+                let default_tokens = if is_mtp { 2 } else { 5 };
+                let tokens = def.speculative_num_tokens.unwrap_or(default_tokens);
                 let mut parts = vec![
                     format!("draft model = {draft_display}"),
                     format!("speculative tokens = {tokens}"),
@@ -5902,6 +5933,30 @@ vllm:num_preemptions_total{model_name="my model"} 5
         let args = build_llamacpp_args_with_help(&d, help);
         assert!(!args.contains(&"--model-draft".to_string()));
         assert!(!args.contains(&"--spec-draft-n-max".to_string()));
+    }
+
+    #[test]
+    fn test_llamacpp_speculative_args_draft_mtp() {
+        let mut d = def("Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf", "instruct", 8000, "GGUF", None);
+        d.backend = "llamacpp".into();
+        d.speculative_enabled = true;
+        d.speculative_type = Some("draft-mtp".into());
+        // No draft model path specified (self-contained MTP)
+
+        let help = "--model-draft FNAME  --spec-draft-n-max N  --spec-type TYPE";
+        let args = build_llamacpp_args_with_help(&d, help);
+        assert!(!args.contains(&"--model-draft".to_string()));
+        assert!(!args.contains(&"-md".to_string()));
+        assert!(args.contains(&"--spec-type".to_string()));
+        assert!(args.contains(&"draft-mtp".to_string()));
+        assert!(args.contains(&"--spec-draft-n-max".to_string()));
+        assert!(args.contains(&"2".to_string())); // MTP defaults to 2 tokens
+
+        // With custom token count
+        d.speculative_num_tokens = Some(1);
+        let args_custom = build_llamacpp_args_with_help(&d, help);
+        assert!(args_custom.contains(&"--spec-draft-n-max".to_string()));
+        assert!(args_custom.contains(&"1".to_string()));
     }
 
     #[test]

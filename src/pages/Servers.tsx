@@ -804,8 +804,11 @@ export function cleanModelName(raw: string): string {
 
 function inferGgufQuantLabel(modelPath: string): string {
   const file = modelPath.split(/[\\/]/).pop() || "";
-  const match = file.match(/(?:^|[-_.])(Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32)(?=\.gguf$)/i);
-  return match?.[1]?.toUpperCase() || "GGUF";
+  const isMtp = /(?:[-_.]mtp)(?:[-_.]\d+-of-\d+)?\.gguf$/i.test(file);
+  const clean = file.replace(/(?:[-_.]mtp)?(?:[-_.]\d+-of-\d+)?\.gguf$/i, ".gguf");
+  const match = clean.match(/(?:^|[-_.])(Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32)(?=\.gguf$)/i);
+  const base = match?.[1]?.toUpperCase() || "GGUF";
+  return isMtp && base !== "GGUF" ? `${base} (MTP)` : isMtp ? "GGUF (MTP)" : base;
 }
 
 function formatMemoryMb(value: number | null | undefined): string {
@@ -1059,7 +1062,15 @@ function NewServerForm({
       const path = entry.model_path || entry.model_id;
       setModelPath(path);
       setModelId(entry.model_id);
-      setQuant(entry.quant || inferGgufQuantLabel(path));
+      const inferredQuant = entry.quant || inferGgufQuantLabel(path);
+      setQuant(inferredQuant);
+      if (inferredQuant.includes("(MTP)") || /(?:[-_.]mtp)(?:[-_.]\d+-of-\d+)?\.gguf$/i.test(path)) {
+        setSpeculativeEnabled(true);
+        setSpeculativeType("draft-mtp");
+        if (!speculativeNumTokens || speculativeNumTokens === "5") {
+          setSpeculativeNumTokens("2");
+        }
+      }
     } else {
       setBackend("vllm");
       setModelId(entry.model_id);
@@ -1093,7 +1104,15 @@ function NewServerForm({
           setBackend("llamacpp");
           setModelPath(selected);
           setModelId(selected);
-          setQuant(inferGgufQuantLabel(selected));
+          const inferred = inferGgufQuantLabel(selected);
+          setQuant(inferred);
+          if (inferred.includes("(MTP)") || /(?:[-_.]mtp)(?:[-_.]\d+-of-\d+)?\.gguf$/i.test(selected)) {
+            setSpeculativeEnabled(true);
+            setSpeculativeType("draft-mtp");
+            if (!speculativeNumTokens || speculativeNumTokens === "5") {
+              setSpeculativeNumTokens("2");
+            }
+          }
         } else {
           setModelPath(selected);
           setModelId(selected);
@@ -1244,6 +1263,17 @@ function NewServerForm({
     }
     if (initialQuant) {
       setQuant(initialQuant);
+    }
+    if (
+      !initialServer &&
+      (initialQuant?.includes("(MTP)") ||
+        (initialModelPath && /(?:[-_.]mtp)(?:[-_.]\d+-of-\d+)?\.gguf$/i.test(initialModelPath)))
+    ) {
+      setSpeculativeEnabled(true);
+      setSpeculativeType("draft-mtp");
+      if (!initialSpeculativeNumTokens) {
+        setSpeculativeNumTokens("2");
+      }
     }
     if (initialSwapSpace !== undefined) {
       setSwapSpaceGb(String(initialSwapSpace));
@@ -1559,14 +1589,16 @@ function NewServerForm({
       const parsedSwap = swapSpaceGb !== "" ? parseInt(swapSpaceGb, 10) : null;
       const parsedOffload = cpuOffloadGb !== "" ? parseInt(cpuOffloadGb, 10) : null;
       const parsedSpecTokens = parseInt(speculativeNumTokens, 10);
-      const validSpecTokens = !isNaN(parsedSpecTokens) && parsedSpecTokens > 0 ? parsedSpecTokens : 5;
-      const isSpecActive = speculativeEnabled && task !== "embed";
+      const isMtpSpec = speculativeType.trim().toLowerCase().includes("mtp");
       const isNgramSpec = speculativeType.trim().toLowerCase().includes("ngram");
+      const defaultTokens = isMtpSpec ? 2 : 5;
+      const validSpecTokens = !isNaN(parsedSpecTokens) && parsedSpecTokens > 0 ? parsedSpecTokens : defaultTokens;
+      const isSpecActive = speculativeEnabled && task !== "embed";
       const specDraftVllm = isSpecActive && speculativeModel.trim() ? speculativeModel.trim() : null;
       const specDraftLlama = isSpecActive && (speculativeModelPath.trim() || speculativeModel.trim())
         ? (speculativeModelPath.trim() || speculativeModel.trim())
         : null;
-      const isLlamaSpecActive = isSpecActive && (Boolean(specDraftLlama) || isNgramSpec);
+      const isLlamaSpecActive = isSpecActive && (Boolean(specDraftLlama) || isNgramSpec || isMtpSpec);
 
       const parsedDraftNMin = speculativeDraftNMin.trim() ? parseInt(speculativeDraftNMin, 10) : null;
       const parsedDraftPMin = speculativeDraftPMin.trim() ? parseFloat(speculativeDraftPMin) : null;
@@ -1855,7 +1887,15 @@ function NewServerForm({
               onChange={(e) => {
                 const nextPath = e.target.value;
                 setModelPath(nextPath);
-                setQuant(inferGgufQuantLabel(nextPath));
+                const inferred = inferGgufQuantLabel(nextPath);
+                setQuant(inferred);
+                if (inferred.includes("(MTP)") || /(?:[-_.]mtp)(?:[-_.]\d+-of-\d+)?\.gguf$/i.test(nextPath)) {
+                  setSpeculativeEnabled(true);
+                  setSpeculativeType("draft-mtp");
+                  if (!speculativeNumTokens || speculativeNumTokens === "5") {
+                    setSpeculativeNumTokens("2");
+                  }
+                }
                 if (!name) {
                   setName(cleanModelName(nextPath));
                 }
@@ -2126,9 +2166,11 @@ function NewServerForm({
             speculativeEnabled
               ? `Enabled · ${backend === "llamacpp" ? (speculativeType || "draft-simple") : "vLLM draft"} · ${
                   backend === "llamacpp"
-                    ? (speculativeModelPath || speculativeModel || (speculativeType.includes("ngram") ? "ngram cache" : "none"))
+                    ? (speculativeType.includes("mtp")
+                        ? "self-drafting (MTP)"
+                        : (speculativeModelPath || speculativeModel || (speculativeType.includes("ngram") ? "ngram cache" : "none")))
                     : (speculativeModel || "none")
-                } (${speculativeNumTokens || "5"} tokens${speculativeDraftNgl ? `, ngl: ${speculativeDraftNgl}` : ""}${speculativeDraftPMin ? `, p-min: ${speculativeDraftPMin}` : ""})`
+                } (${speculativeNumTokens || (speculativeType.includes("mtp") ? "2" : "5")} tokens${speculativeDraftNgl ? `, ngl: ${speculativeDraftNgl}` : ""}${speculativeDraftPMin ? `, p-min: ${speculativeDraftPMin}` : ""})`
               : "Accelerate inference with a smaller draft model running alongside the main model"
           }
           storageKey="llm_panel_server_form_speculative"
@@ -2160,7 +2202,13 @@ function NewServerForm({
                     <select
                       className={inputCls}
                       value={speculativeType}
-                      onChange={(e) => setSpeculativeType(e.target.value)}
+                      onChange={(e) => {
+                        const nextType = e.target.value;
+                        setSpeculativeType(nextType);
+                        if (nextType === "draft-mtp" && (!speculativeNumTokens || speculativeNumTokens === "5")) {
+                          setSpeculativeNumTokens("2");
+                        }
+                      }}
                     >
                       <option value="">Default (draft-simple)</option>
                       <option value="draft-simple">Standard Draft Model (draft-simple)</option>
@@ -2173,74 +2221,86 @@ function NewServerForm({
                   </Field>
                 )}
 
-                <Field
-                  label={backend === "llamacpp" ? "Draft GGUF model path" : "Draft model ID (HF or local)"}
-                  help="Small draft model loaded alongside the main model. Its weights add to VRAM/RAM use; a faster draft means faster overall generation."
-                  hint={
-                    backend === "llamacpp"
-                      ? speculativeType.toLowerCase().includes("ngram")
-                        ? "Optional for ngram-mod. If omitted, ngram cache matches against prompt context."
-                        : "Must be a GGUF file compatible with the target model (e.g. 0.5B draft for 7B target)."
-                      : "Hugging Face model repository ID or local directory (e.g. Qwen/Qwen2.5-0.5B-Instruct)."
-                  }
-                >
-                  {backend === "llamacpp" ? (
-                    <div className="flex gap-1.5">
+                {backend === "llamacpp" && speculativeType === "draft-mtp" ? (
+                  <div className="sm:col-span-2 rounded-lg border border-indigo-500/30 bg-indigo-950/20 p-3 text-xs text-indigo-300">
+                    <div className="flex items-center gap-1.5 font-medium text-indigo-200">
+                      <span className="inline-block h-2 w-2 rounded-full bg-indigo-400" />
+                      Self-Drafting Active (Multi-Token Prediction)
+                    </div>
+                    <div className="mt-1 text-slate-400">
+                      This model carries integrated Multi-Token Prediction heads directly in its weights. Llama.cpp will draft future tokens using internal MTP heads without needing a separate draft GGUF file.
+                    </div>
+                  </div>
+                ) : (
+                  <Field
+                    label={backend === "llamacpp" ? "Draft GGUF model path" : "Draft model ID (HF or local)"}
+                    help="Small draft model loaded alongside the main model. Its weights add to VRAM/RAM use; a faster draft means faster overall generation."
+                    hint={
+                      backend === "llamacpp"
+                        ? speculativeType.toLowerCase().includes("ngram")
+                          ? "Optional for ngram-mod. If omitted, ngram cache matches against prompt context."
+                          : "Must be a GGUF file compatible with the target model (e.g. 0.5B draft for 7B target)."
+                        : "Hugging Face model repository ID or local directory (e.g. Qwen/Qwen2.5-0.5B-Instruct)."
+                    }
+                  >
+                    {backend === "llamacpp" ? (
+                      <div className="flex gap-1.5">
+                        <input
+                          className={inputCls}
+                          placeholder={
+                            speculativeType.toLowerCase().includes("ngram")
+                              ? "Optional: C:\\models\\draft-model.gguf (or leave blank for context ngrams)"
+                              : "C:\\models\\draft-model-Q4_K_M.gguf"
+                          }
+                          value={speculativeModelPath || speculativeModel}
+                          onChange={(e) => {
+                            setSpeculativeModelPath(e.target.value);
+                            setSpeculativeModel(e.target.value);
+                          }}
+                        />
+                        <Button
+                          variant="ghost"
+                          className="shrink-0 px-3 text-xs"
+                          onClick={async () => {
+                            try {
+                              const selected = await open({
+                                title: "Select draft GGUF model file",
+                                filters: [{ name: "GGUF models", extensions: ["gguf"] }],
+                              });
+                              if (selected && typeof selected === "string") {
+                                setSpeculativeModelPath(selected);
+                                setSpeculativeModel(selected);
+                              }
+                            } catch (browseErr) {
+                              onErr(String(browseErr));
+                            }
+                          }}
+                        >
+                          Browse…
+                        </Button>
+                      </div>
+                    ) : (
                       <input
                         className={inputCls}
-                        placeholder={
-                          speculativeType.toLowerCase().includes("ngram")
-                            ? "Optional: C:\\models\\draft-model.gguf (or leave blank for context ngrams)"
-                            : "C:\\models\\draft-model-Q4_K_M.gguf"
-                        }
-                        value={speculativeModelPath || speculativeModel}
-                        onChange={(e) => {
-                          setSpeculativeModelPath(e.target.value);
-                          setSpeculativeModel(e.target.value);
-                        }}
+                        placeholder="e.g. Qwen/Qwen2.5-0.5B-Instruct"
+                        value={speculativeModel}
+                        onChange={(e) => setSpeculativeModel(e.target.value)}
                       />
-                      <Button
-                        variant="ghost"
-                        className="shrink-0 px-3 text-xs"
-                        onClick={async () => {
-                          try {
-                            const selected = await open({
-                              title: "Select draft GGUF model file",
-                              filters: [{ name: "GGUF models", extensions: ["gguf"] }],
-                            });
-                            if (selected && typeof selected === "string") {
-                              setSpeculativeModelPath(selected);
-                              setSpeculativeModel(selected);
-                            }
-                          } catch (browseErr) {
-                            onErr(String(browseErr));
-                          }
-                        }}
-                      >
-                        Browse…
-                      </Button>
-                    </div>
-                  ) : (
-                    <input
-                      className={inputCls}
-                      placeholder="e.g. Qwen/Qwen2.5-0.5B-Instruct"
-                      value={speculativeModel}
-                      onChange={(e) => setSpeculativeModel(e.target.value)}
-                    />
-                  )}
-                </Field>
+                    )}
+                  </Field>
+                )}
 
                 <Field
                   label={backend === "llamacpp" ? "Max draft tokens (--spec-draft-n-max / --draft-max)" : "Number of speculative tokens"}
                   help="Tokens the draft proposes per forward pass. More tokens can mean higher tokens/sec but less gain if predictions are often wrong. No direct VRAM/RAM change."
-                  hint="llama.cpp: --spec-draft-n-max N (fallback --draft-max N). Default is 5."
+                  hint={speculativeType === "draft-mtp" ? "llama.cpp MTP: --spec-draft-n-max N. Default is 2 for MTP heads." : "llama.cpp: --spec-draft-n-max N (fallback --draft-max N). Default is 5."}
                 >
                   <input
                     type="number"
                     min="1"
                     max="64"
                     className={inputCls}
-                    placeholder="5"
+                    placeholder={speculativeType === "draft-mtp" ? "2" : "5"}
                     value={speculativeNumTokens}
                     onChange={(e) => setSpeculativeNumTokens(e.target.value)}
                   />

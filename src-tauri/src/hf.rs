@@ -539,7 +539,7 @@ static GGUF_QUANT_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLo
     .expect("valid GGUF quant regex")
 });
 
-/// Returns true if a file is an auxiliary / helper file (e.g. MTP helper, mmproj, imatrix, vocab)
+/// Returns true if a file is an auxiliary / helper file (e.g. standalone MTP helper, mmproj, imatrix, vocab)
 /// that cannot run as a standalone language model.
 pub fn is_auxiliary_gguf_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
@@ -549,16 +549,11 @@ pub fn is_auxiliary_gguf_file(path: &str) -> bool {
         .unwrap_or(path)
         .to_ascii_lowercase();
 
-    // Multi-Token Prediction (MTP) helper files
+    // Standalone Multi-Token Prediction (MTP) helper directories and standalone prefixes
     if lower.starts_with("mtp/")
         || lower.contains("/mtp/")
-        || lower.contains("/mtp-")
         || fname.starts_with("mtp-")
         || fname.starts_with("mtp_")
-        || fname.contains("-mtp-")
-        || fname.contains("_mtp_")
-        || fname.contains("-mtp.")
-        || fname.contains("_mtp.")
     {
         return true;
     }
@@ -583,10 +578,64 @@ pub fn is_auxiliary_gguf_file(path: &str) -> bool {
         return true;
     }
 
+    // Non-integrated MTP files (e.g. auxiliary helper without a recognized base quant)
+    if fname.contains("-mtp-")
+        || fname.contains("_mtp_")
+        || fname.contains("-mtp.")
+        || fname.contains("_mtp.")
+    {
+        if !lower.ends_with(".gguf") {
+            return true;
+        }
+        let stem = &path[..path.len() - ".gguf".len()];
+        if extract_quant_and_mtp(stem).is_none() {
+            return true;
+        }
+    }
+
     false
 }
 
+/// Helper to extract (base_quant, is_mtp) from a filename stem.
+fn extract_quant_and_mtp(stem: &str) -> Option<(String, bool)> {
+    let capture = |text: &str| {
+        GGUF_QUANT_RE
+            .captures(text)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+    };
+
+    // First, check if there's an MTP suffix at the end of the stem (e.g. model-IQ3_S-mtp)
+    let lower_stem = stem.to_ascii_lowercase();
+    if lower_stem.ends_with("-mtp") || lower_stem.ends_with("_mtp") {
+        let without_mtp = &stem[..stem.len() - 4];
+        let clean_without_mtp = GGUF_SHARD_RE.replace(without_mtp, "");
+        if let Some(base_quant) = capture(&clean_without_mtp).or_else(|| capture(&clean_without_mtp.to_ascii_uppercase())) {
+            return Some((base_quant, true));
+        }
+    }
+
+    // Next, check direct quant match on clean stem
+    let clean_stem = GGUF_SHARD_RE.replace(stem, "");
+    let clean_lower = clean_stem.to_ascii_lowercase();
+    if clean_lower.ends_with("-mtp") || clean_lower.ends_with("_mtp") {
+        let without_mtp = &clean_stem[..clean_stem.len() - 4];
+        if let Some(base_quant) = capture(without_mtp).or_else(|| capture(&without_mtp.to_ascii_uppercase())) {
+            return Some((base_quant, true));
+        }
+    }
+
+    if let Some(base_quant) = capture(&clean_stem).or_else(|| capture(&clean_stem.to_ascii_uppercase())) {
+        let is_mtp = lower_stem.contains("-mtp-") || lower_stem.contains("_mtp_");
+        return Some((base_quant, is_mtp));
+    }
+
+    None
+}
+
 /// Parse GGUF quant label from filename. Returns None for non-GGUF or auxiliary helper files.
+///
+/// Integrated MTP builds (e.g. `*-<quant>-mtp.gguf`) return `<QUANT> (MTP)`.
 ///
 /// The `.gguf` suffix check is case-insensitive (repo owners do ship `.GGUF`)
 /// and the label regex is retried against an upper-cased stem, because the
@@ -597,16 +646,12 @@ pub fn parse_gguf_quant_label(filename: &str) -> Option<String> {
         return None;
     }
     let stem = &filename[..filename.len() - ".gguf".len()];
-    // Strip shard suffix like -00001-of-00003
-    let stem = GGUF_SHARD_RE.replace(stem, "");
-    // Match quant label at end: Q*, IQ*, UD-Q*, UD-IQ*, BF16, F16, FP16, PQ2_0, PTQ1_0, Q2_0_g64, etc.
-    let capture = |text: &str| {
-        GGUF_QUANT_RE
-            .captures(text)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_string())
-    };
-    capture(&stem).or_else(|| capture(&stem.to_ascii_uppercase()))
+    let (base_quant, is_mtp) = extract_quant_and_mtp(stem)?;
+    if is_mtp {
+        Some(format!("{base_quant} (MTP)"))
+    } else {
+        Some(base_quant)
+    }
 }
 
 /// Determine if a quant label requires the PrismML llama.cpp fork.
@@ -1626,6 +1671,24 @@ mod tests {
             None
         );
         assert_eq!(parse_gguf_quant_label("mtp-Qwen3.8-27B-Q4_0.gguf"), None);
+
+        // Integrated MTP builds should be recognized with (MTP) tag
+        assert_eq!(
+            parse_gguf_quant_label("Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"),
+            Some("IQ3_S (MTP)".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf"),
+            Some("IQ2_XS (MTP)".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp-00001-of-00002.gguf"),
+            Some("IQ3_S (MTP)".to_string())
+        );
+        assert_eq!(
+            parse_gguf_quant_label("Qwen3.8-27B-mtp-Q4_K_M.gguf"),
+            Some("Q4_K_M (MTP)".to_string())
+        );
 
         // Vision projectors and imatrix should be excluded
         assert_eq!(parse_gguf_quant_label("mmproj-BF16.gguf"), None);

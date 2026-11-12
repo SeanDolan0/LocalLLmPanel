@@ -2133,6 +2133,14 @@ function ModelDetailModal({
                               ⚠️ Experimental
                             </span>
                           )}
+                          {variant.label.includes("(MTP)") && (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-300"
+                              title="Includes integrated Multi-Token Prediction heads for self-drafting speculative decoding in llama.cpp"
+                            >
+                              ⚡ MTP Speculative
+                            </span>
+                          )}
                           {requiredFork && (
                             <span
                               className="inline-flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-300"
