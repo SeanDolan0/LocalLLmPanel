@@ -141,7 +141,7 @@ jobs:
         run: node scripts/validate-release.mjs --setup --artifacts
 
       - name: Generate build provenance attestations
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         continue-on-error: true
         with:
           subject-path: |
