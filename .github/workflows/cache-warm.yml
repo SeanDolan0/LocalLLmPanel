@@ -1,5 +1,9 @@
 name: Warm Rust cache
 
+permissions:
+  contents: read
+  actions: read
+
 # Tag-triggered releases can only read caches from the default branch,
 # so this keeps a fresh one there for draft-release.yml to reuse.
 
