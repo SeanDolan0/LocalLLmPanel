@@ -28,7 +28,10 @@ mod tests {
     }
 
     impl RemoteModelSource for MockRemoteSource {
-        fn fetch_category_feed(&self, _category: DiscoveryCategory) -> Result<Vec<CatalogModel>, String> {
+        fn fetch_category_feed(
+            &self,
+            _category: DiscoveryCategory,
+        ) -> Result<Vec<CatalogModel>, String> {
             self.feed_calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![CatalogModel {
                 model_id: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
@@ -84,7 +87,9 @@ mod tests {
                 verified_variants: vec!["Q4_K_M".to_string(), "IQ3_M".to_string()],
                 compatible_draft_models: Vec::new(),
                 reasoning_effort_supported: false,
-                chat_template_preview: Some("{{ bos_token }}<think>reasoning</think>{{ eos_token }}".to_string()),
+                chat_template_preview: Some(
+                    "{{ bos_token }}<think>reasoning</think>{{ eos_token }}".to_string(),
+                ),
             })
         }
     }
@@ -164,7 +169,9 @@ mod tests {
 
         // Deep details hydrated on demand
         assert_eq!(remote.detail_calls.load(Ordering::SeqCst), 0);
-        let details = catalog.get_details("meta-llama/Llama-3.1-70B-Instruct").unwrap();
+        let details = catalog
+            .get_details("meta-llama/Llama-3.1-70B-Instruct")
+            .unwrap();
         assert_eq!(remote.detail_calls.load(Ordering::SeqCst), 1);
         assert_eq!(details.native_max_context, 131_072);
     }
@@ -176,7 +183,9 @@ mod tests {
         let sizer = Arc::new(HardwareSizer::new(Arc::new(MockProbe)));
         let catalog = ModelCatalog::new(remote, inventory, sizer);
 
-        let details = catalog.get_details("meta-llama/Llama-3.1-70B-Instruct").unwrap();
+        let details = catalog
+            .get_details("meta-llama/Llama-3.1-70B-Instruct")
+            .unwrap();
         // Model natively supports 128k
         assert_eq!(details.native_max_context, 131_072);
         // With ~19.5 GB free VRAM (>16 GB tier), recommended context is clamped to 32k
@@ -218,20 +227,31 @@ mod tests {
         let catalog = ModelCatalog::new(remote, inventory, sizer);
 
         // 70B Llama-3 model recommends 8B draft
-        let drafts_70b = catalog.get_draft_suggestions("meta-llama/Llama-3.1-70B-Instruct", Some(70.0));
+        let drafts_70b =
+            catalog.get_draft_suggestions("meta-llama/Llama-3.1-70B-Instruct", Some(70.0));
         assert!(!drafts_70b.is_empty());
-        assert_eq!(drafts_70b[0].draft_model_id, "meta-llama/Llama-3.1-8B-Instruct");
+        assert_eq!(
+            drafts_70b[0].draft_model_id,
+            "meta-llama/Llama-3.1-8B-Instruct"
+        );
         assert_eq!(drafts_70b[0].params_b, 8.0);
 
         // 8B Llama-3 model recommends 1B draft
-        let drafts_8b = catalog.get_draft_suggestions("meta-llama/Llama-3.1-8B-Instruct", Some(8.0));
+        let drafts_8b =
+            catalog.get_draft_suggestions("meta-llama/Llama-3.1-8B-Instruct", Some(8.0));
         assert!(!drafts_8b.is_empty());
-        assert_eq!(drafts_8b[0].draft_model_id, "meta-llama/Llama-3.2-1B-Instruct");
+        assert_eq!(
+            drafts_8b[0].draft_model_id,
+            "meta-llama/Llama-3.2-1B-Instruct"
+        );
 
         // DeepSeek-R1 recommends Distill-Qwen draft
         let drafts_r1 = catalog.get_draft_suggestions("deepseek-ai/DeepSeek-R1", Some(671.0));
         assert!(!drafts_r1.is_empty());
-        assert_eq!(drafts_r1[0].draft_model_id, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B");
+        assert_eq!(
+            drafts_r1[0].draft_model_id,
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+        );
     }
 
     #[test]
@@ -242,7 +262,9 @@ mod tests {
         let catalog = ModelCatalog::new(remote, inventory, sizer);
 
         // Details for model with `<think>` template is automatically flagged as supporting reasoning effort
-        let details = catalog.get_details("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B").unwrap();
+        let details = catalog
+            .get_details("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+            .unwrap();
         assert!(details.reasoning_effort_supported);
     }
 }

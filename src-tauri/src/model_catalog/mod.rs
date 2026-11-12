@@ -134,8 +134,7 @@ impl ModelCatalog {
         details.recommended_context = recommended_ctx;
 
         // Attach speculative decoding draft recommendations
-        details.compatible_draft_models =
-            recommend_draft_models(model_id, details.params_b);
+        details.compatible_draft_models = recommend_draft_models(model_id, details.params_b);
 
         // Detect reasoning effort capabilities
         details.reasoning_effort_supported = detect_reasoning_effort(model_id)
@@ -200,12 +199,19 @@ pub struct HfProductionRemoteSource {
 }
 
 impl RemoteModelSource for HfProductionRemoteSource {
-    fn fetch_category_feed(&self, _category: DiscoveryCategory) -> Result<Vec<CatalogModel>, String> {
+    fn fetch_category_feed(
+        &self,
+        _category: DiscoveryCategory,
+    ) -> Result<Vec<CatalogModel>, String> {
         // Wrap existing hf_discovery calls
         let mut models = Vec::new();
         let db = llmfit_core::models::ModelDatabase::embedded();
         for m in db.get_all_models().iter().take(15) {
-            let model_id = if m.name.contains('/') { m.name.clone() } else { format!("{}/{}", m.provider, m.name) };
+            let model_id = if m.name.contains('/') {
+                m.name.clone()
+            } else {
+                format!("{}/{}", m.provider, m.name)
+            };
             models.push(CatalogModel {
                 model_id: model_id.clone(),
                 name: m.name.clone(),
@@ -216,7 +222,11 @@ impl RemoteModelSource for HfProductionRemoteSource {
                 params_b: Some(m.params_b()),
                 family: infer_model_family(&model_id),
                 publisher_tier: classify_publisher(&m.provider),
-                available_quants: vec!["Q4_K_M".to_string(), "Q8_0".to_string(), "FP16".to_string()],
+                available_quants: vec![
+                    "Q4_K_M".to_string(),
+                    "Q8_0".to_string(),
+                    "FP16".to_string(),
+                ],
                 best_quant: Some("Q4_K_M".to_string()),
                 fit_score: 90,
                 is_installed: false,
@@ -229,8 +239,20 @@ impl RemoteModelSource for HfProductionRemoteSource {
         let db = llmfit_core::models::ModelDatabase::embedded();
         let q = query.to_ascii_lowercase();
         let mut results = Vec::new();
-        for m in db.get_all_models().iter().filter(|m| m.name.to_ascii_lowercase().contains(&q) || m.provider.to_ascii_lowercase().contains(&q)).take(20) {
-            let model_id = if m.name.contains('/') { m.name.clone() } else { format!("{}/{}", m.provider, m.name) };
+        for m in db
+            .get_all_models()
+            .iter()
+            .filter(|m| {
+                m.name.to_ascii_lowercase().contains(&q)
+                    || m.provider.to_ascii_lowercase().contains(&q)
+            })
+            .take(20)
+        {
+            let model_id = if m.name.contains('/') {
+                m.name.clone()
+            } else {
+                format!("{}/{}", m.provider, m.name)
+            };
             results.push(CatalogModel {
                 model_id: model_id.clone(),
                 name: m.name.clone(),
@@ -251,7 +273,11 @@ impl RemoteModelSource for HfProductionRemoteSource {
     }
 
     fn fetch_model_details(&self, model_id: &str) -> Result<CatalogModelDetails, String> {
-        let author = model_id.split(['/', '\\']).next().unwrap_or("community").to_string();
+        let author = model_id
+            .split(['/', '\\'])
+            .next()
+            .unwrap_or("community")
+            .to_string();
         Ok(CatalogModelDetails {
             model_id: model_id.to_string(),
             base_model_id: infer_base_model_id(model_id),
@@ -284,7 +310,11 @@ impl LocalInventorySource for FsProductionInventorySource {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map_or(false, |ext| ext == "gguf") {
-                    let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let name = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     let meta = entry.metadata().ok();
                     let size = meta.map_or(0, |m| m.len());
                     list.push(InstalledModel {

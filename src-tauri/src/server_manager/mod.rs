@@ -5,13 +5,17 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+use crate::server_manager::ports::allocate_port_held;
+pub use crate::server_manager::traits::{
+    BackendDriver, ConfigStore, EventEmitter, SupervisedProcess,
+};
+pub use crate::server_manager::types::{
+    CreateServerRequest, LifecyclePhase, LogChunk, ServerSnapshot,
+};
+use crate::state::{AppState, ServerDef, ServerStatus};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use crate::server_manager::ports::allocate_port_held;
-pub use crate::server_manager::traits::{BackendDriver, ConfigStore, EventEmitter, SupervisedProcess};
-pub use crate::server_manager::types::{CreateServerRequest, LifecyclePhase, LogChunk, ServerSnapshot};
-use crate::state::{AppState, ServerDef, ServerStatus};
 
 struct LiveState {
     definitions: BTreeMap<String, ServerDef>,
@@ -96,7 +100,11 @@ impl ServerManager {
             .values()
             .map(|def| {
                 let is_running = st.running.contains_key(&def.id);
-                let (alive, healthy) = st.health_states.get(&def.id).copied().unwrap_or((false, false));
+                let (alive, healthy) = st
+                    .health_states
+                    .get(&def.id)
+                    .copied()
+                    .unwrap_or((false, false));
                 let error = st.errors.get(&def.id).cloned();
                 let vram = st.vram_reservations.get(&def.id).copied();
 
@@ -121,7 +129,11 @@ impl ServerManager {
 
                 ServerSnapshot {
                     def: def.clone(),
-                    status: if is_running { "running".to_string() } else { "stopped".to_string() },
+                    status: if is_running {
+                        "running".to_string()
+                    } else {
+                        "stopped".to_string()
+                    },
                     phase,
                     port: def.port,
                     process_alive: alive,
@@ -156,7 +168,9 @@ impl ServerManager {
 
         let id = format!(
             "{}-{}",
-            req.name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"),
+            req.name
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric(), "-"),
             port
         );
 
@@ -232,7 +246,8 @@ impl ServerManager {
             st.definitions.insert(id.clone(), def);
         }
 
-        self.get(&id).ok_or_else(|| "Server created but not found in state".to_string())
+        self.get(&id)
+            .ok_or_else(|| "Server created but not found in state".to_string())
     }
 
     /// Start a server in standalone mode.
@@ -242,9 +257,17 @@ impl ServerManager {
             if st.running.contains_key(id) {
                 return Err(format!("Server '{id}' is already running"));
             }
-            let def = st.definitions.get(id).cloned().ok_or_else(|| format!("Server '{id}' not found"))?;
-            let driver = self.drivers.get(&def.backend).cloned().ok_or_else(|| format!("No driver for backend '{}'", def.backend))?;
-            
+            let def = st
+                .definitions
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("Server '{id}' not found"))?;
+            let driver = self
+                .drivers
+                .get(&def.backend)
+                .cloned()
+                .ok_or_else(|| format!("No driver for backend '{}'", def.backend))?;
+
             st.errors.remove(id);
             st.vram_reservations.insert(id.to_string(), 4096);
             (def, driver)
@@ -316,7 +339,9 @@ impl ServerManager {
             proc.terminate(Duration::from_secs(10))?;
         }
 
-        let snap = self.get(id).ok_or_else(|| format!("Server '{id}' not found"))?;
+        let snap = self
+            .get(id)
+            .ok_or_else(|| format!("Server '{id}' not found"))?;
         if let Some(ref ev) = self.events {
             ev.emit_status(&snap);
         }
@@ -334,7 +359,9 @@ impl ServerManager {
         {
             let st = self.state.lock().unwrap();
             if st.running.contains_key(id) {
-                return Err(format!("Cannot delete running server '{id}'; stop it first"));
+                return Err(format!(
+                    "Cannot delete running server '{id}'; stop it first"
+                ));
             }
         }
 
@@ -362,7 +389,8 @@ impl ServerManager {
         crate::server::list_servers(state)
             .into_iter()
             .map(|(def, status, error, metrics)| {
-                let (process_alive, http_healthy) = match crate::server::get_server_health(&def.id) {
+                let (process_alive, http_healthy) = match crate::server::get_server_health(&def.id)
+                {
                     Some(h) => (Some(h.process_alive), Some(h.http_healthy)),
                     None => (None, None),
                 };

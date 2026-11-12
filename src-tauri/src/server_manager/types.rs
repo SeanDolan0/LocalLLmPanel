@@ -1,19 +1,38 @@
-use serde::{Deserialize, Serialize};
 use crate::server::Metrics;
 use crate::state::ServerDef;
+use serde::{Deserialize, Serialize};
 
 /// Fine-grained operational phase of a Live Server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", content = "details")]
 pub enum LifecyclePhase {
     Stopped,
-    AcquiringResources { port: u16, vram_mb: u64 },
-    SpawningProcess { pid: Option<u32> },
-    WarmingUp { pid: u32, port: u16, last_log: Option<String> },
-    Healthy { pid: u32, port: u16 },
-    Degraded { pid: u32, reason: String },
-    Stopping { pid: u32 },
-    Failed { error: String },
+    AcquiringResources {
+        port: u16,
+        vram_mb: u64,
+    },
+    SpawningProcess {
+        pid: Option<u32>,
+    },
+    WarmingUp {
+        pid: u32,
+        port: u16,
+        last_log: Option<String>,
+    },
+    Healthy {
+        pid: u32,
+        port: u16,
+    },
+    Degraded {
+        pid: u32,
+        reason: String,
+    },
+    Stopping {
+        pid: u32,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Point-in-time summary of a server's operational health, process liveliness, and runtime metrics.

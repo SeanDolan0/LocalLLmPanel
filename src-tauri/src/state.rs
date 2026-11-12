@@ -987,10 +987,18 @@ impl ServerDef {
                 self.task = "instruct".into();
                 self.env.clear();
                 if !self.cache_type_k.is_empty() {
-                    self.cache_type_k = self.cache_type_k.trim().to_ascii_lowercase().replace('-', "_");
+                    self.cache_type_k = self
+                        .cache_type_k
+                        .trim()
+                        .to_ascii_lowercase()
+                        .replace('-', "_");
                 }
                 if !self.cache_type_v.is_empty() {
-                    self.cache_type_v = self.cache_type_v.trim().to_ascii_lowercase().replace('-', "_");
+                    self.cache_type_v = self
+                        .cache_type_v
+                        .trim()
+                        .to_ascii_lowercase()
+                        .replace('-', "_");
                 }
                 if self.speculative_enabled && self.speculative_model_path.is_none() {
                     if let Some(m) = self.speculative_model.clone() {
@@ -1683,9 +1691,8 @@ impl PersistedConfig {
         if custom_forks_existed {
             // custom_forks.json is the authoritative list of custom forks;
             // prune any custom forks from cfg that are not in custom_forks.json
-            cfg.llamacpp_forks.retain(|f| {
-                f.builtin || f.id == "upstream" || custom.iter().any(|c| c.id == f.id)
-            });
+            cfg.llamacpp_forks
+                .retain(|f| f.builtin || f.id == "upstream" || custom.iter().any(|c| c.id == f.id));
         }
 
         // Auto-discover any installed fork directories on disk.

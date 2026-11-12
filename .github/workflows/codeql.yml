@@ -31,13 +31,13 @@ jobs:
         language: ${{ fromJSON(github.event_name == 'push' && '["javascript-typescript","actions"]' || '["javascript-typescript","rust","actions"]') }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # ubuntu-latest ships with rustup/cargo, which is all build-mode: none needs.
       # If CodeQL complains about the toolchain, restore dtolnay/rust-toolchain here.
       - name: Cache cargo registry
         if: matrix.language == 'rust'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -46,12 +46,12 @@ jobs:
           restore-keys: codeql-cargo-
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"

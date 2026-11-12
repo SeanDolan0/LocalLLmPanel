@@ -2584,11 +2584,9 @@ pub async fn servers_delete(
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        st.server_manager.delete_server(&st, &id)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || st.server_manager.delete_server(&st, &id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2598,7 +2596,9 @@ pub fn servers_start(
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    st.server_manager.start_server(&st, Some(&app), &id).map(|_| ())
+    st.server_manager
+        .start_server(&st, Some(&app), &id)
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -2608,10 +2608,12 @@ pub async fn servers_stop(
     id: String,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    tauri::async_runtime::spawn_blocking(move || st.server_manager.stop_server(&st, Some(&app), &id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        st.server_manager.stop_server(&st, Some(&app), &id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|_| ())
 }
 
 #[tauri::command]

@@ -22,14 +22,19 @@ impl HardwareProbe for SystemHardwareProbe {
         let host_ram_mb = (specs.total_ram_gb * 1024.0).round() as u64;
 
         // Check Windows GPU first, then specs
-        let (gpu_name, vram_total_mb) = if let Some(gpu) = crate::llamacpp_install::windows_gpu_snapshot() {
-            (Some(gpu.name), gpu.vram_total_mb)
-        } else if let Some(ref name) = specs.gpu_name {
-            let mb = (specs.total_gpu_vram_gb.unwrap_or(specs.gpu_vram_gb.unwrap_or(0.0)) * 1024.0).round() as u64;
-            (Some(name.clone()), mb)
-        } else {
-            (None, 0)
-        };
+        let (gpu_name, vram_total_mb) =
+            if let Some(gpu) = crate::llamacpp_install::windows_gpu_snapshot() {
+                (Some(gpu.name), gpu.vram_total_mb)
+            } else if let Some(ref name) = specs.gpu_name {
+                let mb = (specs
+                    .total_gpu_vram_gb
+                    .unwrap_or(specs.gpu_vram_gb.unwrap_or(0.0))
+                    * 1024.0)
+                    .round() as u64;
+                (Some(name.clone()), mb)
+            } else {
+                (None, 0)
+            };
 
         // Probe WSL RAM capacity if available
         let wsl_ram_mb = crate::wsl::detect_wsl_memory("Ubuntu")
@@ -53,13 +58,14 @@ impl HardwareProbe for SystemHardwareProbe {
         let host_avail_mb = (specs.available_ram_gb * 1024.0).round() as u64;
 
         // Query GPU telemetry (try windows native nvidia-smi first, then WSL)
-        let (vram_free_mb, gpu_util) = if let Some(gpu) = crate::llamacpp_install::windows_gpu_snapshot() {
-            (gpu.vram_free_mb, Some(gpu.util_percent as f32))
-        } else if let Some(gpu) = crate::wsl::gpu_snapshot("Ubuntu") {
-            (gpu.vram_free_mb, Some(gpu.util_percent as f32))
-        } else {
-            (0, None)
-        };
+        let (vram_free_mb, gpu_util) =
+            if let Some(gpu) = crate::llamacpp_install::windows_gpu_snapshot() {
+                (gpu.vram_free_mb, Some(gpu.util_percent as f32))
+            } else if let Some(gpu) = crate::wsl::gpu_snapshot("Ubuntu") {
+                (gpu.vram_free_mb, Some(gpu.util_percent as f32))
+            } else {
+                (0, None)
+            };
 
         // Query WSL memory
         let wsl_avail_mb = crate::wsl::detect_wsl_memory("Ubuntu")
@@ -100,7 +106,8 @@ impl HardwareSizer {
 
     /// Get immutable physical hardware capacity (cached once on startup).
     pub fn topology(&self) -> &StaticHardwareTopology {
-        self.cached_topology.get_or_init(|| self.probe.probe_topology())
+        self.cached_topology
+            .get_or_init(|| self.probe.probe_topology())
     }
 
     /// Generate an authoritative point-in-time snapshot reconciling static topology,

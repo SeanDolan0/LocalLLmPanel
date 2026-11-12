@@ -88,7 +88,11 @@ pub fn server_weights_gb(def: &ServerDef) -> (f64, f64) {
         if let Ok(meta) = std::fs::metadata(path) {
             main_weight = meta.len() as f64 / 1_073_741_824.0;
         } else if let Some(p) = parse_params_from_name(path) {
-            let q = if def.backend == "llamacpp" { "gguf" } else { &def.quant };
+            let q = if def.backend == "llamacpp" {
+                "gguf"
+            } else {
+                &def.quant
+            };
             main_weight = weight_gb(p, q);
         }
     }
@@ -107,7 +111,11 @@ pub fn server_weights_gb(def: &ServerDef) -> (f64, f64) {
                 if let Ok(meta) = std::fs::metadata(model) {
                     spec_weight = meta.len() as f64 / 1_073_741_824.0;
                 } else if let Some(p) = parse_params_from_name(model) {
-                    let quant = if def.backend == "llamacpp" { "gguf" } else { "fp16" };
+                    let quant = if def.backend == "llamacpp" {
+                        "gguf"
+                    } else {
+                        "fp16"
+                    };
                     spec_weight = weight_gb(p, quant);
                 }
             }
@@ -222,7 +230,10 @@ pub fn calculate_fit(
             let host_avail = hw.host_ram_available_mb as f64 / 1024.0;
             let wsl_avail = hw.wsl_ram_available_mb.unwrap_or(0) as f64 / 1024.0;
             if wsl_avail > host_avail {
-                (hw.wsl_ram_total_mb.unwrap_or(hw.host_ram_total_mb) as f64 / 1024.0, wsl_avail)
+                (
+                    hw.wsl_ram_total_mb.unwrap_or(hw.host_ram_total_mb) as f64 / 1024.0,
+                    wsl_avail,
+                )
             } else {
                 (hw.host_ram_total_mb as f64 / 1024.0, host_avail)
             }
@@ -242,7 +253,9 @@ pub fn calculate_fit(
         let total_pool = ram_available_gb + vram_free_gb;
         if weight_gb <= total_pool * 0.85 {
             let kv_budget_bytes = ((total_pool * 0.85) - weight_gb) * 1_073_741_824.0;
-            let ctx = ((kv_budget_bytes / kv_bytes_tok) as u32).min(131_072).max(1024);
+            let ctx = ((kv_budget_bytes / kv_bytes_tok) as u32)
+                .min(131_072)
+                .max(1024);
             (FitVerdict::FullGpu, weight_gb, 0.0, ctx, 95)
         } else {
             (FitVerdict::TooTight, weight_gb, 0.0, 512, 10)
@@ -250,9 +263,13 @@ pub fn calculate_fit(
     } else if weight_gb <= usable_vram_gb {
         // Fits completely into discrete GPU VRAM
         let kv_budget_bytes = (usable_vram_gb - weight_gb) * 1_073_741_824.0;
-        let ctx = ((kv_budget_bytes / kv_bytes_tok) as u32).min(65_536).max(2048);
+        let ctx = ((kv_budget_bytes / kv_bytes_tok) as u32)
+            .min(65_536)
+            .max(2048);
         (FitVerdict::FullGpu, weight_gb, 0.0, ctx, 90)
-    } else if settings.offload_weights_allowed && (weight_gb <= usable_vram_gb + ram_available_gb * 0.8) {
+    } else if settings.offload_weights_allowed
+        && (weight_gb <= usable_vram_gb + ram_available_gb * 0.8)
+    {
         // Hybrid CPU/GPU offload
         let gpu_alloc = usable_vram_gb;
         let offload_w = weight_gb - gpu_alloc;
@@ -287,7 +304,8 @@ pub fn calculate_fit(
         FitVerdict::CpuOnly => 60.0,
         FitVerdict::TooTight => 10.0,
     };
-    let est_tok = (bandwidth_gbs * 0.5 / (geom.params_b * bytes_per_param(&geom.quant))).clamp(1.0, 250.0) as f32;
+    let est_tok = (bandwidth_gbs * 0.5 / (geom.params_b * bytes_per_param(&geom.quant)))
+        .clamp(1.0, 250.0) as f32;
 
     FitReport {
         verdict,

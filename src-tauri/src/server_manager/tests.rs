@@ -1,13 +1,15 @@
 #[cfg(test)]
 mod tests {
+    use crate::server_manager::traits::{
+        BackendDriver, ConfigStore, EventEmitter, SupervisedProcess,
+    };
+    use crate::server_manager::types::{CreateServerRequest, LifecyclePhase, ServerSnapshot};
+    use crate::server_manager::ServerManager;
+    use crate::state::ServerDef;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use crate::server_manager::traits::{BackendDriver, ConfigStore, EventEmitter, SupervisedProcess};
-    use crate::server_manager::types::{CreateServerRequest, LifecyclePhase, ServerSnapshot};
-    use crate::server_manager::ServerManager;
-    use crate::state::ServerDef;
 
     // Test In-Memory Config Store
     struct InMemoryConfigStore {
@@ -47,7 +49,9 @@ mod tests {
     }
     impl RecordingEventEmitter {
         fn new() -> Self {
-            Self { events: Mutex::new(Vec::new()) }
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
         }
     }
     impl EventEmitter for RecordingEventEmitter {
@@ -87,7 +91,11 @@ mod tests {
         fn backend_kind(&self) -> &'static str {
             "mock"
         }
-        fn spawn(&self, _def: &ServerDef, _port: u16) -> Result<Box<dyn SupervisedProcess>, String> {
+        fn spawn(
+            &self,
+            _def: &ServerDef,
+            _port: u16,
+        ) -> Result<Box<dyn SupervisedProcess>, String> {
             if self.should_fail_spawn {
                 return Err("Simulated process spawn failure".into());
             }
@@ -106,7 +114,13 @@ mod tests {
         let store = Arc::new(InMemoryConfigStore::new());
         let events = Arc::new(RecordingEventEmitter::new());
         let mut drivers: HashMap<String, Arc<dyn BackendDriver>> = HashMap::new();
-        drivers.insert("mock".to_string(), Arc::new(MockBackendDriver { should_fail_spawn: false, should_fail_health: false }));
+        drivers.insert(
+            "mock".to_string(),
+            Arc::new(MockBackendDriver {
+                should_fail_spawn: false,
+                should_fail_health: false,
+            }),
+        );
 
         let manager = ServerManager::new(store.clone(), drivers, events);
 
@@ -125,9 +139,15 @@ mod tests {
             extra_args: None,
         };
 
-        let snapshot = manager.create(req).await.expect("create server must succeed");
+        let snapshot = manager
+            .create(req)
+            .await
+            .expect("create server must succeed");
         assert_eq!(snapshot.def.name, "Test Qwen");
-        assert!(snapshot.def.port >= 8000, "Port must be auto-allocated >= 8000");
+        assert!(
+            snapshot.def.port >= 8000,
+            "Port must be auto-allocated >= 8000"
+        );
         assert_eq!(snapshot.phase, LifecyclePhase::Stopped);
 
         // Verify persisted in store
@@ -162,7 +182,10 @@ mod tests {
         let snapshot = manager.create(req).await.unwrap();
         assert_eq!(manager.list().len(), 1);
 
-        manager.delete(&snapshot.def.id).await.expect("delete must succeed");
+        manager
+            .delete(&snapshot.def.id)
+            .await
+            .expect("delete must succeed");
         assert_eq!(manager.list().len(), 0);
 
         let persisted = store.load_servers().unwrap();
@@ -174,7 +197,13 @@ mod tests {
         let store = Arc::new(InMemoryConfigStore::new());
         let events = Arc::new(RecordingEventEmitter::new());
         let mut drivers: HashMap<String, Arc<dyn BackendDriver>> = HashMap::new();
-        drivers.insert("mock".to_string(), Arc::new(MockBackendDriver { should_fail_spawn: false, should_fail_health: false }));
+        drivers.insert(
+            "mock".to_string(),
+            Arc::new(MockBackendDriver {
+                should_fail_spawn: false,
+                should_fail_health: false,
+            }),
+        );
 
         let manager = ServerManager::new(store.clone(), drivers, events.clone());
 
@@ -216,7 +245,13 @@ mod tests {
         let events = Arc::new(RecordingEventEmitter::new());
         let mut drivers: HashMap<String, Arc<dyn BackendDriver>> = HashMap::new();
         // Driver configured to fail spawn
-        drivers.insert("mock".to_string(), Arc::new(MockBackendDriver { should_fail_spawn: true, should_fail_health: false }));
+        drivers.insert(
+            "mock".to_string(),
+            Arc::new(MockBackendDriver {
+                should_fail_spawn: true,
+                should_fail_health: false,
+            }),
+        );
 
         let manager = ServerManager::new(store.clone(), drivers, events.clone());
 
@@ -246,6 +281,9 @@ mod tests {
         let snap = manager.get(server_id).expect("snapshot must exist");
         assert_eq!(snap.status, "stopped");
         assert_eq!(snap.process_alive, false);
-        assert!(snap.error.is_some(), "Snapshot must record failure error hint");
+        assert!(
+            snap.error.is_some(),
+            "Snapshot must record failure error hint"
+        );
     }
 }

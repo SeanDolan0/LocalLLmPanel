@@ -4,10 +4,8 @@ use crate::model_catalog::types::{DraftModelSuggestion, PublisherTier};
 pub fn classify_publisher(author: &str) -> PublisherTier {
     let a = author.to_ascii_lowercase();
     match a.as_str() {
-        "meta-llama" | "qwen" | "mistralai" | "deepseek-ai" | "google" | "microsoft"
-        | "tiiuae" | "cohere" | "internlm" | "01-ai" | "allenai" | "anthropic" => {
-            PublisherTier::OfficialOrg
-        }
+        "meta-llama" | "qwen" | "mistralai" | "deepseek-ai" | "google" | "microsoft" | "tiiuae"
+        | "cohere" | "internlm" | "01-ai" | "allenai" | "anthropic" => PublisherTier::OfficialOrg,
         "bartowski" | "unsloth" | "quantfactory" | "thebloke" | "neuralmagic"
         | "hugging-quants" | "ista-daslab" | "mradermacher" | "city96" => {
             PublisherTier::TrustedQuantizer
@@ -54,7 +52,9 @@ pub fn infer_base_model_id(model_id: &str) -> Option<String> {
 
     let repo_name = model_id.split(['/', '\\']).last().unwrap_or(model_id);
     let mut base = repo_name.to_string();
-    for suffix in ["-GGUF", "-gguf", "-AWQ", "-awq", "-GPTQ", "-gptq", "-FP8", "-fp8"] {
+    for suffix in [
+        "-GGUF", "-gguf", "-AWQ", "-awq", "-GPTQ", "-gptq", "-FP8", "-fp8",
+    ] {
         if let Some(stripped) = base.strip_suffix(suffix) {
             base = stripped.to_string();
         }
@@ -65,7 +65,10 @@ pub fn infer_base_model_id(model_id: &str) -> Option<String> {
         Some("meta-llama/Llama-3.1-8B-Instruct".to_string())
     } else if base.to_ascii_lowercase().contains("qwen2.5-7b-instruct") {
         Some("Qwen/Qwen2.5-7B-Instruct".to_string())
-    } else if base.to_ascii_lowercase().contains("qwen2.5-coder-7b-instruct") {
+    } else if base
+        .to_ascii_lowercase()
+        .contains("qwen2.5-coder-7b-instruct")
+    {
         Some("Qwen/Qwen2.5-Coder-7B-Instruct".to_string())
     } else {
         None
@@ -84,15 +87,17 @@ pub fn recommend_draft_models(model_id: &str, params_b: Option<f64>) -> Vec<Draf
                     draft_model_id: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
                     params_b: 8.0,
                     quant: "Q4_K_M".to_string(),
-                    compatibility_reason: "High token acceptance: identical tokenizer and attention architecture."
-                        .to_string(),
+                    compatibility_reason:
+                        "High token acceptance: identical tokenizer and attention architecture."
+                            .to_string(),
                 });
             } else if params_b.map_or(false, |p| p >= 7.0 && p <= 10.0) {
                 suggestions.push(DraftModelSuggestion {
                     draft_model_id: "meta-llama/Llama-3.2-1B-Instruct".to_string(),
                     params_b: 1.0,
                     quant: "Q4_K_M".to_string(),
-                    compatibility_reason: "Ultra-fast low-latency draft model for 8B inference.".to_string(),
+                    compatibility_reason: "Ultra-fast low-latency draft model for 8B inference."
+                        .to_string(),
                 });
             }
         }
@@ -108,7 +113,8 @@ pub fn recommend_draft_models(model_id: &str, params_b: Option<f64>) -> Vec<Draf
                     draft_model_id: "Qwen/Qwen2.5-1.5B-Instruct".to_string(),
                     params_b: 1.5,
                     quant: "Q4_K_M".to_string(),
-                    compatibility_reason: "Lightweight draft model offering high throughput speedups.".to_string(),
+                    compatibility_reason:
+                        "Lightweight draft model offering high throughput speedups.".to_string(),
                 });
             } else if params_b.map_or(false, |p| p >= 6.0 && p <= 16.0) {
                 suggestions.push(DraftModelSuggestion {
@@ -124,7 +130,8 @@ pub fn recommend_draft_models(model_id: &str, params_b: Option<f64>) -> Vec<Draf
                 draft_model_id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B".to_string(),
                 params_b: 1.5,
                 quant: "Q4_K_M".to_string(),
-                compatibility_reason: "Distilled reasoning draft model sharing Qwen tokenizer.".to_string(),
+                compatibility_reason: "Distilled reasoning draft model sharing Qwen tokenizer."
+                    .to_string(),
             });
         }
         _ => {}

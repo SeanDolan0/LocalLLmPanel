@@ -945,12 +945,20 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
     ]);
     structured_flags.extend(["-fa", "--flash-attn"]);
     if !def.cache_type_k.is_empty() {
-        let norm_k = def.cache_type_k.trim().to_ascii_lowercase().replace('-', "_");
+        let norm_k = def
+            .cache_type_k
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_");
         args.extend(["--cache-type-k".into(), norm_k]);
         structured_flags.extend(["--cache-type-k", "-ctk"]);
     }
     if !def.cache_type_v.is_empty() {
-        let norm_v = def.cache_type_v.trim().to_ascii_lowercase().replace('-', "_");
+        let norm_v = def
+            .cache_type_v
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_");
         args.extend(["--cache-type-v".into(), norm_v]);
         structured_flags.extend(["--cache-type-v", "-ctv"]);
     }
@@ -2302,7 +2310,9 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
                 if let Some(draft_raw) = draft_raw {
-                    if let Some(resolved) = resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro) {
+                    if let Some(resolved) =
+                        resolve_gguf_model_path(draft_raw, &cfg.gguf_dir, &distro)
+                    {
                         let path_str = resolved.to_string_lossy().into_owned();
                         def.speculative_model_path = Some(path_str.clone());
                         def.speculative_model = Some(path_str);
@@ -3664,7 +3674,14 @@ pub fn server_weights_gb(def: &ServerDef) -> (f64, f64) {
         if let Ok(meta) = std::fs::metadata(path) {
             main_weight = meta.len() as f64 / 1_073_741_824.0;
         } else if let Some(p) = estimate::parse_params_from_name(path) {
-            main_weight = estimate::weight_gb(p, if def.backend == "llamacpp" { "gguf" } else { &def.quant });
+            main_weight = estimate::weight_gb(
+                p,
+                if def.backend == "llamacpp" {
+                    "gguf"
+                } else {
+                    &def.quant
+                },
+            );
         }
     }
 
@@ -3682,7 +3699,11 @@ pub fn server_weights_gb(def: &ServerDef) -> (f64, f64) {
                 if let Ok(meta) = std::fs::metadata(model) {
                     spec_weight = meta.len() as f64 / 1_073_741_824.0;
                 } else if let Some(p) = estimate::parse_params_from_name(model) {
-                    let quant = if def.backend == "llamacpp" { "gguf" } else { "fp16" };
+                    let quant = if def.backend == "llamacpp" {
+                        "gguf"
+                    } else {
+                        "fp16"
+                    };
                     spec_weight = estimate::weight_gb(p, quant);
                 }
             }

@@ -1435,7 +1435,10 @@ mod tests {
         let selected = choose_assets_for_machine(&fork, &assets, driver, cc).unwrap();
         assert_eq!(selected.candidate.version, CudaVersion(13, 3));
         assert_eq!(selected.candidate.main.browser_download_url, "url133");
-        assert_eq!(selected.candidate.runtime.unwrap().browser_download_url, "rt133");
+        assert_eq!(
+            selected.candidate.runtime.unwrap().browser_download_url,
+            "rt133"
+        );
     }
 
     #[test]
@@ -1740,14 +1743,24 @@ mod tests {
 
     #[test]
     fn test_parse_driver_cuda_version() {
-        let legacy = "| NVIDIA-SMI 550.54.14    Driver Version: 550.54.14    CUDA Version: 12.4     |";
-        assert_eq!(super::parse_driver_cuda_version(legacy), Some(CudaVersion(12, 4)));
+        let legacy =
+            "| NVIDIA-SMI 550.54.14    Driver Version: 550.54.14    CUDA Version: 12.4     |";
+        assert_eq!(
+            super::parse_driver_cuda_version(legacy),
+            Some(CudaVersion(12, 4))
+        );
 
         let umd = "| NVIDIA-SMI 621.14                 KMD Version: 621.14        CUDA UMD Version: 13.5     |";
-        assert_eq!(super::parse_driver_cuda_version(umd), Some(CudaVersion(13, 5)));
+        assert_eq!(
+            super::parse_driver_cuda_version(umd),
+            Some(CudaVersion(13, 5))
+        );
 
         let driver_var = "CUDA Driver Version: 12.8";
-        assert_eq!(super::parse_driver_cuda_version(driver_var), Some(CudaVersion(12, 8)));
+        assert_eq!(
+            super::parse_driver_cuda_version(driver_var),
+            Some(CudaVersion(12, 8))
+        );
 
         let invalid = "No CUDA information here";
         assert_eq!(super::parse_driver_cuda_version(invalid), None);
@@ -1756,7 +1769,10 @@ mod tests {
     #[test]
     fn host_driver_cuda_version_resolves() {
         let v = super::driver_cuda_version();
-        assert!(v.is_some(), "nvidia-smi is present and should resolve host CUDA version");
+        assert!(
+            v.is_some(),
+            "nvidia-smi is present and should resolve host CUDA version"
+        );
         let v = v.unwrap();
         assert!(v.0 >= 12, "expected modern CUDA version >= 12, got {v}");
     }

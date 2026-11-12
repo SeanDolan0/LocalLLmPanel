@@ -1003,8 +1003,8 @@ fn model_row_with_template(
     // reasoning parser; llama.cpp forwards it to the Jinja template and
     // parses reasoning tags. The gateway canonicalizes reasoning_effort
     // across all reasoning models and formats.
-    let supports_effort_parameter = traits.reasoning_mode != ReasoningMode::None
-        && supports_template_controls;
+    let supports_effort_parameter =
+        traits.reasoning_mode != ReasoningMode::None && supports_template_controls;
     let supports_thinking_toggle =
         traits.reasoning_mode == ReasoningMode::Effort && supports_template_controls;
     let budget_parameter = if traits.reasoning_mode == ReasoningMode::None {
@@ -6263,14 +6263,20 @@ mod tests {
         );
         assert_eq!(r1_row["default_reasoning_level"], "medium");
         assert_eq!(r1_row["compat"]["supportsReasoningEffort"], true);
-        assert_eq!(r1_row["compat"]["reasoningDisableMode"], serde_json::Value::Null);
+        assert_eq!(
+            r1_row["compat"]["reasoningDisableMode"],
+            serde_json::Value::Null
+        );
 
         // Non-reasoning model reports empty levels and false reasoning
         let mut base_def = running_map().remove("srv-a").unwrap().def;
         base_def.model_id = "meta-llama/Llama-3.2-3B-Instruct".into();
         base_def.served_model_name = Some("llama-3.2".into());
         let base_row = model_row(&base_def, Some(8192), "configured", &[]);
-        assert_eq!(base_row["supported_reasoning_levels"], serde_json::json!([]));
+        assert_eq!(
+            base_row["supported_reasoning_levels"],
+            serde_json::json!([])
+        );
         assert_eq!(base_row["default_reasoning_level"], serde_json::Value::Null);
         assert_eq!(base_row["compat"]["supportsReasoningEffort"], false);
         assert_eq!(base_row["metadata"]["reasoning"], false);
@@ -8934,12 +8940,7 @@ mod tests {
 
         let state = Arc::new(AppState::new());
         *state.servers.lock().unwrap() = servers;
-        state
-            .config
-            .lock()
-            .unwrap()
-            .advanced_settings
-            .api_key = Some("test-key".into());
+        state.config.lock().unwrap().advanced_settings.api_key = Some("test-key".into());
 
         let state_clone = Arc::clone(&state);
         tokio::spawn(async move {

@@ -1,10 +1,13 @@
+use crate::model_catalog::types::{
+    CatalogModel, CatalogModelDetails, DiscoveryCategory, InstalledModel,
+};
 use std::path::Path;
-use crate::model_catalog::types::{CatalogModel, CatalogModelDetails, DiscoveryCategory, InstalledModel};
 
 /// Remote data source abstraction for querying Hugging Face API and model registries.
 pub trait RemoteModelSource: Send + Sync {
     /// Fetch candidates for a discovery category feed.
-    fn fetch_category_feed(&self, category: DiscoveryCategory) -> Result<Vec<CatalogModel>, String>;
+    fn fetch_category_feed(&self, category: DiscoveryCategory)
+        -> Result<Vec<CatalogModel>, String>;
 
     /// Search remote models matching query string.
     fn search_models(&self, query: &str) -> Result<Vec<CatalogModel>, String>;
