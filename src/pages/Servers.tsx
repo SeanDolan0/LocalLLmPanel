@@ -361,29 +361,105 @@ export default function Servers() {
         const usableCapacityGb = Math.max(0, totalGb - overheadGb);
         const reqGpuWeightGb = Math.max(0, runningWeights.totalWeightGb - runningWeights.explicitOffloadGb);
         const capacitySpillGb = totalGb > 0 ? Math.max(0, reqGpuWeightGb - usableCapacityGb) : 0;
-        const loadedIntoRamGb = runningWeights.explicitOffloadGb + capacitySpillGb;
-        const isLoadedIntoRam = runningWeights.totalWeightGb > 0 && loadedIntoRamGb > 0.01;
+        let loadedIntoRamGb = runningWeights.explicitOffloadGb + capacitySpillGb;
+
+        // Check real runtime placement telemetry from active servers
+        let runtimeHostModelGb = 0;
+        let runtimeHostTotalGb = 0;
+        const runtimeSpillDetails: {
+          serverName: string;
+          layersOnGpu?: number | null;
+          layersTotal?: number | null;
+          hostModelGb: number;
+          hostTotalGb: number;
+          gpuModelGb?: number | null;
+          vramFreeMb?: number | null;
+        }[] = [];
+
+        for (const r of rows) {
+          if (r.status === "running" && r.runtime_memory) {
+            const rm = r.runtime_memory;
+            const isSpill =
+              (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total && !rm.cpu_only_requested) ||
+              (rm.host_model_mb != null && rm.host_model_mb >= 64 && !rm.cpu_only_requested);
+
+            if (isSpill) {
+              const hostModelGb = (rm.host_model_mb ?? 0) / 1024;
+              const hostTotalGb = (rm.host_total_mb ?? rm.host_model_mb ?? 0) / 1024;
+              runtimeHostModelGb += hostModelGb;
+              runtimeHostTotalGb += hostTotalGb;
+              runtimeSpillDetails.push({
+                serverName: r.def.name,
+                layersOnGpu: rm.layers_on_gpu,
+                layersTotal: rm.layers_total,
+                hostModelGb,
+                hostTotalGb,
+                gpuModelGb: rm.gpu_model_mb ? rm.gpu_model_mb / 1024 : null,
+                vramFreeMb: rm.vram_free_mb,
+              });
+            }
+          }
+        }
+
+        if (runtimeHostModelGb > 0) {
+          loadedIntoRamGb = Math.max(loadedIntoRamGb, runtimeHostModelGb);
+        }
+
+        const isLoadedIntoRam = (runningWeights.totalWeightGb > 0 && loadedIntoRamGb > 0.01) || runtimeHostModelGb > 0.01;
         const isLowHeadroom = freeGb < 1.0;
 
         if (!isLoadedIntoRam && !isLowHeadroom) return null;
 
         return (
-          <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm flex items-center gap-2.5">
-            <span className="text-base">⚠️</span>
-            <div>
-              <strong>Low VRAM Warning:</strong>{" "}
-              {isLoadedIntoRam ? (
-                <>
-                  Active model weights ({runningWeights.totalWeightGb.toFixed(2)} GB
-                  {runningWeights.specWeightGb > 0 ? ` [model: ${runningWeights.mainWeightGb.toFixed(2)} GB, speculative draft: ${runningWeights.specWeightGb.toFixed(2)} GB]` : ""}
-                  ) exceed GPU VRAM capacity ({totalGb.toFixed(2)} GB total, ~{usableCapacityGb.toFixed(2)} GB usable for weights).{" "}
-                  <strong>Your model is getting loaded into system RAM by ~{loadedIntoRamGb.toFixed(2)} GB.</strong>{" "}
-                  (Counts model and speculative decoding weights; context is excluded). Running weights from system RAM will reduce generation speed.
-                </>
-              ) : (
-                <>
-                  Less than 1.0 GB GPU VRAM headroom remaining ({freeGb.toFixed(2)} GB free). Current model weights fit in VRAM (0 GB loaded into system RAM).
-                </>
+          <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm flex items-start gap-2.5">
+            <span className="text-base shrink-0 mt-0.5">⚠️</span>
+            <div className="space-y-1.5 flex-1">
+              <div>
+                <strong>Low VRAM / Memory Warning:</strong>{" "}
+                {isLoadedIntoRam ? (
+                  <>
+                    {runningWeights.totalWeightGb > 0 && reqGpuWeightGb > usableCapacityGb ? (
+                      <>
+                        Active model weights ({runningWeights.totalWeightGb.toFixed(2)} GB
+                        {runningWeights.specWeightGb > 0 ? ` [model: ${runningWeights.mainWeightGb.toFixed(2)} GB, speculative draft: ${runningWeights.specWeightGb.toFixed(2)} GB]` : ""}
+                        ) exceed GPU VRAM capacity ({totalGb.toFixed(2)} GB total, ~{usableCapacityGb.toFixed(2)} GB usable for weights).{" "}
+                      </>
+                    ) : (
+                      <>
+                        Active model is partially loaded into system RAM (remaining GPU VRAM was kept free for context or overhead).{" "}
+                      </>
+                    )}
+                    <strong>Your model is getting loaded into system RAM by ~{loadedIntoRamGb.toFixed(2)} GB.</strong>{" "}
+                    Running weights from system RAM will reduce generation speed.
+                  </>
+                ) : (
+                  <>
+                    Less than 1.0 GB GPU VRAM headroom remaining ({freeGb.toFixed(2)} GB free). Current model weights fit in VRAM (0 GB loaded into system RAM).
+                  </>
+                )}
+              </div>
+              {runtimeSpillDetails.length > 0 && (
+                <div className="rounded-lg bg-black/20 p-2 text-[11px] text-amber-200/90 space-y-1">
+                  <div className="font-semibold text-amber-100">Live Memory Allocation Details:</div>
+                  {runtimeSpillDetails.map((d, i) => (
+                    <div key={i} className="flex flex-wrap items-center gap-x-2">
+                      <span className="font-medium text-slate-100">• {cleanModelName(d.serverName)}:</span>
+                      {d.layersOnGpu != null && d.layersTotal != null && (
+                        <span>{d.layersOnGpu}/{d.layersTotal} layers on GPU</span>
+                      )}
+                      <span>· ~{d.hostModelGb.toFixed(2)} GB model weights in RAM</span>
+                      {d.hostTotalGb > d.hostModelGb && (
+                        <span>(~{d.hostTotalGb.toFixed(2)} GB total RAM incl. KV/buffers)</span>
+                      )}
+                      {d.gpuModelGb != null && (
+                        <span>· ~{d.gpuModelGb.toFixed(2)} GB on GPU</span>
+                      )}
+                      {d.vramFreeMb != null && (
+                        <span className="text-amber-300">({d.vramFreeMb} MiB VRAM was free at load)</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           </div>
@@ -536,6 +612,38 @@ export default function Servers() {
                         spec {r.def.speculative_type ? `${r.def.speculative_type.replace("draft-", "")} ` : ""}{r.def.speculative_num_tokens ?? 5}t
                       </span>
                     )}
+                    {r.status === "running" && r.runtime_memory && (() => {
+                      const rm = r.runtime_memory;
+                      const isSpill =
+                        (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total && !rm.cpu_only_requested) ||
+                        (rm.host_model_mb != null && rm.host_model_mb >= 64 && !rm.cpu_only_requested);
+
+                      if (isSpill) {
+                        const hostMb = rm.host_model_mb ?? 0;
+                        const hostStr = hostMb >= 1024 ? `${(hostMb / 1024).toFixed(1)} GB` : `${Math.round(hostMb)} MB`;
+                        const totalStr = rm.host_total_mb && rm.host_total_mb > hostMb
+                          ? ` (~${rm.host_total_mb >= 1024 ? `${(rm.host_total_mb / 1024).toFixed(1)} GB` : `${Math.round(rm.host_total_mb)} MB`} total RAM)`
+                          : "";
+                        return (
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-950/80 text-amber-300 border border-amber-800"
+                            title={`Model weights loaded into system RAM: ${rm.layers_on_gpu ?? "?"}/${rm.layers_total ?? "?"} layers on GPU. ~${hostStr} weights in system RAM${totalStr}.`}
+                          >
+                            ⚠️ RAM spill: ~{hostStr} ({rm.layers_on_gpu ?? "?"}/{rm.layers_total ?? "?"} GPU)
+                          </span>
+                        );
+                      } else if (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu >= rm.layers_total) {
+                        return (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 text-emerald-300 border border-emerald-800"
+                            title={`100% offloaded to GPU (${rm.layers_on_gpu}/${rm.layers_total} layers)`}
+                          >
+                            100% GPU
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                 </button>
                 <div className="flex items-center gap-2">
@@ -699,6 +807,98 @@ export default function Servers() {
 
       {selectedRow && (
         <div className="space-y-4">
+          {selectedRow.status === "running" && selectedRow.runtime_memory && (selectedRow.runtime_memory.placement_known || selectedRow.runtime_memory.host_model_mb != null) && (() => {
+            const rm = selectedRow.runtime_memory;
+            const isSpill =
+              (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total && !rm.cpu_only_requested) ||
+              (rm.host_model_mb != null && rm.host_model_mb >= 64 && !rm.cpu_only_requested);
+            const extraHost = (rm.host_kv_mb ?? 0) + (rm.host_compute_mb ?? 0);
+
+            return (
+              <Card>
+                <CardTitle
+                  right={
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                        isSpill
+                          ? "bg-amber-950/80 text-amber-300 border border-amber-800"
+                          : "bg-emerald-950/70 text-emerald-300 border border-emerald-800"
+                      }`}
+                    >
+                      {isSpill ? "⚠️ Weights Loaded into System RAM" : "✓ 100% GPU Offload"}
+                    </span>
+                  }
+                >
+                  Model Memory Placement &amp; Working Set
+                </CardTitle>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs mt-3">
+                  <div className="rounded-xl border border-edge/60 bg-surface-1 p-3">
+                    <div className="text-[11px] text-slate-400">Layers on GPU</div>
+                    <div className="text-base font-semibold text-slate-100 mt-0.5">
+                      {rm.layers_on_gpu != null && rm.layers_total != null
+                        ? `${rm.layers_on_gpu} / ${rm.layers_total}`
+                        : "—"}
+                    </div>
+                  </div>
+
+                  <div className={`rounded-xl border p-3 ${isSpill ? "border-amber-700/60 bg-amber-950/20" : "border-edge/60 bg-surface-1"}`}>
+                    <div className={`text-[11px] ${isSpill ? "text-amber-300" : "text-slate-400"}`}>Model Weights in RAM</div>
+                    <div className={`text-base font-semibold mt-0.5 ${isSpill ? "text-amber-200" : "text-slate-100"}`}>
+                      {formatMemoryMb(rm.host_model_mb)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-edge/60 bg-surface-1 p-3">
+                    <div className="text-[11px] text-slate-400">Model Weights on GPU</div>
+                    <div className="text-base font-semibold text-slate-100 mt-0.5">
+                      {formatMemoryMb(rm.gpu_model_mb)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-edge/60 bg-surface-1 p-3">
+                    <div className="text-[11px] text-slate-400">Total System RAM Used</div>
+                    <div className="text-base font-semibold text-slate-100 mt-0.5">
+                      {formatMemoryMb(rm.host_total_mb ?? rm.host_model_mb)}
+                    </div>
+                    {rm.process_ram_mb != null && (
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        working set: {formatMemoryMb(rm.process_ram_mb)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {extraHost >= 16 && (
+                  <div className="mt-2 text-[11px] text-slate-400">
+                    Additional system RAM buffers: {formatMemoryMb(extraHost)} (
+                    {[
+                      rm.host_kv_mb ? `KV cache: ${formatMemoryMb(rm.host_kv_mb)}` : null,
+                      rm.host_compute_mb ? `compute/recurrent: ${formatMemoryMb(rm.host_compute_mb)}` : null,
+                    ].filter(Boolean).join(", ")}
+                    ).
+                  </div>
+                )}
+
+                {isSpill && (
+                  <div className="mt-3 rounded-lg border border-amber-600/40 bg-amber-950/30 p-3 text-xs text-amber-200/90 space-y-1">
+                    <div className="font-semibold text-amber-100">
+                      Performance Warning: Model weights are executing from CPU system RAM
+                    </div>
+                    <p className="leading-relaxed text-[11px]">
+                      The backend placed {rm.layers_on_gpu ?? "?"} of {rm.layers_total ?? "?"} layers on the GPU and loaded ~{formatMemoryMb(rm.host_model_mb)} of weights into system RAM.
+                      {rm.vram_free_mb ? ` (${rm.vram_free_mb} MiB free VRAM was preserved for context/driver overhead).` : ""}{" "}
+                      Generating tokens while weights reside in system RAM will be significantly slower than full GPU offload.
+                    </p>
+                    <p className="text-[11px] text-amber-300/80">
+                      Tip: To fit more layers into GPU VRAM, reduce the context length (ctx), choose a smaller quantization format (e.g. IQ2_XS / Q4_K_M), or adjust fit target / n_gpu_layers.
+                    </p>
+                  </div>
+                )}
+              </Card>
+            );
+          })()}
+
           <Card>
             <CardTitle
               right={

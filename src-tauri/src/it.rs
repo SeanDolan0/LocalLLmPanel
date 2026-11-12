@@ -113,17 +113,19 @@ const VENV_DIR: &str = "~/llm-lp/.venv";
 struct TestConfigDir {
     path: std::path::PathBuf,
     previous: Option<String>,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl TestConfigDir {
     fn new() -> Self {
+        let lock = crate::state::tests::TEST_CONFIG_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let path =
             std::env::temp_dir().join(format!("local-llm-panel-it-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create isolated test config directory");
         let previous = std::env::var("LLM_TEST_CONFIG_DIR").ok();
         std::env::set_var("LLM_TEST_CONFIG_DIR", &path);
-        Self { path, previous }
+        Self { path, previous, _lock: lock }
     }
 }
 

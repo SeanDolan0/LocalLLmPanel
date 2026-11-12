@@ -39,11 +39,7 @@ pub fn check_gateway_auth(
     global_key: Option<&str>,
 ) -> Result<(), (u16, String)> {
     let Some(raw_key) = global_key.map(str::trim).filter(|key| !key.is_empty()) else {
-        return Err((
-            503,
-            "Gateway API key is not configured; set one in Settings before using /v1 routes"
-                .to_string(),
-        ));
+        return Ok(());
     };
     let decrypted_storage;
     let expected_key = if raw_key.starts_with("dpapi:") {
@@ -5672,14 +5668,10 @@ pub fn spawn_supervisor(app: tauri::AppHandle) {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let state: tauri::State<Arc<AppState>> = app.state();
             let cfg = state.config();
-            let wanted = (cfg.advanced_settings.gateway_enabled
-                && cfg
-                    .advanced_settings
-                    .api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|key| !key.is_empty()))
-            .then_some(cfg.advanced_settings.gateway_port);
+            let wanted = cfg
+                .advanced_settings
+                .gateway_enabled
+                .then_some(cfg.advanced_settings.gateway_port);
 
             if let Some(port) = wanted {
                 // If config changed to a different port, reset conflict and backoff
@@ -5856,6 +5848,9 @@ mod tests {
             wsl_pid: None,
             log_ring: Mutex::new(VecDequeLog::new()),
             last_metrics: None,
+            runtime_memory: std::sync::Arc::new(Mutex::new(
+                crate::runtime_memory::RuntimeMemoryReport::default(),
+            )),
             stopping: false,
             crash_retry_count: 0,
         }
@@ -6589,10 +6584,12 @@ mod tests {
     fn test_check_gateway_auth_no_key_configured() {
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer anything".to_string());
-        let err = check_gateway_auth(&headers, None).unwrap_err();
-        assert_eq!(err.0, 503);
-        assert!(err.1.contains("not configured"));
-        assert_eq!(check_gateway_auth(&headers, Some("")).unwrap_err().0, 503);
+        assert!(check_gateway_auth(&headers, None).is_ok());
+        assert!(check_gateway_auth(&headers, Some("")).is_ok());
+
+        let empty_headers = HashMap::new();
+        assert!(check_gateway_auth(&empty_headers, None).is_ok());
+        assert!(check_gateway_auth(&empty_headers, Some("")).is_ok());
     }
 
     #[test]
@@ -8605,10 +8602,10 @@ mod tests {
         assert!(resp3.starts_with("HTTP/1.1 401 Unauthorized"));
         assert!(resp3.contains("Authorization header must use Bearer scheme"));
 
-        // 4. Gateway key not configured at all in settings -> 503
+        // 4. Gateway key not configured at all in settings -> auth is optional, requests succeed without API key
         state.config.lock().unwrap().advanced_settings.api_key = None;
         let req4 = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nAuthorization: Bearer some-key\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{gateway_port}\r\nConnection: close\r\n\r\n"
         );
         let mut client4 = TcpStream::connect(format!("127.0.0.1:{gateway_port}"))
             .await
@@ -8621,8 +8618,8 @@ mod tests {
             }
             resp4.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
-        assert!(resp4.starts_with("HTTP/1.1 503 Service Unavailable"));
-        assert!(resp4.contains("Gateway API key is not configured"));
+        assert!(resp4.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp4.contains("\"object\":\"list\""));
     }
 
     #[tokio::test]

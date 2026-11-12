@@ -20,6 +20,7 @@ pub mod model_intelligence;
 pub mod model_registry;
 pub mod provision;
 pub mod recommendation;
+pub mod runtime_memory;
 pub mod security;
 pub mod server;
 pub mod server_manager;
@@ -209,6 +210,9 @@ pub fn run() {
             commands::get_system_memory,
             commands::open_url,
             commands::wsl_distros,
+            commands::wsl_status,
+            commands::wsl_start,
+            commands::wsl_shutdown_now,
             commands::autostart_get,
             commands::autostart_set,
             commands::config_export,
@@ -252,9 +256,7 @@ pub fn run() {
                     let cfg = st.config();
                     if cfg.auto_shutdown_wsl {
                         let distro = st.resolve_distro();
-                        if !distro.starts_with("__test_") {
-                            crate::wsl::terminate_distro(&distro);
-                        }
+                        crate::server::shutdown_wsl_quietly(&distro);
                     }
                 }
             }

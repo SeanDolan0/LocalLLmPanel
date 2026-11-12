@@ -1,7 +1,6 @@
 //! Local model registry: durable inventory of discovered, downloading,
 //! and installed model artifacts (both native GGUF and WSL vLLM models).
 
-use crate::state::CONFIG_DIR_NAME;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -50,10 +49,7 @@ impl ModelRegistry {
     }
 
     pub fn file_path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(CONFIG_DIR_NAME)
-            .join(REGISTRY_FILE_NAME)
+        crate::state::config_dir().join(REGISTRY_FILE_NAME)
     }
 
     pub fn load_from_disk(&self) {

@@ -164,6 +164,9 @@ export const api = {
   libraryRemove: (modelId: string, modelPath?: string | null, quant?: string | null) =>
     invoke<void>("library_remove", { modelId, modelPath: modelPath ?? null, quant: quant ?? null }),
   libraryDiskUsage: () => invoke<number>("library_disk_usage"),
+  wslStatus: () => invoke<boolean>("wsl_status"),
+  wslStart: () => invoke<boolean>("wsl_start"),
+  wslShutdownNow: () => invoke<boolean>("wsl_shutdown_now"),
   settingsGet: () => invoke<Settings>("settings_get"),
   gatewayStatus: () => invoke<import("./types").GatewayStatus>("gateway_status"),
   settingsSet: (

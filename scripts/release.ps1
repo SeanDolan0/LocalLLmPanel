@@ -23,7 +23,15 @@ Set-Location $repoRoot
 Write-Step "Running preflight checks..."
 npm run check
 if (-not $SkipTests) {
-    cd src-tauri; cargo test; cd ..
+    $testConfigDir = Join-Path ([System.IO.Path]::GetTempPath()) "llm_panel_release_test_$([System.Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $testConfigDir -Force | Out-Null
+    $env:LLM_TEST_CONFIG_DIR = $testConfigDir
+    try {
+        cd src-tauri; cargo test; cd ..
+    } finally {
+        Remove-Item -Path $testConfigDir -Recurse -Force -ErrorAction SilentlyContinue
+        $env:LLM_TEST_CONFIG_DIR = $null
+    }
 }
 
 Write-Step "Updating version in 4 files..."

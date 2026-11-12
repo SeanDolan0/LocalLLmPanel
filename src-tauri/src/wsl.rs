@@ -4,28 +4,63 @@
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::state::GpuSnapshot;
 
-static LAST_WSL_EXEC: AtomicU64 = AtomicU64::new(0);
+/// Last time a *work* command (server start/stop, provision, pull, install,
+/// chat, benchmark, explicit user request) ran inside WSL.
+///
+/// Passive telemetry reads (GPU/RAM/library polling) deliberately do not bump
+/// this clock: the dashboard polls every few seconds, and letting those reads
+/// count as "activity" means the idle reaper can never see WSL go quiet.
+static LAST_WSL_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_WSL_EXECS: AtomicU64 = AtomicU64::new(0);
+/// Distro the app currently uses, published so stateless telemetry probes do not
+/// have to guess between hard-coded distro names.
+static TELEMETRY_DISTRO: Mutex<Option<String>> = Mutex::new(None);
 
-fn touch_exec() {
-    let now = std::time::SystemTime::now()
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    LAST_WSL_EXEC.store(now, Ordering::Relaxed);
+        .as_secs()
+}
+
+fn touch_activity() {
+    LAST_WSL_ACTIVITY.store(now_secs(), Ordering::Relaxed);
 }
 
 fn exec_enter() {
     ACTIVE_WSL_EXECS.fetch_add(1, Ordering::Relaxed);
-    touch_exec();
+    touch_activity();
+}
+
+/// Enter an exec that must never extend the idle window. Used by read-only
+/// telemetry so the UI's own polling cannot keep the distro alive.
+fn exec_enter_passive() {
+    ACTIVE_WSL_EXECS.fetch_add(1, Ordering::Relaxed);
 }
 
 fn exec_exit() {
     ACTIVE_WSL_EXECS.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Remember which distro the app is managing, for passive telemetry probes.
+pub fn remember_telemetry_distro(distro: &str) {
+    let trimmed = distro.trim();
+    if trimmed.is_empty() || trimmed.starts_with("__test_") {
+        return;
+    }
+    if let Ok(mut guard) = TELEMETRY_DISTRO.lock() {
+        *guard = Some(trimmed.to_string());
+    }
+}
+
+/// Configured distro for passive telemetry, or `None` before one is resolved.
+pub fn telemetry_distro() -> Option<String> {
+    TELEMETRY_DISTRO.lock().ok().and_then(|guard| guard.clone())
 }
 
 #[derive(Debug)]
@@ -34,8 +69,15 @@ pub struct WslExecGuard {
 }
 
 impl WslExecGuard {
+    /// Guard for work that should keep WSL alive while it runs.
     pub fn enter() -> Self {
         exec_enter();
+        Self { active: true }
+    }
+
+    /// Guard for read-only work that must not reset the idle clock.
+    pub fn enter_passive() -> Self {
+        exec_enter_passive();
         Self { active: true }
     }
 
@@ -57,18 +99,14 @@ impl Drop for WslExecGuard {
     }
 }
 
-/// Seconds since the last WSL exec started by this process. Returns a large value
-/// if no exec has been recorded.
+/// Seconds since the last WSL *work* command started by this process. Passive
+/// telemetry reads do not count. Returns a large value if no work has run.
 pub fn secs_since_last_exec() -> u64 {
-    let last = LAST_WSL_EXEC.load(Ordering::Relaxed);
+    let last = LAST_WSL_ACTIVITY.load(Ordering::Relaxed);
     if last == 0 {
         return u64::MAX / 4;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    now.saturating_sub(last)
+    now_secs().saturating_sub(last)
 }
 
 pub fn active_wsl_execs() -> u64 {
@@ -106,6 +144,172 @@ pub fn terminate_distro(distro: &str) -> bool {
             Err(_) => return false,
         }
     }
+}
+
+/// Force the shared WSL2 utility VM down, releasing the `vmmemWSL` memory that
+/// terminating a single distro can leave resident.
+///
+/// This stops *every* distro, so callers must gate it on
+/// [`other_distro_running_now`] returning false. Never call it while the user's
+/// other distros (e.g. Docker Desktop) are running.
+pub fn shutdown_wsl_vm() -> bool {
+    let mut cmd = wsl_command();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd.args(["--shutdown"]);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if started.elapsed() >= Duration::from_secs(15) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Split one `wsl -l -v` row into `(distro name, state)`. Skips headers and
+/// malformed rows. The trailing numeric version column is dropped.
+fn split_verbose_state_row(line: &str) -> Option<(String, String)> {
+    let line = line.trim().trim_start_matches('*').trim();
+    if line.is_empty() {
+        return None;
+    }
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    let name = tokens[0].trim_end_matches(':');
+    if name.eq_ignore_ascii_case("NAME") || name.eq_ignore_ascii_case("NAME:") {
+        return None;
+    }
+    let state = if tokens.len() >= 3
+        && tokens
+            .last()
+            .is_some_and(|t| t.chars().all(|c| c.is_ascii_digit()))
+    {
+        tokens[1..tokens.len() - 1].join(" ")
+    } else {
+        tokens[1..].join(" ")
+    };
+    Some((name.to_string(), state))
+}
+
+/// Interpret a localized `STATE` word. `None` means the word is unrecognized.
+fn state_word_is_running(state: &str) -> Option<bool> {
+    let state_lower = state.to_lowercase();
+    let running_keywords = [
+        "running",
+        "wird ausgeführt",
+        "ausgeführt",
+        "en cours",
+        "exécution",
+        "execution",
+        "ejecución",
+        "ejecucion",
+        "esecuzione",
+        "executando",
+        "выполняется",
+        "работает",
+        "正在运行",
+        "运行中",
+        "実行中",
+        "실행 중",
+        "실행중",
+    ];
+    let stopped_keywords = [
+        "stopped",
+        "beendet",
+        "arrêté",
+        "arrete",
+        "detenido",
+        "arrestato",
+        "interrompido",
+        "остановлен",
+        "остановлена",
+        "停止",
+        "已停止",
+        "중지됨",
+        "중지",
+    ];
+
+    if running_keywords.iter().any(|k| state_lower.contains(k)) {
+        return Some(true);
+    }
+    if stopped_keywords.iter().any(|k| state_lower.contains(k)) {
+        return Some(false);
+    }
+    None
+}
+
+/// Parse `wsl -l -v` output for whether `distro` is running. Pure so it can
+/// be unit-tested without shelling out. Supports multi-lingual localized output.
+pub fn verbose_state_is_running(text: &str, distro: &str) -> bool {
+    let clean: String = text.chars().filter(|c| *c != '\u{0}').collect();
+    for line in clean.lines() {
+        let Some((name, state)) = split_verbose_state_row(line) else {
+            continue;
+        };
+        if name != distro {
+            continue;
+        }
+        return state_word_is_running(&state)
+            .unwrap_or_else(|| state.to_lowercase().contains("run"));
+    }
+    false
+}
+
+/// Parse `wsl -l -v` output for any distro other than `except` that is running.
+///
+/// Unknown/localized state words count as running: this guards a `wsl --shutdown`
+/// decision, and killing a distro we failed to understand is worse than leaving
+/// the VM up for one more idle cycle.
+pub fn any_other_distro_running(text: &str, except: &str) -> bool {
+    let clean: String = text.chars().filter(|c| *c != '\u{0}').collect();
+    for line in clean.lines() {
+        let Some((name, state)) = split_verbose_state_row(line) else {
+            continue;
+        };
+        if name == except {
+            continue;
+        }
+        match state_word_is_running(&state) {
+            Some(true) => return true,
+            Some(false) => {}
+            None => return true,
+        }
+    }
+    false
+}
+
+/// Whether any distro other than `except` is currently running. A probe failure
+/// is reported as `true` so callers stay on the safe side of `wsl --shutdown`.
+pub fn other_distro_running_now(except: &str) -> bool {
+    let Ok(out) = wsl_command()
+        .env("WSL_UTF8", "1")
+        .args(["-l", "-v"])
+        .output()
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    any_other_distro_running(&text, except)
 }
 
 /// Convert a Windows (or already-WSL) path to the WSL mount path.
@@ -340,9 +544,10 @@ pub fn detect_default_distro() -> Option<String> {
 
 /// Whether the given distro is currently running. Uses `wsl -l -v`, which
 /// reports state without booting a stopped distro.
-// ponytail: relies on the English "Running" state word; patch the matcher if
-// localized Windows builds misreport (safe failure mode = "not running", so worst
-// case is a cosmetic dashboard state, never a spurious boot).
+///
+/// Fails safe: an unreadable/localized state word that the matcher does not
+/// understand reports "not running", so the worst case is a cosmetic dashboard
+/// state, never a spurious boot.
 pub fn is_running(distro: &str) -> bool {
     let distro = distro.trim();
     if distro.is_empty() || distro.starts_with("__test_") {
@@ -361,81 +566,6 @@ pub fn is_running(distro: &str) -> bool {
     let text = String::from_utf8_lossy(&out.stdout);
     let cleaned: String = text.chars().filter(|c| *c != '\u{0}').collect();
     verbose_state_is_running(&cleaned, distro)
-}
-
-/// Parse `wsl -l -v` output for whether `distro` is running. Pure so it can
-/// be unit-tested without shelling out. Supports multi-lingual localized output.
-pub fn verbose_state_is_running(text: &str, distro: &str) -> bool {
-    let clean: String = text.chars().filter(|c| *c != '\u{0}').collect();
-    for line in clean.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("NAME") || line.contains("STATE") {
-            continue;
-        }
-        let line = line.trim_start_matches('*').trim();
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() < 2 {
-            continue;
-        }
-        let name = tokens[0].trim_end_matches(':');
-        if name != distro {
-            continue;
-        }
-        let state = if tokens.len() >= 3
-            && tokens
-                .last()
-                .is_some_and(|t| t.chars().all(|c| c.is_ascii_digit()))
-        {
-            tokens[1..tokens.len() - 1].join(" ")
-        } else {
-            tokens[1..].join(" ")
-        };
-
-        let state_lower = state.to_lowercase();
-        let running_keywords = [
-            "running",
-            "wird ausgeführt",
-            "ausgeführt",
-            "en cours",
-            "exécution",
-            "execution",
-            "ejecución",
-            "ejecucion",
-            "esecuzione",
-            "executando",
-            "выполняется",
-            "работает",
-            "正在运行",
-            "运行中",
-            "実行中",
-            "실행 중",
-            "실행중",
-        ];
-        let stopped_keywords = [
-            "stopped",
-            "beendet",
-            "arrêté",
-            "arrete",
-            "detenido",
-            "arrestato",
-            "interrompido",
-            "остановлен",
-            "остановлена",
-            "停止",
-            "已停止",
-            "중지됨",
-            "중지",
-        ];
-
-        if running_keywords.iter().any(|k| state_lower.contains(k)) {
-            return true;
-        }
-        if stopped_keywords.iter().any(|k| state_lower.contains(k)) {
-            return false;
-        }
-        return state_lower.contains("run");
-    }
-    false
 }
 
 /// Check if a distro looks Ubuntu-ish (apt-based).
@@ -469,8 +599,14 @@ pub fn parse_meminfo(content: &str) -> (u64, u64) {
 /// Detect total and available memory in WSL2 (in MB), returning `None` when
 /// the distro cannot be queried. Fit verification must not treat fallback
 /// values as measured hardware.
+///
+/// This is passive telemetry: it never boots a stopped distro (which would both
+/// cost the user RAM and reset the idle window) and never resets the idle clock.
 pub fn try_detect_wsl_memory(distro: &str) -> Option<(u64, u64)> {
-    exec_enter();
+    if !is_running(distro) {
+        return None;
+    }
+    exec_enter_passive();
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
@@ -528,8 +664,33 @@ impl RunOutput {
 }
 
 /// Run a script synchronously in the given distro, waiting for completion.
+/// This counts as work and keeps the distro alive.
 pub fn run_script(distro: &str, script: &str) -> RunOutput {
     exec_enter();
+    let res = run_script_body(distro, script);
+    exec_exit();
+    res
+}
+
+/// Run a read-only script in the given distro without extending the idle
+/// window. Returns a non-ok [`RunOutput`] without shelling out at all when the
+/// distro is stopped, so passive UI polling never cold-boots WSL.
+pub fn run_script_passive(distro: &str, script: &str) -> RunOutput {
+    if !is_running(distro) {
+        return RunOutput {
+            ok: false,
+            code: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+    }
+    exec_enter_passive();
+    let res = run_script_body(distro, script);
+    exec_exit();
+    res
+}
+
+fn run_script_body(distro: &str, script: &str) -> RunOutput {
     let mut cmd = wsl_command();
     cmd.env("WSL_UTF8", "1");
     if distro.trim().is_empty() {
@@ -537,7 +698,7 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
     } else {
         cmd.args(["-d", distro, "--exec", "bash", "-lc", script]);
     }
-    let res = match cmd.output() {
+    match cmd.output() {
         Ok(o) => RunOutput {
             ok: o.status.success(),
             code: o.status.code().unwrap_or(-1),
@@ -550,9 +711,7 @@ pub fn run_script(distro: &str, script: &str) -> RunOutput {
             stdout: String::new(),
             stderr: format!("spawn error: {e}"),
         },
-    };
-    exec_exit();
-    res
+    }
 }
 
 /// Like [`run_script`] but as the distro's `root` user (no sudo password
@@ -1084,8 +1243,9 @@ pub fn parse_gpu_snapshots(text: &str) -> Vec<GpuSnapshot> {
 }
 
 /// Query all GPUs in WSL via nvidia-smi without truncating to the first GPU (XREQ-02).
+/// Passive: returns empty when the distro is stopped instead of booting it.
 pub fn gpu_snapshots(distro: &str) -> Vec<GpuSnapshot> {
-    let out = run_script(
+    let out = run_script_passive(
         distro,
         "nvidia-smi --query-gpu=name,memory.total,memory.free,utilization.gpu --format=csv,noheader,nounits 2>/dev/null",
     );
@@ -1417,6 +1577,60 @@ sys.stdout.flush()
                 !verbose_state_is_running(txt, "Nonexistent"),
                 "Failed on {lang} nonexistent"
             );
+            // The other-distro probe must ignore our own row and only report
+            // genuinely running siblings (this gates `wsl --shutdown`).
+            assert!(
+                !any_other_distro_running(txt, "Ubuntu-24.04"),
+                "Failed on {lang}: sibling stopped distro treated as running"
+            );
+            assert!(
+                any_other_distro_running(txt, "docker-desktop"),
+                "Failed on {lang}: running sibling missed"
+            );
         }
+    }
+
+    #[test]
+    fn another_running_distro_blocks_vm_shutdown() {
+        let txt = "  NAME      STATE   VERSION\n* Ubuntu           Running 2\n  docker-desktop   Running 2\n";
+        assert!(any_other_distro_running(txt, "Ubuntu"));
+
+        let only_ours = "  NAME      STATE   VERSION\n  Ubuntu           Running 2\n  docker-desktop   Stopped 2\n";
+        assert!(!any_other_distro_running(only_ours, "Ubuntu"));
+
+        // Unknown localized state: assume running so we never kill a sibling.
+        // `Laeuft`/`Unbekannt` are not in the keyword tables on purpose.
+        let unknown =
+            "  NAME    STATE      VERSION\n  Ubuntu  Laeuft     2\n  Debian  Unbekannt 2\n";
+        assert!(any_other_distro_running(unknown, "Ubuntu"));
+        // Excluding Debian leaves Ubuntu's unrecognised state, which is still
+        // treated as running — the safe answer before a `wsl --shutdown`.
+        assert!(any_other_distro_running(unknown, "Debian"));
+
+        // Both siblings genuinely stopped: the VM may be shut down.
+        let all_stopped =
+            "  NAME      STATE   VERSION\n* Ubuntu   Running 2\n  Debian   Stopped 2\n";
+        assert!(!any_other_distro_running(all_stopped, "Ubuntu"));
+    }
+
+    #[test]
+    fn passive_script_never_boots_a_stopped_distro() {
+        // `__test_` distros are treated as stopped without shelling out, so this
+        // returns a skipped result instead of spawning `wsl.exe` (which would
+        // cold-boot the distro and burn a gigabyte of RAM).
+        let out = run_script_passive("__test_stopped_distro__", "echo should-not-run");
+        assert!(!out.ok);
+        assert!(out.stdout.is_empty());
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn passive_guard_is_tracked_as_in_flight() {
+        let before = active_wsl_execs();
+        let guard = WslExecGuard::enter_passive();
+        assert!(guard.is_active());
+        assert!(active_wsl_execs() > before);
+        drop(guard);
+        assert!(active_wsl_execs() >= before);
     }
 }

@@ -94,6 +94,27 @@ export interface AllocationReport {
   warning_message: string | null;
 }
 
+export interface RuntimeMemoryReport {
+  server_id: string;
+  server_name: string;
+  backend: string;
+  layers_on_gpu?: number | null;
+  layers_total?: number | null;
+  gpu_model_mb?: number | null;
+  host_model_mb?: number | null;
+  host_kv_mb?: number | null;
+  gpu_kv_mb?: number | null;
+  host_compute_mb?: number | null;
+  gpu_compute_mb?: number | null;
+  host_total_mb?: number | null;
+  gpu_total_mb?: number | null;
+  vram_free_mb?: number | null;
+  fit_leftover_mb?: number | null;
+  process_ram_mb?: number | null;
+  placement_known: boolean;
+  cpu_only_requested?: boolean;
+}
+
 export interface LlamaDevice {
   id: string;
   name: string;
@@ -347,6 +368,7 @@ export interface ServerListRow {
   status: string; // stopped | starting | running | error
   error: string | null;
   metrics: MetricsSnapshot | null;
+  runtime_memory?: RuntimeMemoryReport | null;
 }
 
 export interface AdvancedSettings {

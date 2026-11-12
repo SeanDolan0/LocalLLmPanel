@@ -281,10 +281,21 @@ export default function Dashboard() {
               <div className="text-xs text-amber-200/90 mt-1 leading-relaxed">
                 {isLoadedIntoRam ? (
                   <>
-                    Active model weights ({fmtGB(activeWeight)}
-                    {specWeight > 0 ? ` [model: ${fmtGB(mainWeight)}, draft: ${fmtGB(specWeight)}]` : ""}
-                    ) exceed dedicated GPU VRAM capacity ({fmtNum(totalGb, 1)} GB total, ~{fmtNum(usableCapacityGb, 1)} GB usable).{" "}
-                    <strong>Model weights spilled into system RAM by ~{fmtGB(loadedIntoRamGb)}.</strong>{" "}
+                    {activeWeight > usableCapacityGb ? (
+                      <>
+                        Active model weights ({fmtGB(activeWeight)}
+                        {specWeight > 0 ? ` [model: ${fmtGB(mainWeight)}, draft: ${fmtGB(specWeight)}]` : ""}
+                        ) exceed dedicated GPU VRAM capacity ({fmtNum(totalGb, 1)} GB total, ~{fmtNum(usableCapacityGb, 1)} GB usable).{" "}
+                      </>
+                    ) : (
+                      <>
+                        Model weights are partially running from system RAM to maintain GPU context and driver headroom.{" "}
+                      </>
+                    )}
+                    <strong>Model weights loaded into system RAM by ~{fmtGB(loadedIntoRamGb)}.</strong>{" "}
+                    {alloc?.warning_message && alloc.warning_message.includes("layers on GPU") ? (
+                      <span className="block mt-1 font-medium text-amber-100">{alloc.warning_message}</span>
+                    ) : null}
                     Running weights from system RAM will reduce generation tokens/sec.
                   </>
                 ) : (

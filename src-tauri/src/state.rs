@@ -13,11 +13,35 @@ pub struct ProvisionReportCache {
     pub last_seen: u64,
 }
 
+pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
+pub const CONFIG_FILE_NAME: &str = "config.json";
+pub const CUSTOM_FORKS_FILE_NAME: &str = "custom_forks.json";
+pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
+pub const BENCHMARKS_FILE_NAME: &str = "benchmarks.json";
+
+/// Returns the authoritative application configuration and data directory.
+/// In unit test builds, this NEVER defaults to the user's real %APPDATA% directory,
+/// preventing unit tests from polluting, clobbering, or deleting user configuration.
+pub fn config_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(test_root) = std::env::var("LLM_TEST_CONFIG_DIR") {
+            if !test_root.trim().is_empty() {
+                return PathBuf::from(test_root);
+            }
+        }
+        let dir = std::env::temp_dir().join("local-llm-panel-test-isolated");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    #[cfg(not(test))]
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CONFIG_DIR_NAME)
+}
+
 pub fn provision_report_cache_path() -> PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(CONFIG_DIR_NAME);
-    dir.join("provision-report.json")
+    config_dir().join("provision-report.json")
 }
 
 pub fn load_provision_report_cache() -> Option<crate::provision::ProvisionReport> {
@@ -162,16 +186,7 @@ pub fn default_llamacpp_forks() -> Vec<LlamaCppFork> {
 }
 
 pub fn custom_forks_path() -> PathBuf {
-    #[cfg(test)]
-    if let Ok(test_root) = std::env::var("LLM_TEST_CONFIG_DIR") {
-        if !test_root.trim().is_empty() {
-            return PathBuf::from(test_root).join(CUSTOM_FORKS_FILE_NAME);
-        }
-    }
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(CONFIG_DIR_NAME)
-        .join(CUSTOM_FORKS_FILE_NAME)
+    config_dir().join(CUSTOM_FORKS_FILE_NAME)
 }
 
 pub fn save_custom_forks(forks: &[LlamaCppFork]) -> Result<(), String> {
@@ -441,11 +456,6 @@ fn default_llamacpp_channel() -> String {
     "upstream".to_string()
 }
 
-pub const CONFIG_DIR_NAME: &str = "local-llm-panel";
-pub const CONFIG_FILE_NAME: &str = "config.json";
-pub const CUSTOM_FORKS_FILE_NAME: &str = "custom_forks.json";
-pub const CONVERSATIONS_FILE_NAME: &str = "conversations.json";
-pub const BENCHMARKS_FILE_NAME: &str = "benchmarks.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -488,10 +498,7 @@ pub struct Conversation {
 
 impl Conversation {
     pub fn path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(CONFIG_DIR_NAME)
-            .join(CONVERSATIONS_FILE_NAME)
+        config_dir().join(CONVERSATIONS_FILE_NAME)
     }
 
     pub fn load_all() -> Vec<Conversation> {
@@ -530,10 +537,7 @@ pub struct BenchmarkRun {
 
 impl BenchmarkRun {
     pub fn path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(CONFIG_DIR_NAME)
-            .join(BENCHMARKS_FILE_NAME)
+        config_dir().join(BENCHMARKS_FILE_NAME)
     }
 
     pub fn load_all() -> Vec<BenchmarkRun> {
@@ -1491,10 +1495,7 @@ pub type AppConfig = PersistedConfig;
 
 impl Default for LlamaCppChannelConfig {
     fn default() -> Self {
-        let base_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(CONFIG_DIR_NAME)
-            .join("llama.cpp");
+        let base_dir = config_dir().join("llama.cpp");
         LlamaCppChannelConfig {
             installed_tag: None,
             version: None,
@@ -1520,15 +1521,11 @@ impl Default for PersistedConfig {
             distro,
             llm_dir: "~/llm-lp".to_string(),
             venv_dir: "~/llm-lp/.venv".to_string(),
-            llamacpp_dir: dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(CONFIG_DIR_NAME)
+            llamacpp_dir: config_dir()
                 .join("llama.cpp")
                 .to_string_lossy()
                 .into_owned(),
-            gguf_dir: dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(CONFIG_DIR_NAME)
+            gguf_dir: config_dir()
                 .join("gguf")
                 .to_string_lossy()
                 .into_owned(),
@@ -1588,16 +1585,7 @@ fn replace_file_atomic(tmp: &PathBuf, destination: &PathBuf) -> Result<(), Strin
 
 impl PersistedConfig {
     pub fn path() -> PathBuf {
-        #[cfg(test)]
-        if let Ok(test_root) = std::env::var("LLM_TEST_CONFIG_DIR") {
-            if !test_root.trim().is_empty() {
-                return PathBuf::from(test_root).join(CONFIG_FILE_NAME);
-            }
-        }
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(CONFIG_DIR_NAME)
-            .join(CONFIG_FILE_NAME)
+        config_dir().join(CONFIG_FILE_NAME)
     }
 
     pub fn load() -> Self {
@@ -1640,11 +1628,42 @@ impl PersistedConfig {
                                 }
                             }
                         }
-                        if let Some(servers_val) = val.get("servers") {
-                            if let Ok(servers) =
-                                serde_json::from_value::<Vec<ServerDef>>(servers_val.clone())
-                            {
-                                recovered.servers = servers;
+                        if let Some(servers_val) = val.get("servers").and_then(|v| v.as_array()) {
+                            for s_val in servers_val {
+                                if let Ok(server) = serde_json::from_value::<ServerDef>(s_val.clone()) {
+                                    recovered.servers.push(server);
+                                }
+                            }
+                        }
+                        if let Some(mem_val) = val.get("memory_settings") {
+                            if let Ok(mem) = serde_json::from_value::<MemorySettings>(mem_val.clone()) {
+                                recovered.memory_settings = mem;
+                            }
+                        }
+                        if let Some(adv_val) = val.get("advanced_settings") {
+                            if let Ok(adv) = serde_json::from_value::<AdvancedSettings>(adv_val.clone()) {
+                                recovered.advanced_settings = adv;
+                            }
+                        }
+                        if let Some(distro) = val.get("distro").and_then(|v| v.as_str()) {
+                            if !distro.is_empty() {
+                                recovered.distro = distro.to_string();
+                            }
+                        }
+                        if let Some(venv) = val.get("venv_dir").and_then(|v| v.as_str()) {
+                            if !venv.is_empty() {
+                                recovered.venv_dir = venv.to_string();
+                            }
+                        }
+                        if let Some(token) = val.get("hf_token").and_then(|v| v.as_str()) {
+                            recovered.hf_token = token.to_string();
+                        }
+                        if let Some(token) = val.get("github_token").and_then(|v| v.as_str()) {
+                            recovered.github_token = token.to_string();
+                        }
+                        if let Some(env_val) = val.get("default_env") {
+                            if let Ok(env) = serde_json::from_value::<BTreeMap<String, String>>(env_val.clone()) {
+                                recovered.default_env = env;
                             }
                         }
                     }
@@ -1653,6 +1672,106 @@ impl PersistedConfig {
             },
             Err(_) => Self::default(),
         };
+
+        // Purge dummy test fixtures that may have leaked into config during tests or updates
+        cfg.servers.retain(|s| {
+            s.id != "s_native"
+                && !(s.name == "test" && s.model_id == "org/model")
+                && s.id != "test-srv"
+                && s.id != "s-lan-test"
+        });
+
+        let mut needs_save = false;
+
+        // If config has no servers or default settings, rescue real user servers & settings from backup
+        let bak = path.with_extension("json.bak");
+        if bak.exists() {
+            if let Ok(bak_text) = std::fs::read_to_string(&bak) {
+                let mut rescued_servers = Vec::new();
+                let mut rescued_mem: Option<MemorySettings> = None;
+                let mut rescued_adv: Option<AdvancedSettings> = None;
+                let mut rescued_hf: Option<String> = None;
+                let mut rescued_github: Option<String> = None;
+
+                if let Ok(bak_cfg) = serde_json::from_str::<PersistedConfig>(&bak_text) {
+                    rescued_servers = bak_cfg.servers;
+                    rescued_mem = Some(bak_cfg.memory_settings);
+                    rescued_adv = Some(bak_cfg.advanced_settings);
+                    if !bak_cfg.hf_token.is_empty() {
+                        rescued_hf = Some(bak_cfg.hf_token);
+                    }
+                    if !bak_cfg.github_token.is_empty() {
+                        rescued_github = Some(bak_cfg.github_token);
+                    }
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&bak_text) {
+                    if let Some(servers_val) = val.get("servers").and_then(|v| v.as_array()) {
+                        for s_val in servers_val {
+                            if let Ok(s) = serde_json::from_value::<ServerDef>(s_val.clone()) {
+                                rescued_servers.push(s);
+                            }
+                        }
+                    }
+                    if let Some(mem_val) = val.get("memory_settings") {
+                        if let Ok(m) = serde_json::from_value::<MemorySettings>(mem_val.clone()) {
+                            rescued_mem = Some(m);
+                        }
+                    }
+                    if let Some(adv_val) = val.get("advanced_settings") {
+                        if let Ok(a) = serde_json::from_value::<AdvancedSettings>(adv_val.clone()) {
+                            rescued_adv = Some(a);
+                        }
+                    }
+                }
+
+                rescued_servers.retain(|s| {
+                    s.id != "s_native"
+                        && !(s.name == "test" && s.model_id == "org/model")
+                        && s.id != "test-srv"
+                        && s.id != "s-lan-test"
+                });
+
+                if cfg.servers.is_empty() && !rescued_servers.is_empty() {
+                    eprintln!(
+                        "[config] rescued {} servers from {}",
+                        rescued_servers.len(),
+                        bak.display()
+                    );
+                    cfg.servers = rescued_servers;
+                    needs_save = true;
+                }
+
+                if cfg.memory_settings == MemorySettings::default() {
+                    if let Some(m) = rescued_mem {
+                        if m != MemorySettings::default() {
+                            cfg.memory_settings = m;
+                            needs_save = true;
+                        }
+                    }
+                }
+
+                if cfg.advanced_settings == AdvancedSettings::default() {
+                    if let Some(a) = rescued_adv {
+                        if a != AdvancedSettings::default() {
+                            cfg.advanced_settings = a;
+                            needs_save = true;
+                        }
+                    }
+                }
+
+                if cfg.hf_token.is_empty() {
+                    if let Some(token) = rescued_hf {
+                        cfg.hf_token = token;
+                        needs_save = true;
+                    }
+                }
+                if cfg.github_token.is_empty() {
+                    if let Some(token) = rescued_github {
+                        cfg.github_token = token;
+                        needs_save = true;
+                    }
+                }
+            }
+        }
         for secret in [&mut cfg.hf_token, &mut cfg.github_token] {
             if secret.starts_with("dpapi:") {
                 match crate::security::decrypt_token(secret) {
@@ -1716,7 +1835,6 @@ impl PersistedConfig {
         // Synchronize the complete custom fork set to custom_forks.json
         let _ = save_custom_forks(&cfg.llamacpp_forks);
         // Automatically migrate existing plaintext API keys to DPAPI-encrypted values on load
-        let mut needs_save = false;
         if let Some(ref key) = cfg.advanced_settings.api_key {
             let trimmed = key.trim();
             if !trimmed.is_empty() && !trimmed.starts_with("dpapi:") {
@@ -2043,6 +2161,8 @@ pub struct LiveServer {
     pub wsl_pid: Option<u32>,
     pub log_ring: Mutex<VecDequeLog>,
     pub last_metrics: Option<MetricsSnapshot>,
+    /// Model placement/working-set facts parsed from the backend log.
+    pub runtime_memory: std::sync::Arc<Mutex<crate::runtime_memory::RuntimeMemoryReport>>,
     /// Set when we called stop() ourselves (so the monitor doesn't flag error).
     pub stopping: bool,
     pub crash_retry_count: u32,
@@ -2139,6 +2259,9 @@ pub struct AppState {
     pub benchmark_cancels: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub system_metrics: Mutex<VecDeque<SystemMetricPoint>>,
     pub server_metrics: Mutex<BTreeMap<String, VecDeque<ServerMetricPoint>>>,
+    /// Last successful WSL library scan. Served when the distro is stopped so
+    /// the Library page never cold-boots WSL just to render a list.
+    pub wsl_library_cache: Mutex<Option<Vec<crate::commands::LibraryEntry>>>,
     /// Reasoning effort info for each model chat template, keyed by port.
     /// Derived directly from the model's chat template on disk or from runtime props.
     pub template_effort_cache: Mutex<HashMap<u16, (u64, TemplateEffortInfo)>>,
@@ -2224,6 +2347,7 @@ impl AppState {
                 let _ = config.save();
             }
         }
+        crate::wsl::remember_telemetry_distro(&config.distro);
         let discovery_cache = Arc::new(crate::hf_discovery::DiscoveryCache::new());
         let model_registry = Arc::new(crate::model_registry::ModelRegistry::new());
         let download_manager = Arc::new(crate::download_manager::DownloadManager::new(Arc::clone(
@@ -2252,6 +2376,7 @@ impl AppState {
             benchmark_cancels: Mutex::new(HashMap::new()),
             system_metrics: Mutex::new(VecDeque::new()),
             server_metrics: Mutex::new(BTreeMap::new()),
+            wsl_library_cache: Mutex::new(None),
             template_effort_cache: Mutex::new(HashMap::new()),
             app_update_cache: Mutex::new(None),
             is_quitting: AtomicBool::new(false),
@@ -2303,6 +2428,7 @@ impl AppState {
         if !current.is_empty() {
             let installed = crate::wsl::installed_distros();
             if installed.contains(&current) {
+                crate::wsl::remember_telemetry_distro(&current);
                 return current;
             }
         }
@@ -2311,6 +2437,7 @@ impl AppState {
             let mut cfg = self.config.lock().unwrap();
             cfg.distro = detected.clone();
             let _ = cfg.save();
+            crate::wsl::remember_telemetry_distro(&detected);
             return detected;
         }
         current
@@ -2345,7 +2472,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -3609,16 +3736,43 @@ mod tests {
         assert_eq!(def.speculative_num_tokens, None);
     }
 
-    static TEST_CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static TEST_CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) struct TestConfigGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        pub dir: std::path::PathBuf,
+    }
+
+    impl TestConfigGuard {
+        pub fn new(prefix: &str) -> Self {
+            let lock = TEST_CONFIG_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+            let dir = std::env::temp_dir().join(format!(
+                "{}-{}-{}",
+                prefix,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("LLM_TEST_CONFIG_DIR", &dir);
+            Self { _lock: lock, dir }
+        }
+    }
+
+    impl Drop for TestConfigGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("LLM_TEST_CONFIG_DIR");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 
     #[test]
     fn test_custom_forks_persistence_and_rescue_from_bak() {
-        let _lock = TEST_CONFIG_MUTEX.lock().unwrap();
-        let temp_dir =
-            std::env::temp_dir().join(format!("llp-test-fork-rescue-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        std::env::set_var("LLM_TEST_CONFIG_DIR", &temp_dir);
+        let guard = TestConfigGuard::new("llp-test-fork-rescue");
+        let temp_dir = &guard.dir;
 
         let bak_path = temp_dir.join("config.json.bak");
         let bak_content = r#"{
@@ -3648,19 +3802,12 @@ mod tests {
         let saved_custom = load_custom_forks();
         assert!(saved_custom.iter().any(|f| f.id == "xhtoken"));
         assert!(!saved_custom.iter().any(|f| f.id == "upstream"));
-
-        std::env::remove_var("LLM_TEST_CONFIG_DIR");
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_custom_forks_survive_corrupt_config() {
-        let _lock = TEST_CONFIG_MUTEX.lock().unwrap();
-        let temp_dir =
-            std::env::temp_dir().join(format!("llp-test-corrupt-cfg-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        std::env::set_var("LLM_TEST_CONFIG_DIR", &temp_dir);
+        let guard = TestConfigGuard::new("llp-test-corrupt-cfg");
+        let temp_dir = &guard.dir;
 
         let custom_forks = vec![LlamaCppFork {
             id: "llamadspline".to_string(),
@@ -3683,9 +3830,6 @@ mod tests {
         let loaded = PersistedConfig::load();
         assert!(loaded.llamacpp_forks.iter().any(|f| f.id == "llamadspline"));
         assert!(loaded.llamacpp_forks.iter().any(|f| f.id == "upstream"));
-
-        std::env::remove_var("LLM_TEST_CONFIG_DIR");
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -3715,12 +3859,8 @@ mod tests {
 
     #[test]
     fn test_deleted_custom_forks_stay_deleted_when_reopened() {
-        let _lock = TEST_CONFIG_MUTEX.lock().unwrap();
-        let temp_dir =
-            std::env::temp_dir().join(format!("llp-test-fork-del-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        std::env::set_var("LLM_TEST_CONFIG_DIR", &temp_dir);
+        let guard = TestConfigGuard::new("llp-test-fork-del");
+        let temp_dir = &guard.dir;
 
         // Simulate config.json.bak containing old forks from previous backup
         let bak_path = temp_dir.join("config.json.bak");
@@ -3754,9 +3894,6 @@ mod tests {
 
         let custom = load_custom_forks();
         assert!(custom.is_empty(), "custom forks must remain empty");
-
-        std::env::remove_var("LLM_TEST_CONFIG_DIR");
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -3779,4 +3916,62 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_load_rescues_real_servers_and_purges_test_servers() {
+        let guard = TestConfigGuard::new("llp-test-rescue");
+        let temp_dir = &guard.dir;
+
+        let bad_config = serde_json::json!({
+            "servers": [
+                {
+                    "backend": "llamacpp",
+                    "id": "s_native",
+                    "name": "test",
+                    "model_id": "org/model",
+                    "task": "instruct",
+                    "port": 8124
+                }
+            ]
+        });
+        std::fs::write(
+            temp_dir.join("config.json"),
+            serde_json::to_string_pretty(&bad_config).unwrap(),
+        )
+        .unwrap();
+
+        let backup_config = serde_json::json!({
+            "servers": [
+                {
+                    "backend": "llamacpp",
+                    "id": "srv-real-1",
+                    "name": "My Actual Server",
+                    "model_id": "C:\\models\\model.gguf",
+                    "task": "instruct",
+                    "port": 8000
+                }
+            ],
+            "memory_settings": {
+                "default_gpu_mem_util": 0.95
+            }
+        });
+        std::fs::write(
+            temp_dir.join("config.json.bak"),
+            serde_json::to_string_pretty(&backup_config).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = PersistedConfig::load();
+
+        assert!(
+            !loaded.servers.iter().any(|s| s.id == "s_native" || s.model_id == "org/model"),
+            "dummy test servers must be purged"
+        );
+        assert!(
+            loaded.servers.iter().any(|s| s.id == "srv-real-1"),
+            "real servers from backup must be rescued"
+        );
+        assert_eq!(loaded.memory_settings.default_gpu_mem_util, 0.95);
+    }
 }
+

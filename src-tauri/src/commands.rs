@@ -69,7 +69,9 @@ pub async fn env_status(state: State<'_, Arc<AppState>>) -> Result<EnvStatus, St
         };
         let wsl_ok = wsl_running;
         let prov_out = if wsl_running {
-            crate::wsl::run_script(
+            // Passive: this runs every few seconds from the dashboard and must
+            // not extend the idle window that keeps WSL alive.
+            crate::wsl::run_script_passive(
                 &distro_detected,
                 "cat ~/llm-lp/.provisioned 2>/dev/null || true",
             )
@@ -2091,6 +2093,8 @@ pub struct ServerListRow {
     pub error: Option<String>,
     pub metrics: Option<server::MetricsSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_memory: Option<crate::runtime_memory::RuntimeMemoryReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub process_alive: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_healthy: Option<bool>,
@@ -3257,7 +3261,7 @@ pub fn gateway_status(state: State<'_, Arc<AppState>>) -> GatewayStatus {
         .map(str::trim)
         .is_some_and(|key| !key.is_empty());
     let port_conflict = crate::gateway::is_port_conflict(port);
-    let running = if enabled && auth_configured && !port_conflict {
+    let running = if enabled && !port_conflict {
         crate::gateway::verify_gateway_health(port)
     } else {
         false
@@ -3332,17 +3336,6 @@ fn validate_advanced_settings(adv: &crate::state::AdvancedSettings) -> Result<()
     }
     if adv.gateway_port < 1024 {
         return Err("gateway_port must be at least 1024".into());
-    }
-    let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
-    if !loopback
-        && adv
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .is_none()
-    {
-        return Err("an API key is required before binding vLLM to a non-loopback host".into());
     }
     if !matches!(
         adv.log_level.as_str(),
@@ -3855,6 +3848,22 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
                 .collect()
         };
 
+        // WSL is deliberately stopped when idle. Never cold-boot it just to
+        // render the Library: serve the native list plus the last WSL scan, and
+        // let the UI offer an explicit "Start WSL & refresh" action.
+        if !crate::wsl::is_running(&distro) {
+            let mut local = scan_native_gguf_library(
+                &st.config().gguf_dir,
+                &running_servers,
+                &st.model_registry,
+            );
+            if let Some(cached) = st.wsl_library_cache.lock().unwrap().clone() {
+                local.extend(cached);
+            }
+            local.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
+            return local;
+        }
+
         let hub_dir = if let Some(home) = &st.config().advanced_settings.hf_home {
             let trimmed = home.trim();
             if !trimmed.is_empty() {
@@ -3871,7 +3880,7 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
         // into sys.path does not perform shell home expansion.
         let venv_python = format!("{}/bin/python", st.config().venv_dir.trim_end_matches('/'));
         let scan_script = compose_hf_cache_scan_script(&venv_python, &hub_dir);
-        let out = crate::wsl::run_script(&distro, &scan_script);
+        let out = crate::wsl::run_script_passive(&distro, &scan_script);
         let mut out_v = Vec::new();
         let mut python_scan_ok = false;
         if out.ok {
@@ -3955,18 +3964,24 @@ pub async fn library_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Library
             }
         }
 
-        let mut local = scan_imported_local_folders(
+        let mut wsl_entries = out_v;
+        wsl_entries.extend(scan_imported_local_folders(
             &distro,
             &st.config().imported_local_models,
             &running_servers,
-        );
-        local.extend(scan_native_gguf_library(
-            &st.config().gguf_dir,
-            &running_servers,
-            &st.model_registry,
         ));
-        out_v.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
-        local.append(&mut out_v);
+        wsl_entries.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
+        // Remember the last successful WSL inventory for when the distro is
+        // down. Keep the previous cache on a failed/empty scan instead of
+        // replacing it with nothing.
+        if python_scan_ok || !wsl_entries.is_empty() {
+            *st.wsl_library_cache.lock().unwrap() = Some(wsl_entries.clone());
+        }
+
+        let mut local =
+            scan_native_gguf_library(&st.config().gguf_dir, &running_servers, &st.model_registry);
+        local.append(&mut wsl_entries);
+        local.sort_by(|a, b| b.size_mb.cmp(&a.size_mb));
         local
     })
     .await
@@ -4280,7 +4295,7 @@ fn scan_hf_cache_fs(
     running_servers: &[(String, String)],
 ) -> Vec<LibraryEntry> {
     let script = compose_hf_cache_fs_scan_script(hub_dir);
-    let out = crate::wsl::run_script(distro, &script);
+    let out = crate::wsl::run_script_passive(distro, &script);
     let mut entries = Vec::new();
     for line in out.stdout.lines() {
         let mut it = line.split('|');
@@ -4368,7 +4383,7 @@ done
 "#,
         quoted.join(" ")
     );
-    let out = crate::wsl::run_script(distro, &script);
+    let out = crate::wsl::run_script_passive(distro, &script);
     let mut entries = Vec::new();
     for line in out.stdout.lines() {
         let mut it = line.split('|');
@@ -4740,6 +4755,9 @@ pub async fn library_remove(
             if !out.ok {
                 return Err(format!("Failed to delete imported model directory: {}", out.stderr));
             }
+            // Drop the cached inventory so a stopped-WSL Library never lists a
+            // model that no longer exists.
+            *st.wsl_library_cache.lock().unwrap() = None;
             let mut cfg = st.config.lock().unwrap();
             let mut next = cfg.clone();
             next.imported_local_models.retain(|path| path != &imported_path);
@@ -4766,6 +4784,9 @@ pub async fn library_remove(
         if !out.ok {
             return Err(format!("Failed to delete model directory: {}", out.stderr));
         }
+        // Drop the cached inventory so a stopped-WSL Library never lists a
+        // model that no longer exists.
+        *st.wsl_library_cache.lock().unwrap() = None;
         let _ = st.model_registry.unregister(&model_id, quant.as_deref().unwrap_or(""));
         Ok(())
     })
@@ -4793,9 +4814,82 @@ pub async fn library_disk_usage(state: State<'_, Arc<AppState>>) -> Result<u64, 
             crate::wsl::WSL_TILDE_EXPANSION_SNIPPET,
             crate::wsl::shell_quote_wsl(&hub_dir),
         );
-        let out = crate::wsl::run_script(&distro, &script);
+        let out = crate::wsl::run_script_passive(&distro, &script);
         let mb: u64 = out.stdout.trim().parse().unwrap_or(0);
         Ok(mb)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// WSL lifecycle controls
+// ---------------------------------------------------------------------------
+
+/// Whether the managed distro is currently running. Cheap: `wsl -l -v` reports
+/// state without booting anything.
+#[tauri::command]
+pub async fn wsl_status(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let distro = st.resolve_distro();
+        crate::wsl::is_running(&distro)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Explicit user action: boot WSL. Counts as work, so the idle reaper gives the
+/// user a full idle window after the cold boot.
+#[tauri::command]
+pub async fn wsl_start(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let distro = st.resolve_distro();
+        if distro.trim().is_empty() || distro.starts_with("__test_") {
+            return Err("No WSL distro configured".to_string());
+        }
+        let out = crate::wsl::run_script(&distro, "true");
+        if out.ok {
+            Ok(true)
+        } else {
+            let detail = out.combined();
+            let detail = detail.trim();
+            Err(if detail.is_empty() {
+                "WSL failed to start".to_string()
+            } else {
+                detail.to_string()
+            })
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Explicit user action: stop WSL now. Refuses while work is in flight so the
+/// button can never kill a running model or an in-progress download.
+#[tauri::command]
+pub async fn wsl_shutdown_now(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    let st = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let busy_servers = st.servers.lock().unwrap().values().any(|ls| {
+            matches!(
+                ls.status,
+                crate::state::ServerStatus::Running | crate::state::ServerStatus::Starting
+            )
+        });
+        if busy_servers {
+            return Err("Stop running servers before shutting down WSL".to_string());
+        }
+        if st.provisioning.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Wait for provisioning to finish before shutting down WSL".to_string());
+        }
+        if st.pulling.lock().unwrap().values().any(|v| *v) {
+            return Err("Wait for model downloads to finish before shutting down WSL".to_string());
+        }
+        let distro = st.resolve_distro();
+        crate::server::shutdown_wsl_quietly(&distro);
+        Ok(!crate::wsl::is_running(&distro))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5250,30 +5344,9 @@ mod tests {
         assert_eq!(hw.ram_usable_mb, 0);
     }
 
-    struct ConfigBackupGuard {
-        path: std::path::PathBuf,
-        original_content: Option<Vec<u8>>,
-    }
-
-    impl Drop for ConfigBackupGuard {
-        fn drop(&mut self) {
-            if let Some(content) = &self.original_content {
-                let _ = std::fs::write(&self.path, content);
-            } else if self.path.exists() {
-                let _ = std::fs::remove_file(&self.path);
-            }
-        }
-    }
-
     #[test]
     fn test_memory_settings_get_and_update() {
-        let path = PersistedConfig::path();
-        let original_content = std::fs::read(&path).ok();
-        let _guard = ConfigBackupGuard {
-            path: path.clone(),
-            original_content,
-        };
-        let _ = std::fs::remove_file(&path);
+        let _guard = crate::state::tests::TestConfigGuard::new("llp-test-mem-settings");
 
         let st = AppState::new();
         let settings = get_memory_settings_impl(&st);

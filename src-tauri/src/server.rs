@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -994,6 +994,15 @@ pub fn build_llamacpp_args_with_help(def: &ServerDef, help: &str) -> Vec<String>
     }
     if let Some(verbosity) = def.log_verbosity.filter(|v| *v <= 5) {
         args.extend(["--log-verbosity".into(), verbosity.to_string()]);
+        structured_flags.push("--log-verbosity");
+        structured_flags.push("-lv");
+    } else if help_supports_flag(help, "--log-verbosity")
+        || help_supports_flag(help, "-lv")
+    {
+        // Level 4 is the minimum that reports per-device model buffer sizes and
+        // layer offloading, which the RAM-spill warning needs. Level 5 floods
+        // the log with per-tensor debug output.
+        args.extend(["--log-verbosity".into(), "4".into()]);
         structured_flags.push("--log-verbosity");
         structured_flags.push("-lv");
     }
@@ -2178,19 +2187,6 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
         }
     }
 
-    // Refuse externally-bound 0.0.0.0 launch without an effective API key configured (D2)
-    if cfg.advanced_settings.host.trim() == "0.0.0.0"
-        && server_api_key(state, &def)
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-    {
-        bail!(
-            "refusing to start server bound to 0.0.0.0 without an API key configured; configure a global API key in Settings or a per-server key"
-        );
-    }
-
     // Verify port is free before starting server process (C7)
     if TcpListener::bind(("127.0.0.1", def.port)).is_err() {
         bail!("port {} is already in use by another process", def.port);
@@ -2260,9 +2256,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             }
         })
         .collect();
-    let log_path = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("local-llm-panel")
+    let log_path = crate::state::config_dir()
         .join("logs")
         .join(format!("{log_id}.log"));
     let _ = std::fs::create_dir_all(log_path.parent().unwrap_or_else(|| Path::new(".")));
@@ -2275,8 +2269,28 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             use std::io::Write;
             let _ = writeln!(file, "{line}");
         }
-        if let Some(ls) = state_log.servers.lock().unwrap().get_mut(&id_log) {
-            ls.log_ring.lock().unwrap().push(line.clone());
+        let notice = {
+            let mut servers = state_log.servers.lock().unwrap();
+            if let Some(ls) = servers.get_mut(&id_log) {
+                ls.log_ring.lock().unwrap().push(line.clone());
+                ls.runtime_memory.lock().unwrap().observe_log_line(&line)
+            } else {
+                None
+            }
+        };
+        if let Some(notice_line) = notice {
+            if let Some(ls) = state_log.servers.lock().unwrap().get_mut(&id_log) {
+                ls.log_ring.lock().unwrap().push(notice_line.clone());
+            }
+            if let Some(app) = &app_ev {
+                let _ = app.emit(
+                    "server-log",
+                    ServerLogEvent {
+                        id: id_log.clone(),
+                        line: notice_line,
+                    },
+                );
+            }
         }
         if let Some(app) = &app_ev {
             let _ = app.emit(
@@ -2411,10 +2425,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
             let mut key_file_path_str: Option<String> = None;
             if let Some(ref key) = effective_key {
                 if help_supports_flag(&help, "--api-key-file") {
-                    let run_dir = dirs::data_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                        .join(crate::state::CONFIG_DIR_NAME)
-                        .join("run");
+                    let run_dir = crate::state::config_dir().join("run");
                     let _ = std::fs::create_dir_all(&run_dir);
                     let safe_id: String = def
                         .id
@@ -2490,6 +2501,14 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 );
             }
         }
+        let mut rm = crate::runtime_memory::RuntimeMemoryReport::new(
+            &def.id,
+            &def.name,
+            &def.backend,
+        );
+        if def.backend == "llamacpp" && def.n_gpu_layers == Some(0) {
+            rm.cpu_only_requested = true;
+        }
         servers.insert(
             id.to_string(),
             LiveServer {
@@ -2501,6 +2520,7 @@ pub fn start_server(state: &Arc<AppState>, app: Option<&tauri::AppHandle>, id: &
                 wsl_pid,
                 log_ring: std::sync::Mutex::new(log_ring),
                 last_metrics: None,
+                runtime_memory: std::sync::Arc::new(std::sync::Mutex::new(rm)),
                 stopping: false,
                 crash_retry_count: existing_retry,
             },
@@ -3803,7 +3823,21 @@ pub fn running_ram_weight_gb(
         0.0
     };
 
-    explicit_ram + capacity_spill
+    let mut runtime_ram_gb = 0.0;
+    for ls in servers.values() {
+        if ls.status != ServerStatus::Running {
+            continue;
+        }
+        let rm = ls.runtime_memory.lock().unwrap();
+        if rm.has_ram_spill() {
+            if let Some(mb) = rm.host_model_mb {
+                runtime_ram_gb += mb / 1024.0;
+            }
+        }
+    }
+
+    let static_ram = explicit_ram + capacity_spill;
+    static_ram.max(runtime_ram_gb)
 }
 
 pub fn apply_vllm_auth(
@@ -4404,8 +4438,24 @@ pub fn spawn_wsl_idle_reaper(app: AppHandle) {
             active_wsl_execs: wsl::active_wsl_execs(),
         };
         if should_terminate_wsl(&input) {
-            let _ = wsl::terminate_distro(&distro);
+            shutdown_wsl_quietly(&distro);
         }
+    }
+}
+
+/// Stop the app's WSL distro and, when it was the only one running, force the
+/// utility VM down so `vmmemWSL` actually releases its memory. Other distros
+/// (Docker Desktop, the user's own Ubuntu) are never killed.
+pub fn shutdown_wsl_quietly(distro: &str) {
+    let distro = distro.trim();
+    if distro.starts_with("__test_") {
+        return;
+    }
+    if !distro.is_empty() && wsl::is_running(distro) {
+        let _ = wsl::terminate_distro(distro);
+    }
+    if !wsl::other_distro_running_now(distro) {
+        let _ = wsl::shutdown_wsl_vm();
     }
 }
 
@@ -4449,12 +4499,16 @@ pub fn reconcile_orphaned_servers(state: &Arc<AppState>) -> Vec<ReconciledServer
     let mut reconciled = Vec::new();
     let cfg = state.config();
     let distro = state.resolve_distro();
+    // A stopped distro cannot hold orphaned processes: terminating it already
+    // killed everything inside. Probing anyway would cold-boot WSL at app
+    // launch and burn a gigabyte of RAM for a no-op check.
+    let wsl_up = wsl::is_running(&distro);
 
     for def in &cfg.servers {
         release_vram(&def.id);
         remove_server_health(&def.id);
 
-        if def.backend == "vllm" || def.backend == "Vllm" {
+        if wsl_up && (def.backend == "vllm" || def.backend == "Vllm") {
             let pid_script = format!(
                 r#"{}\nvenv_dir=$(__llm_panel_expand_tilde {})\nrun_id={}\ncat "$venv_dir/../run/$run_id.pid" 2>/dev/null || true"#,
                 wsl::WSL_TILDE_EXPANSION_SNIPPET,
@@ -4634,6 +4688,21 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_skips_wsl_probe_when_distro_is_stopped() {
+        let state = Arc::new(AppState::new());
+        let mut server_def = def("org/model", "instruct", 8126, "fp16", None);
+        server_def.backend = "vllm".into();
+        {
+            let mut cfg = state.config.lock().unwrap();
+            cfg.distro = "__test_reconcile_stopped".into();
+            cfg.servers.push(server_def);
+        }
+        // A stopped distro cannot hold orphaned processes; reconciliation must
+        // not boot WSL (and burn RAM) at launch just to prove that.
+        assert!(reconcile_orphaned_servers(&state).is_empty());
+    }
+
+    #[test]
     fn exit_stop_script_quotes_paths_and_escalates() {
         let script = exit_stop_script("~/llm-lp/.venv", "s1");
         assert!(script.contains("venv_dir=$(__llm_panel_expand_tilde '~/llm-lp/.venv')"));
@@ -4679,6 +4748,9 @@ mod tests {
                 wsl_pid: None,
                 log_ring: std::sync::Mutex::new(VecDequeLog::new()),
                 last_metrics: None,
+                runtime_memory: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::runtime_memory::RuntimeMemoryReport::default(),
+                )),
                 stopping: false,
                 crash_retry_count: 0,
             },
@@ -4708,6 +4780,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn stop_server_stops_native_child_quickly() {
+        let _guard = crate::state::tests::TestConfigGuard::new("llp-test-stop-native");
+
         let state = Arc::new(AppState::new());
         let mut server_def = def("org/model", "instruct", 8124, "fp16", None);
         server_def.id = "s_native".into();
@@ -4737,6 +4811,9 @@ mod tests {
                 wsl_pid: None,
                 log_ring: std::sync::Mutex::new(VecDequeLog::new()),
                 last_metrics: None,
+                runtime_memory: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::runtime_memory::RuntimeMemoryReport::default(),
+                )),
                 stopping: false,
                 crash_retry_count: 0,
             },
@@ -5937,7 +6014,13 @@ vllm:num_preemptions_total{model_name="my model"} 5
 
     #[test]
     fn test_llamacpp_speculative_args_draft_mtp() {
-        let mut d = def("Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf", "instruct", 8000, "GGUF", None);
+        let mut d = def(
+            "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+            "instruct",
+            8000,
+            "GGUF",
+            None,
+        );
         d.backend = "llamacpp".into();
         d.speculative_enabled = true;
         d.speculative_type = Some("draft-mtp".into());
@@ -6125,7 +6208,7 @@ vllm:num_preemptions_total{model_name="my model"} 5
     }
 
     #[test]
-    fn test_start_server_refuses_0_0_0_0_without_api_key() {
+    fn test_start_server_allows_0_0_0_0_without_api_key() {
         let state = Arc::new(AppState::new());
         let mut server = def("model", "instruct", 8080, "fp16", None);
         server.id = "s-lan-test".into();
@@ -6134,10 +6217,12 @@ vllm:num_preemptions_total{model_name="my model"} 5
         state.config.lock().unwrap().servers.push(server);
 
         let res = start_server(&state, None, "s-lan-test");
-        assert!(res.is_err());
-        let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg
-            .contains("refusing to start server bound to 0.0.0.0 without an API key configured"));
+        if let Err(err) = res {
+            assert!(
+                !err.to_string().contains("without an API key configured"),
+                "start_server unexpectedly required an API key: {err}"
+            );
+        }
     }
 
     #[test]
@@ -6208,6 +6293,9 @@ vllm:num_preemptions_total{model_name="my model"} 5
                     wsl_pid: None,
                     log_ring: std::sync::Mutex::new(VecDequeLog::new()),
                     last_metrics: None,
+                    runtime_memory: std::sync::Arc::new(std::sync::Mutex::new(
+                        crate::runtime_memory::RuntimeMemoryReport::default(),
+                    )),
                     stopping: false,
                     crash_retry_count: 0,
                 },

@@ -245,6 +245,8 @@ export default function Settings() {
   const [manualMode, setManualMode] = useState(false);
   const [saved, setSaved] = useState(false);
   const [memSaved, setMemSaved] = useState(false);
+  const [wslBusy, setWslBusy] = useState(false);
+  const [wslActionMsg, setWslActionMsg] = useState<string | null>(null);
   const [distros, setDistros] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [showLanModal, setShowLanModal] = useState(false);
@@ -661,6 +663,23 @@ export default function Settings() {
     });
   };
 
+  const shutdownWslNow = async () => {
+    setWslBusy(true);
+    setWslActionMsg(null);
+    try {
+      const stopped = await api.wslShutdownNow();
+      setWslActionMsg(
+        stopped
+          ? "WSL is stopped and its memory has been reclaimed."
+          : "WSL is still running — a job may still be finishing.",
+      );
+    } catch (e) {
+      setWslActionMsg(String(e));
+    } finally {
+      setWslBusy(false);
+    }
+  };
+
   const renderApplianceCard = () => (
     <InsetGroup
       header={
@@ -732,6 +751,24 @@ export default function Settings() {
             checked={s.auto_shutdown_wsl !== false}
             onChange={(checked) => setS({ ...s, auto_shutdown_wsl: checked })}
           />
+        }
+      />
+      <SettingsRow
+        icon={<SquircleIcon icon={<PowerIcon className="h-4 w-4" />} color="red" />}
+        title={
+          <div className="flex items-center gap-1.5">
+            Shut Down WSL Now
+            <HelpBubble text="Terminates the app's WSL distro immediately and releases the WSL memory (vmmemWSL). Your other distros, such as Docker Desktop, are left running." />
+          </div>
+        }
+        subtitle={
+          wslActionMsg ??
+          "Stops WSL immediately instead of waiting for the idle timeout. Refused while a server, download, or provisioning job is active."
+        }
+        right={
+          <Button variant="ghost" disabled={wslBusy} onClick={shutdownWslNow}>
+            {wslBusy ? "Stopping…" : "Shut down"}
+          </Button>
         }
       />
       <div className="flex justify-end p-3.5 bg-surface-2/40">
@@ -859,8 +896,8 @@ export default function Settings() {
               Binding vLLM to <code className="bg-black/40 px-1 py-0.5 rounded text-amber-200">0.0.0.0</code> allows any computer, phone, or device on your local Wi-Fi / subnet to query your GPU model endpoints without Windows credentials.
             </p>
             {!(s.api_key_configured || adv.api_key?.trim()) ? (
-              <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300 leading-relaxed">
-                <strong>API Key Required:</strong> An API key must be configured and saved before enabling 0.0.0.0 LAN binding. Starting an externally-bound server without an API key is refused for security.
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200/90 leading-relaxed">
+                <strong>Optional API Key:</strong> No API key is configured. Anyone on your local network will be able to query your endpoints without authentication. You can set an optional API key anytime in Network Settings to restrict access.
               </div>
             ) : (
               <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200/90 leading-relaxed">
@@ -881,16 +918,11 @@ export default function Settings() {
               </Button>
               <button
                 type="button"
-                disabled={!(s.api_key_configured || adv.api_key?.trim())}
                 onClick={() => {
                   updateAdv({ host: "0.0.0.0" });
                   setShowLanModal(false);
                 }}
-                className={`rounded-lg px-4 py-2 text-xs font-semibold text-white transition-all active:scale-[0.98] ${
-                  s.api_key_configured || adv.api_key?.trim()
-                    ? "bg-amber-600 hover:bg-amber-500 cursor-pointer shadow-sm"
-                    : "bg-surface-3 text-slate-500 cursor-not-allowed opacity-50"
-                }`}
+                className="rounded-lg px-4 py-2 text-xs font-semibold text-white transition-all active:scale-[0.98] bg-amber-600 hover:bg-amber-500 cursor-pointer shadow-sm"
               >
                 I Understand the Risks, Enable LAN
               </button>
@@ -1596,8 +1628,8 @@ export default function Settings() {
                     help="Key gating server and gateway endpoints. Applies to both vLLM and llama.cpp backends unless overridden per-server. Encrypted at rest with Windows DPAPI (CryptProtectData) and never stored in plaintext."
                     hint={
                       s.api_key_configured
-                        ? "Stored securely using Windows DPAPI (CryptProtectData). Leave blank to keep it; enter or generate a replacement to rotate it."
-                        : "Required for the local gateway and external LAN access (0.0.0.0). Click 'Auto-generate Key' to create a random key."
+                        ? "Stored securely using Windows DPAPI (CryptProtectData). Leave blank to keep it; enter or generate a replacement to rotate it, or clear it to remove."
+                        : "Optional for all local features, including the gateway and LAN access. Click 'Auto-generate Key' to create a random key if you want authentication."
                     }
                   >
                     <div className="space-y-2">
@@ -1707,8 +1739,8 @@ export default function Settings() {
                   )}
 
                   {adv.gateway_enabled && !s.api_key_configured && !adv.api_key && (
-                    <div className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <span>The gateway is enabled but has no API key. Set one above before using client routes; unauthenticated /v1 access is denied.</span>
+                    <div className="mt-3 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <span>The gateway is running without an API key (open local access). Client requests do not require authentication. You can optionally configure an API key above to restrict access.</span>
                       <Button
                         variant="subtle"
                         className="shrink-0 text-xs"

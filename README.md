@@ -168,7 +168,7 @@ The panel includes a high-performance reverse proxy that presents a standard Ope
 
 By default, the gateway and all inference servers bind strictly to `127.0.0.1` (localhost). Exposing services to your local area network (`0.0.0.0`) is an explicit administrative opt-in configured under **Settings → Advanced Mode → Network**:
 
-1. **Mandatory Gateway API Key:** A non-empty Gateway API Key must be set before binding to `0.0.0.0`.
+1. **Optional Gateway API Key:** An optional Gateway API Key can be set under Network Settings to protect your endpoints from unauthorized access.
 2. **Windows Defender Firewall Rule:** Windows will block incoming network requests unless an inbound rule is created:
    ```powershell
    New-NetFirewallRule -DisplayName "Local LLM Panel Gateway" -Direction Inbound -LocalPort 11434 -Protocol TCP -Action Allow

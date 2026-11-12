@@ -67,18 +67,35 @@ export default function Library() {
   const [importPath, setImportPath] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [wslRunning, setWslRunning] = useState(true);
+  const [startingWsl, setStartingWsl] = useState(false);
 
   const refresh = useCallback(() => {
     Promise.all([
       api.libraryList().catch(() => [] as LibraryEntry[]),
       api.libraryDiskUsage().catch(() => 0),
+      api.wslStatus().catch(() => true),
     ])
-      .then(([list, mb]) => {
+      .then(([list, mb, wslUp]) => {
         setEntries(list);
+        setWslRunning(wslUp);
         setDiskUsageMb(mb || list.reduce((acc, e) => acc + (e.size_mb || 0), 0));
       })
       .finally(() => setLoading(false));
   }, []);
+
+  const startWsl = async () => {
+    setStartingWsl(true);
+    setErrorMsg(null);
+    try {
+      await api.wslStart();
+      refresh();
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setStartingWsl(false);
+    }
+  };
 
   useEffect(() => {
     refresh();
@@ -196,6 +213,18 @@ export default function Library() {
           </Button>
         </div>
       </div>
+
+      {!wslRunning && (
+        <div className="flex flex-col gap-3 rounded-xl border border-edge bg-surface-2 p-3.5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-xs text-slate-300 leading-relaxed">
+            <span className="font-semibold text-slate-100">WSL is stopped</span> to free memory. Showing the last known WSL inventory — native GGUF models stay available. Start it only when you need the Hugging Face cache.
+          </div>
+          <Button variant="primary" disabled={startingWsl} onClick={startWsl}>
+            {startingWsl ? <Spinner /> : <RefreshIcon />}
+            <span>Start WSL &amp; refresh</span>
+          </Button>
+        </div>
+      )}
 
       {/* Disk Usage Overview Card */}
       <Card className="p-5 border-edge/80 bg-surface-2 shadow-sm">

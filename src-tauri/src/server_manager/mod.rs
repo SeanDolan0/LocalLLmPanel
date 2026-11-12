@@ -386,7 +386,9 @@ impl ServerManager {
 
     /// List all servers formatted as backward-compatible ServerListRow for Tauri commands.
     pub fn list_server_rows(&self, state: &Arc<AppState>) -> Vec<crate::commands::ServerListRow> {
-        crate::server::list_servers(state)
+        let base_servers = crate::server::list_servers(state);
+        let servers = state.servers.lock().unwrap();
+        base_servers
             .into_iter()
             .map(|(def, status, error, metrics)| {
                 let (process_alive, http_healthy) = match crate::server::get_server_health(&def.id)
@@ -394,11 +396,22 @@ impl ServerManager {
                     Some(h) => (Some(h.process_alive), Some(h.http_healthy)),
                     None => (None, None),
                 };
+                let runtime_memory = servers.get(&def.id).map(|ls| {
+                    let mut rm = ls.runtime_memory.lock().unwrap().clone();
+                    #[cfg(windows)]
+                    if let Some(ref child) = ls.native_child {
+                        if let Some(ram) = crate::runtime_memory::process_working_set_mb(child.pid()) {
+                            rm.process_ram_mb = Some(ram);
+                        }
+                    }
+                    rm
+                });
                 crate::commands::ServerListRow {
                     def,
                     status: status.label().to_string(),
                     error,
                     metrics,
+                    runtime_memory,
                     process_alive,
                     http_healthy,
                 }

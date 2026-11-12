@@ -59,7 +59,7 @@ You will be prompted for an optional password.
         "https://github.com/SeanDolan0/LocalLLmPanel/releases/latest/download/latest.json"
       ],
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     }
   }

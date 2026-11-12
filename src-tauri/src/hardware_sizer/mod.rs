@@ -36,10 +36,10 @@ impl HardwareProbe for SystemHardwareProbe {
                 (None, 0)
             };
 
-        // Probe WSL RAM capacity if available
-        let wsl_ram_mb = crate::wsl::detect_wsl_memory("Ubuntu")
-            .or_else(|| crate::wsl::detect_wsl_memory("Debian"))
-            .map(|(total, _)| total);
+        // Probe WSL RAM capacity if available. Passive: never boots a stopped
+        // distro just to read telemetry.
+        let distro = crate::wsl::telemetry_distro().unwrap_or_default();
+        let wsl_ram_mb = crate::wsl::detect_wsl_memory(&distro).map(|(total, _)| total);
 
         StaticHardwareTopology {
             cpu_name: specs.cpu_name,
@@ -57,20 +57,21 @@ impl HardwareProbe for SystemHardwareProbe {
         let specs = llmfit_core::hardware::SystemSpecs::detect();
         let host_avail_mb = (specs.available_ram_gb * 1024.0).round() as u64;
 
-        // Query GPU telemetry (try windows native nvidia-smi first, then WSL)
+        let distro = crate::wsl::telemetry_distro().unwrap_or_default();
+
+        // Query GPU telemetry (try windows native nvidia-smi first, then WSL).
+        // The WSL probe is passive and returns nothing when the distro is down.
         let (vram_free_mb, gpu_util) =
             if let Some(gpu) = crate::llamacpp_install::windows_gpu_snapshot() {
                 (gpu.vram_free_mb, Some(gpu.util_percent as f32))
-            } else if let Some(gpu) = crate::wsl::gpu_snapshot("Ubuntu") {
+            } else if let Some(gpu) = crate::wsl::gpu_snapshot(&distro) {
                 (gpu.vram_free_mb, Some(gpu.util_percent as f32))
             } else {
                 (0, None)
             };
 
-        // Query WSL memory
-        let wsl_avail_mb = crate::wsl::detect_wsl_memory("Ubuntu")
-            .or_else(|| crate::wsl::detect_wsl_memory("Debian"))
-            .map(|(_, avail)| avail);
+        // Query WSL memory (passive; falls back to host estimation when down)
+        let wsl_avail_mb = crate::wsl::detect_wsl_memory(&distro).map(|(_, avail)| avail);
 
         DynamicTelemetry {
             host_ram_available_mb: host_avail_mb,
@@ -191,6 +192,46 @@ impl HardwareSizer {
             .collect();
 
         let mem_settings = state.config.lock().unwrap().memory_settings.clone();
-        self.allocation_report(&running, &mem_settings)
+        let mut report = self.allocation_report(&running, &mem_settings);
+
+        let mut runtime_spill_gb = 0.0;
+        let mut spill_details = Vec::new();
+        for ls in servers.values() {
+            if ls.status != crate::state::ServerStatus::Running {
+                continue;
+            }
+            let rm = ls.runtime_memory.lock().unwrap();
+            if rm.has_ram_spill() {
+                if let Some(mb) = rm.host_model_mb {
+                    let gb = mb / 1024.0;
+                    runtime_spill_gb += gb;
+                    if let (Some(on_gpu), Some(total)) = (rm.layers_on_gpu, rm.layers_total) {
+                        spill_details.push(format!("{}: {}/{} layers on GPU (~{:.1} GB in RAM)", ls.def.name, on_gpu, total, gb));
+                    } else {
+                        spill_details.push(format!("{}: ~{:.1} GB in RAM", ls.def.name, gb));
+                    }
+                }
+            }
+        }
+
+        if runtime_spill_gb > report.ram_spill_gb {
+            report.ram_spill_gb = runtime_spill_gb;
+        }
+
+        if report.ram_spill_gb > 0.05 {
+            if !spill_details.is_empty() {
+                report.warning_message = Some(format!(
+                    "Model weights loaded into system RAM: {}.",
+                    spill_details.join(", ")
+                ));
+            } else {
+                report.warning_message = Some(format!(
+                    "{:.1} GB of active model weights are currently loaded into system RAM.",
+                    report.ram_spill_gb
+                ));
+            }
+        }
+
+        report
     }
 }

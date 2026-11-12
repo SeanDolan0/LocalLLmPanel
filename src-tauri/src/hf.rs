@@ -610,7 +610,9 @@ fn extract_quant_and_mtp(stem: &str) -> Option<(String, bool)> {
     if lower_stem.ends_with("-mtp") || lower_stem.ends_with("_mtp") {
         let without_mtp = &stem[..stem.len() - 4];
         let clean_without_mtp = GGUF_SHARD_RE.replace(without_mtp, "");
-        if let Some(base_quant) = capture(&clean_without_mtp).or_else(|| capture(&clean_without_mtp.to_ascii_uppercase())) {
+        if let Some(base_quant) =
+            capture(&clean_without_mtp).or_else(|| capture(&clean_without_mtp.to_ascii_uppercase()))
+        {
             return Some((base_quant, true));
         }
     }
@@ -620,12 +622,16 @@ fn extract_quant_and_mtp(stem: &str) -> Option<(String, bool)> {
     let clean_lower = clean_stem.to_ascii_lowercase();
     if clean_lower.ends_with("-mtp") || clean_lower.ends_with("_mtp") {
         let without_mtp = &clean_stem[..clean_stem.len() - 4];
-        if let Some(base_quant) = capture(without_mtp).or_else(|| capture(&without_mtp.to_ascii_uppercase())) {
+        if let Some(base_quant) =
+            capture(without_mtp).or_else(|| capture(&without_mtp.to_ascii_uppercase()))
+        {
             return Some((base_quant, true));
         }
     }
 
-    if let Some(base_quant) = capture(&clean_stem).or_else(|| capture(&clean_stem.to_ascii_uppercase())) {
+    if let Some(base_quant) =
+        capture(&clean_stem).or_else(|| capture(&clean_stem.to_ascii_uppercase()))
+    {
         let is_mtp = lower_stem.contains("-mtp-") || lower_stem.contains("_mtp_");
         return Some((base_quant, is_mtp));
     }

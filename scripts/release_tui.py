@@ -560,7 +560,11 @@ class PipelineScreen(Screen):
             self.write_log_from_worker(f"Unhandled exception: {e}", "bold red")
 
     def run_command(
-        self, args: list[str], cwd: Path | None = None, timeout: int = 300
+        self,
+        args: list[str],
+        cwd: Path | None = None,
+        timeout: int = 300,
+        extra_env: dict | None = None,
     ) -> dict:
         cwd = cwd or REPO_ROOT
         try:
@@ -569,6 +573,8 @@ class PipelineScreen(Screen):
             env = os.environ.copy()
             if LLVM_BIN:
                 env["PATH"] = f"{LLVM_BIN}{os.pathsep}{env.get('PATH', '')}"
+            if extra_env:
+                env.update(extra_env)
 
             result = subprocess.run(
                 args,
@@ -629,7 +635,14 @@ class PipelineScreen(Screen):
         self.run_command(["npm", "run", "check"])
         if not self.config.skip_tests:
             self.write_log("Running Rust unit test suites...")
-            self.run_command(["cargo", "test"], REPO_ROOT / "src-tauri")
+            import tempfile
+
+            with tempfile.TemporaryDirectory(prefix="llm_panel_tui_test_") as tmp_dir:
+                self.run_command(
+                    ["cargo", "test"],
+                    REPO_ROOT / "src-tauri",
+                    extra_env={"LLM_TEST_CONFIG_DIR": tmp_dir},
+                )
         return {"detail": "Typecheck & test suite passed"}
 
     def run_build(self, version: str, build_type: str) -> dict:

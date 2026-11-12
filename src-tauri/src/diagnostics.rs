@@ -1419,6 +1419,9 @@ mod tests {
                 wsl_pid: None,
                 log_ring: std::sync::Mutex::new(crate::state::VecDequeLog::new()),
                 last_metrics: None,
+                runtime_memory: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::runtime_memory::RuntimeMemoryReport::default(),
+                )),
                 stopping: false,
                 crash_retry_count: 0,
             };

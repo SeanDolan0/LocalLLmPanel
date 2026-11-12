@@ -558,29 +558,13 @@ fn download(url: &str, path: &Path, progress: impl Fn(u64, Option<u64>)) -> Resu
 
 fn expand_archive(zip: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir_all(destination)?;
-    let output = hidden_command("powershell")
-        .env("LOCAL_LLM_PANEL_ARCHIVE", zip)
-        .env("LOCAL_LLM_PANEL_DESTINATION", destination)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Expand-Archive -LiteralPath $env:LOCAL_LLM_PANEL_ARCHIVE -DestinationPath $env:LOCAL_LLM_PANEL_DESTINATION -Force",
-        ])
-        .output()
-        .context("launching PowerShell archive extractor")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!(
-            "Expand-Archive failed for {}{}",
-            zip.display(),
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            }
-        ));
-    }
+    let file = std::fs::File::open(zip)
+        .with_context(|| format!("opening archive {}", zip.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("reading zip archive {}", zip.display()))?;
+    archive
+        .extract(destination)
+        .with_context(|| format!("extracting zip archive to {}", destination.display()))?;
     Ok(())
 }
 
