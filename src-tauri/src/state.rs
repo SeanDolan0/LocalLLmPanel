@@ -918,9 +918,15 @@ impl ServerDef {
                 .as_deref()
                 .map(|t| t.contains("ngram"))
                 .unwrap_or(false);
+            let is_mtp = self
+                .speculative_type
+                .as_deref()
+                .map(|t| t.to_ascii_lowercase().contains("mtp"))
+                .unwrap_or(false);
             if self.speculative_model.is_none()
                 && self.speculative_model_path.is_none()
                 && !is_ngram
+                && !is_mtp
             {
                 self.speculative_enabled = false;
                 self.speculative_num_tokens = None;
@@ -3570,6 +3576,17 @@ mod tests {
         assert_eq!(def.speculative_draft_n_cpu_moe, Some(12));
         assert_eq!(def.speculative_draft_prio, Some(2));
         assert_eq!(def.speculative_draft_poll, Some(1));
+
+        // Llamacpp with MTP self-drafting (no external draft model file) preserves speculative_enabled
+        def.speculative_model = None;
+        def.speculative_model_path = None;
+        def.speculative_type = Some("draft-mtp".into());
+        def.speculative_num_tokens = Some(2);
+        def.speculative_enabled = true;
+        def.normalize_for_backend().unwrap();
+        assert!(def.speculative_enabled);
+        assert_eq!(def.speculative_num_tokens, Some(2));
+        assert_eq!(def.speculative_type.as_deref(), Some("draft-mtp"));
 
         // When disabled, all speculative fields are cleared
         def.speculative_enabled = false;
