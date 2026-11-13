@@ -196,11 +196,27 @@ impl HardwareSizer {
 
         let mut runtime_spill_gb = 0.0;
         let mut spill_details = Vec::new();
+        let mut running_count = 0;
+        let mut fully_on_gpu_count = 0;
+
         for ls in servers.values() {
             if ls.status != crate::state::ServerStatus::Running {
                 continue;
             }
+            running_count += 1;
             let rm = ls.runtime_memory.lock().unwrap();
+            let is_cpu_only = rm.cpu_only_requested
+                || ls.def.n_gpu_layers == Some(0)
+                || ls.def.cpu_offload_gb.map(|g| g > 0).unwrap_or(false);
+
+            if rm.placement_known {
+                if let (Some(on_gpu), Some(total)) = (rm.layers_on_gpu, rm.layers_total) {
+                    if total > 0 && on_gpu >= total && !is_cpu_only {
+                        fully_on_gpu_count += 1;
+                    }
+                }
+            }
+
             if rm.has_ram_spill() {
                 if let Some(mb) = rm.host_model_mb {
                     let gb = mb / 1024.0;
@@ -214,21 +230,28 @@ impl HardwareSizer {
             }
         }
 
-        if runtime_spill_gb > report.ram_spill_gb {
-            report.ram_spill_gb = runtime_spill_gb;
-        }
+        let all_known_and_fully_on_gpu = running_count > 0 && running_count == fully_on_gpu_count;
 
-        if report.ram_spill_gb > 0.05 {
-            if !spill_details.is_empty() {
-                report.warning_message = Some(format!(
-                    "Model weights loaded into system RAM: {}.",
-                    spill_details.join(", ")
-                ));
-            } else {
-                report.warning_message = Some(format!(
-                    "{:.1} GB of active model weights are currently loaded into system RAM.",
-                    report.ram_spill_gb
-                ));
+        if all_known_and_fully_on_gpu {
+            report.ram_spill_gb = 0.0;
+            report.warning_message = None;
+        } else {
+            if runtime_spill_gb > report.ram_spill_gb {
+                report.ram_spill_gb = runtime_spill_gb;
+            }
+
+            if report.ram_spill_gb > 0.05 {
+                if !spill_details.is_empty() {
+                    report.warning_message = Some(format!(
+                        "Model weights loaded into system RAM: {}.",
+                        spill_details.join(", ")
+                    ));
+                } else {
+                    report.warning_message = Some(format!(
+                        "{:.1} GB of active model weights are currently loaded into system RAM.",
+                        report.ram_spill_gb
+                    ));
+                }
             }
         }
 

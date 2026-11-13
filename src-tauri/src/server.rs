@@ -3798,11 +3798,27 @@ pub fn running_ram_weight_gb(
     let servers = state.servers.lock().unwrap();
     let mut explicit_ram = 0.0;
     let mut total_gpu_demanded = 0.0;
+    let mut running_count = 0;
+    let mut fully_on_gpu_count = 0;
 
     for ls in servers.values() {
         if ls.status != ServerStatus::Running {
             continue;
         }
+        running_count += 1;
+        let rm = ls.runtime_memory.lock().unwrap();
+        let is_cpu_only = rm.cpu_only_requested
+            || ls.def.n_gpu_layers == Some(0)
+            || ls.def.cpu_offload_gb.map(|g| g > 0).unwrap_or(false);
+
+        if rm.placement_known {
+            if let (Some(on_gpu), Some(total)) = (rm.layers_on_gpu, rm.layers_total) {
+                if total > 0 && on_gpu >= total && !is_cpu_only {
+                    fully_on_gpu_count += 1;
+                }
+            }
+        }
+
         let (main_w, spec_w) = server_weights_gb(&ls.def);
         let server_total = main_w + spec_w;
 
@@ -3816,7 +3832,11 @@ pub fn running_ram_weight_gb(
         }
     }
 
-    let capacity_spill = if let Some(total_mb) = gpu_total_mb.filter(|&mb| mb > 0) {
+    let all_known_and_fully_on_gpu = running_count > 0 && running_count == fully_on_gpu_count;
+
+    let capacity_spill = if all_known_and_fully_on_gpu {
+        0.0
+    } else if let Some(total_mb) = gpu_total_mb.filter(|&mb| mb > 0) {
         let usable_gpu_gb = ((total_mb as f64 - vram_overhead_mb).max(0.0)) / 1024.0;
         (total_gpu_demanded - usable_gpu_gb).max(0.0)
     } else {

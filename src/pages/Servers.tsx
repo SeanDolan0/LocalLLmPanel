@@ -361,7 +361,24 @@ export default function Servers() {
         const usableCapacityGb = Math.max(0, totalGb - overheadGb);
         const reqGpuWeightGb = Math.max(0, runningWeights.totalWeightGb - runningWeights.explicitOffloadGb);
         const capacitySpillGb = totalGb > 0 ? Math.max(0, reqGpuWeightGb - usableCapacityGb) : 0;
-        let loadedIntoRamGb = runningWeights.explicitOffloadGb + capacitySpillGb;
+
+        const runningRows = rows.filter((r) => r.status === "running");
+        const allRunningFullyOnGpu =
+          runningRows.length > 0 &&
+          runningRows.every((r) => {
+            const rm = r.runtime_memory;
+            if (!rm || !rm.placement_known) return false;
+            return (
+              rm.layers_on_gpu != null &&
+              rm.layers_total != null &&
+              rm.layers_total > 0 &&
+              rm.layers_on_gpu >= rm.layers_total &&
+              !rm.cpu_only_requested &&
+              !r.def.cpu_offload_gb
+            );
+          });
+
+        let loadedIntoRamGb = runningWeights.explicitOffloadGb + (allRunningFullyOnGpu ? 0 : capacitySpillGb);
 
         // Check real runtime placement telemetry from active servers
         let runtimeHostModelGb = 0;
@@ -379,9 +396,16 @@ export default function Servers() {
         for (const r of rows) {
           if (r.status === "running" && r.runtime_memory) {
             const rm = r.runtime_memory;
+            const allLayersOnGpu =
+              rm.layers_on_gpu != null &&
+              rm.layers_total != null &&
+              rm.layers_total > 0 &&
+              rm.layers_on_gpu >= rm.layers_total;
             const isSpill =
-              (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total && !rm.cpu_only_requested) ||
-              (rm.host_model_mb != null && rm.host_model_mb >= 64 && !rm.cpu_only_requested);
+              !allLayersOnGpu &&
+              !rm.cpu_only_requested &&
+              ((rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total) ||
+               (rm.layers_on_gpu == null && rm.host_model_mb != null && rm.host_model_mb >= 64));
 
             if (isSpill) {
               const hostModelGb = (rm.host_model_mb ?? 0) / 1024;
@@ -614,9 +638,16 @@ export default function Servers() {
                     )}
                     {r.status === "running" && r.runtime_memory && (() => {
                       const rm = r.runtime_memory;
+                      const allLayersOnGpu =
+                        rm.layers_on_gpu != null &&
+                        rm.layers_total != null &&
+                        rm.layers_total > 0 &&
+                        rm.layers_on_gpu >= rm.layers_total;
                       const isSpill =
-                        (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total && !rm.cpu_only_requested) ||
-                        (rm.host_model_mb != null && rm.host_model_mb >= 64 && !rm.cpu_only_requested);
+                        !allLayersOnGpu &&
+                        !rm.cpu_only_requested &&
+                        ((rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total) ||
+                         (rm.layers_on_gpu == null && rm.host_model_mb != null && rm.host_model_mb >= 64));
 
                       if (isSpill) {
                         const hostMb = rm.host_model_mb ?? 0;
@@ -632,13 +663,13 @@ export default function Servers() {
                             ⚠️ RAM spill: ~{hostStr} ({rm.layers_on_gpu ?? "?"}/{rm.layers_total ?? "?"} GPU)
                           </span>
                         );
-                      } else if (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu >= rm.layers_total) {
+                      } else if (allLayersOnGpu) {
                         return (
                           <span
                             className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 text-emerald-300 border border-emerald-800"
                             title={`100% offloaded to GPU (${rm.layers_on_gpu}/${rm.layers_total} layers)`}
                           >
-                            100% GPU
+                            ✓ 100% GPU ({rm.layers_on_gpu}/{rm.layers_total})
                           </span>
                         );
                       }
@@ -809,9 +840,16 @@ export default function Servers() {
         <div className="space-y-4">
           {selectedRow.status === "running" && selectedRow.runtime_memory && (selectedRow.runtime_memory.placement_known || selectedRow.runtime_memory.host_model_mb != null) && (() => {
             const rm = selectedRow.runtime_memory;
+            const allLayersOnGpu =
+              rm.layers_on_gpu != null &&
+              rm.layers_total != null &&
+              rm.layers_total > 0 &&
+              rm.layers_on_gpu >= rm.layers_total;
             const isSpill =
-              (rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total && !rm.cpu_only_requested) ||
-              (rm.host_model_mb != null && rm.host_model_mb >= 64 && !rm.cpu_only_requested);
+              !allLayersOnGpu &&
+              !rm.cpu_only_requested &&
+              ((rm.layers_on_gpu != null && rm.layers_total != null && rm.layers_on_gpu < rm.layers_total) ||
+               (rm.layers_on_gpu == null && rm.host_model_mb != null && rm.host_model_mb >= 64));
             const extraHost = (rm.host_kv_mb ?? 0) + (rm.host_compute_mb ?? 0);
 
             return (
@@ -825,7 +863,11 @@ export default function Servers() {
                           : "bg-emerald-950/70 text-emerald-300 border border-emerald-800"
                       }`}
                     >
-                      {isSpill ? "⚠️ Weights Loaded into System RAM" : "✓ 100% GPU Offload"}
+                      {isSpill
+                        ? "⚠️ Weights Loaded into System RAM"
+                        : allLayersOnGpu
+                        ? `✓ 100% GPU Offload (${rm.layers_on_gpu}/${rm.layers_total} layers)`
+                        : "✓ Optimal Placement"}
                     </span>
                   }
                 >
@@ -843,10 +885,17 @@ export default function Servers() {
                   </div>
 
                   <div className={`rounded-xl border p-3 ${isSpill ? "border-amber-700/60 bg-amber-950/20" : "border-edge/60 bg-surface-1"}`}>
-                    <div className={`text-[11px] ${isSpill ? "text-amber-300" : "text-slate-400"}`}>Model Weights in RAM</div>
-                    <div className={`text-base font-semibold mt-0.5 ${isSpill ? "text-amber-200" : "text-slate-100"}`}>
-                      {formatMemoryMb(rm.host_model_mb)}
+                    <div className={`text-[11px] ${isSpill ? "text-amber-300" : "text-slate-400"}`}>
+                      {allLayersOnGpu ? "Model Weights in RAM" : isSpill ? "Model Weights in RAM (Spilled)" : "Model Weights in RAM"}
                     </div>
+                    <div className={`text-base font-semibold mt-0.5 ${isSpill ? "text-amber-200" : allLayersOnGpu ? "text-emerald-400" : "text-slate-100"}`}>
+                      {allLayersOnGpu ? "0 MB" : formatMemoryMb(rm.host_model_mb)}
+                    </div>
+                    {allLayersOnGpu && (
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        all {rm.layers_on_gpu} layers on GPU{rm.host_model_mb ? ` (${formatMemoryMb(rm.host_model_mb)} host mmap)` : ""}
+                      </div>
+                    )}
                   </div>
 
                   <div className="rounded-xl border border-edge/60 bg-surface-1 p-3">
@@ -877,6 +926,18 @@ export default function Servers() {
                       rm.host_compute_mb ? `compute/recurrent: ${formatMemoryMb(rm.host_compute_mb)}` : null,
                     ].filter(Boolean).join(", ")}
                     ).
+                  </div>
+                )}
+
+                {allLayersOnGpu && (
+                  <div className="mt-3 rounded-lg border border-emerald-600/30 bg-emerald-950/20 p-3 text-xs text-emerald-200/90 space-y-1">
+                    <div className="font-semibold text-emerald-100 flex items-center gap-1.5">
+                      <span>✓</span> 100% GPU Offload Active
+                    </div>
+                    <p className="leading-relaxed text-[11px] text-slate-300">
+                      All {rm.layers_on_gpu} of {rm.layers_total} model layers are executing directly from GPU VRAM ({formatMemoryMb(rm.gpu_model_mb)} allocated).
+                      {rm.vram_free_mb ? ` VRAM remaining: ~${rm.vram_free_mb} MiB.` : ""}
+                    </p>
                   </div>
                 )}
 
